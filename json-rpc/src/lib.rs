@@ -10,28 +10,24 @@
 //!
 //! Module organization:
 //! ├── methods.rs        # contains all available JSON RPC method handlers
-//! ├── views.rs          # custom JSON serializers for Libra data types
 //! ├── runtime.rs        # implementation of JSON RPC protocol over HTTP
 //! ├── tests.rs          # tests
 
 #[macro_use]
 mod util;
 
-#[macro_use]
-extern crate prometheus;
-
-mod client;
 mod counters;
-pub mod errors;
 mod methods;
 mod runtime;
-pub mod views;
 
-pub use client::{JsonRpcAsyncClient, JsonRpcBatch};
-pub use runtime::bootstrap_from_config;
+pub use libra_json_rpc_types::{errors, views};
+
+pub use runtime::{bootstrap, bootstrap_from_config};
 
 #[cfg(any(feature = "fuzzing", test))]
 /// Fuzzer for JSON RPC service
 pub mod fuzzing;
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzzing"))]
 mod tests;
+#[cfg(any(test, feature = "fuzzing"))]
+pub use tests::test_bootstrap;

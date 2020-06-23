@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    expansion::ast::{Fields, SpecId},
+    expansion::ast::{Fields, SpecId, Value, Value_},
     parser::ast::{
         BinOp, Field, FunctionName, FunctionVisibility, Kind, Kind_, ModuleIdent, ResourceLoc,
-        StructName, UnaryOp, Value, Value_, Var,
+        StructName, UnaryOp, Var,
     },
     shared::{ast_debug::*, unique_map::UniqueMap, *},
 };
@@ -22,7 +22,18 @@ use std::{
 #[derive(Debug)]
 pub struct Program {
     pub modules: UniqueMap<ModuleIdent, ModuleDefinition>,
-    pub main: Option<(Address, FunctionName, Function)>,
+    pub scripts: BTreeMap<String, Script>,
+}
+
+//**************************************************************************************************
+// Scripts
+//**************************************************************************************************
+
+#[derive(Debug)]
+pub struct Script {
+    pub loc: Loc,
+    pub function_name: FunctionName,
+    pub function: Function,
 }
 
 //**************************************************************************************************
@@ -31,7 +42,6 @@ pub struct Program {
 
 #[derive(Debug)]
 pub struct ModuleDefinition {
-    pub uses: BTreeMap<ModuleIdent, Loc>,
     pub is_source_module: bool,
     /// `dependency_order` is the topological order/rank in the dependency graph.
     /// `dependency_order` is initialized at `0` and set in the uses pass
@@ -79,7 +89,7 @@ pub type FunctionBody = Spanned<FunctionBody_>;
 pub struct Function {
     pub visibility: FunctionVisibility,
     pub signature: FunctionSignature,
-    pub acquires: BTreeSet<StructName>,
+    pub acquires: BTreeMap<StructName, Loc>,
     pub body: FunctionBody,
 }
 
@@ -91,6 +101,8 @@ pub struct Function {
 pub enum BuiltinTypeName_ {
     // address
     Address,
+    // signer
+    Signer,
     // u8
     U8,
     // u64
@@ -116,10 +128,10 @@ pub type TypeName = Spanned<TypeName_>;
 #[derive(Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Copy, Clone)]
 pub struct TParamID(pub u64);
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TParam {
     pub id: TParamID,
-    pub debug: Name,
+    pub user_specified_name: Name,
     pub kind: Kind,
 }
 
@@ -164,18 +176,12 @@ pub type ExpDotted = Spanned<ExpDotted_>;
 #[allow(clippy::large_enum_variant)]
 pub enum BuiltinFunction_ {
     MoveToSender(Option<Type>),
+    MoveTo(Option<Type>),
     MoveFrom(Option<Type>),
     BorrowGlobal(bool, Option<Type>),
     Exists(Option<Type>),
     Freeze(Option<Type>),
-    /* TODO move these to a native module
-     * GetHeight,
-     * GetMaxGasPrice,
-     * GetMaxGasUnits,
-     * GetPublicKey,
-     * GetSender,
-     * GetSequenceNumber,
-     * EmitEvent, */
+    Assert,
 }
 pub type BuiltinFunction = Spanned<BuiltinFunction_>;
 
@@ -216,7 +222,9 @@ pub enum Exp_ {
 
     Pack(ModuleIdent, StructName, Option<Vec<Type>>, Fields<Exp>),
     ExpList(Vec<Exp>),
-    Unit,
+    Unit {
+        trailing: bool,
+    },
 
     DerefBorrow(ExpDotted),
     Borrow(bool, ExpDotted),
@@ -245,6 +253,7 @@ pub type SequenceItem = Spanned<SequenceItem_>;
 
 impl BuiltinTypeName_ {
     pub const ADDRESS: &'static str = "address";
+    pub const SIGNER: &'static str = "signer";
     pub const U_8: &'static str = "u8";
     pub const U_64: &'static str = "u64";
     pub const U_128: &'static str = "u128";
@@ -254,6 +263,7 @@ impl BuiltinTypeName_ {
     pub fn all_names() -> BTreeSet<&'static str> {
         let mut s = BTreeSet::new();
         s.insert(Self::ADDRESS);
+        s.insert(Self::SIGNER);
         s.insert(Self::U_8);
         s.insert(Self::U_64);
         s.insert(Self::U_128);
@@ -288,6 +298,7 @@ impl BuiltinTypeName_ {
         use BuiltinTypeName_ as BT;
         match name_str {
             BT::ADDRESS => Some(BT::Address),
+            BT::SIGNER => Some(BT::Signer),
             BT::U_8 => Some(BT::U8),
             BT::U_64 => Some(BT::U64),
             BT::U_128 => Some(BT::U128),
@@ -301,7 +312,7 @@ impl BuiltinTypeName_ {
         use BuiltinTypeName_::*;
         // Match here to make sure this function is fixed when collections are added
         match self {
-            Address | U8 | U64 | U128 | Bool => vec![],
+            Address | Signer | U8 | U64 | U128 | Bool => vec![],
             Vector => vec![Spanned::new(loc, Kind_::Unknown)],
         }
     }
@@ -321,20 +332,24 @@ impl TVar {
 
 impl BuiltinFunction_ {
     pub const MOVE_TO_SENDER: &'static str = "move_to_sender";
+    pub const MOVE_TO: &'static str = "move_to";
     pub const MOVE_FROM: &'static str = "move_from";
     pub const BORROW_GLOBAL: &'static str = "borrow_global";
     pub const BORROW_GLOBAL_MUT: &'static str = "borrow_global_mut";
     pub const EXISTS: &'static str = "exists";
     pub const FREEZE: &'static str = "freeze";
+    pub const ASSERT: &'static str = "assert";
 
     pub fn all_names() -> BTreeSet<&'static str> {
         let mut s = BTreeSet::new();
         s.insert(Self::MOVE_TO_SENDER);
+        s.insert(Self::MOVE_TO);
         s.insert(Self::MOVE_FROM);
         s.insert(Self::BORROW_GLOBAL);
         s.insert(Self::BORROW_GLOBAL_MUT);
         s.insert(Self::EXISTS);
         s.insert(Self::FREEZE);
+        s.insert(Self::ASSERT);
         s
     }
 
@@ -342,11 +357,13 @@ impl BuiltinFunction_ {
         use BuiltinFunction_ as BF;
         match name_str {
             BF::MOVE_TO_SENDER => Some(BF::MoveToSender(arg)),
+            BF::MOVE_TO => Some(BF::MoveTo(arg)),
             BF::MOVE_FROM => Some(BF::MoveFrom(arg)),
             BF::BORROW_GLOBAL => Some(BF::BorrowGlobal(false, arg)),
             BF::BORROW_GLOBAL_MUT => Some(BF::BorrowGlobal(true, arg)),
             BF::EXISTS => Some(BF::Exists(arg)),
             BF::FREEZE => Some(BF::Freeze(arg)),
+            BF::ASSERT => Some(BF::Assert),
             _ => None,
         }
     }
@@ -357,7 +374,8 @@ impl Type_ {
         use BuiltinTypeName_::*;
 
         let kind = match b.value {
-            U8 | U64 | U128 | Address | Bool => Some(sp(b.loc, Kind_::Unrestricted)),
+            U8 | U64 | U128 | Address | Bool => Some(sp(b.loc, Kind_::Copyable)),
+            Signer => Some(sp(b.loc, Kind_::Resource)),
             Vector => None,
         };
         let n = sp(b.loc, TypeName_::Builtin(b));
@@ -374,6 +392,10 @@ impl Type_ {
 
     pub fn address(loc: Loc) -> Type {
         Self::builtin(loc, sp(loc, BuiltinTypeName_::Address), vec![])
+    }
+
+    pub fn signer(loc: Loc) -> Type {
+        Self::builtin(loc, sp(loc, BuiltinTypeName_::Signer), vec![])
     }
 
     pub fn u8(loc: Loc) -> Type {
@@ -438,6 +460,7 @@ impl fmt::Display for BuiltinTypeName_ {
             "{}",
             match self {
                 BT::Address => BT::ADDRESS,
+                BT::Signer => BT::SIGNER,
                 BT::U8 => BT::U_8,
                 BT::U64 => BT::U_64,
                 BT::U128 => BT::U_128,
@@ -465,17 +488,29 @@ impl fmt::Display for TypeName_ {
 
 impl AstDebug for Program {
     fn ast_debug(&self, w: &mut AstWriter) {
-        let Program { modules, main } = self;
+        let Program { modules, scripts } = self;
         for (m, mdef) in modules {
             w.write(&format!("module {}", m));
             w.block(|w| mdef.ast_debug(w));
             w.new_line();
         }
 
-        if let Some((addr, n, fdef)) = main {
-            w.writeln(&format!("address {}:", addr));
-            (n.clone(), fdef).ast_debug(w);
+        for (n, s) in scripts {
+            w.write(&format!("script {}", n));
+            w.block(|w| s.ast_debug(w));
+            w.new_line()
         }
+    }
+}
+
+impl AstDebug for Script {
+    fn ast_debug(&self, w: &mut AstWriter) {
+        let Script {
+            loc: _loc,
+            function_name,
+            function,
+        } = self;
+        (function_name.clone(), function).ast_debug(w);
     }
 }
 
@@ -484,7 +519,6 @@ impl AstDebug for ModuleDefinition {
         let ModuleDefinition {
             is_source_module,
             dependency_order,
-            uses,
             structs,
             functions,
         } = self;
@@ -494,10 +528,6 @@ impl AstDebug for ModuleDefinition {
             w.writeln("source module")
         }
         w.writeln(&format!("dependency order #{}", dependency_order));
-        if !uses.is_empty() {
-            w.writeln("uses: ");
-            w.indent(2, |w| w.comma(uses, |w, (m, _)| w.write(&format!("{}", m))))
-        }
         for sdef in structs {
             sdef.ast_debug(w);
             w.new_line();
@@ -559,7 +589,7 @@ impl AstDebug for (FunctionName, &Function) {
         signature.ast_debug(w);
         if !acquires.is_empty() {
             w.write(" acquires ");
-            w.comma(acquires, |w, s| w.write(&format!("{}", s)));
+            w.comma(acquires.keys(), |w, s| w.write(&format!("{}", s)));
             w.write(" ")
         }
         match &body.value {
@@ -615,13 +645,17 @@ impl AstDebug for TypeName_ {
 
 impl AstDebug for TParam {
     fn ast_debug(&self, w: &mut AstWriter) {
-        let TParam { id, debug, kind } = self;
-        w.write(&format!("{}#{}", debug, id.0));
+        let TParam {
+            id,
+            user_specified_name,
+            kind,
+        } = self;
+        w.write(&format!("{}#{}", user_specified_name, id.0));
         match &kind.value {
             Kind_::Unknown => (),
             Kind_::Resource => w.write(": resource"),
             Kind_::Affine => w.write(": copyable"),
-            Kind_::Unrestricted => panic!("ICE 'unrestricted' kind constraint"),
+            Kind_::Copyable => panic!("ICE 'copyable' kind constraint"),
         }
     }
 }
@@ -708,7 +742,10 @@ impl AstDebug for Exp_ {
     fn ast_debug(&self, w: &mut AstWriter) {
         use Exp_ as E;
         match self {
-            E::Unit => w.write("()"),
+            E::Unit { trailing } if !trailing => w.write("()"),
+            E::Unit {
+                trailing: _trailing,
+            } => w.write("/*()*/"),
             E::Value(v) => v.ast_debug(w),
             E::InferredNum(u) => w.write(&format!("{}", u)),
             E::Move(v) => w.write(&format!("move {}", v)),
@@ -857,11 +894,13 @@ impl AstDebug for BuiltinFunction_ {
         use BuiltinFunction_ as F;
         let (n, bt) = match self {
             F::MoveToSender(bt) => (F::MOVE_TO_SENDER, bt),
+            F::MoveTo(bt) => (F::MOVE_TO, bt),
             F::MoveFrom(bt) => (F::MOVE_FROM, bt),
             F::BorrowGlobal(true, bt) => (F::BORROW_GLOBAL_MUT, bt),
             F::BorrowGlobal(false, bt) => (F::BORROW_GLOBAL, bt),
             F::Exists(bt) => (F::EXISTS, bt),
             F::Freeze(bt) => (F::FREEZE, bt),
+            F::Assert => (F::ASSERT, &None),
         };
         w.write(n);
         if let Some(bt) = bt {

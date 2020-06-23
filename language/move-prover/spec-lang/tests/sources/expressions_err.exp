@@ -1,4 +1,4 @@
-error: undeclared `x`
+error: undeclared `M::x`
 
     ┌── tests/sources/expressions_err.move:12:7 ───
     │
@@ -14,7 +14,7 @@ error: no function named `not_declared` found
     │       ^^^^^^^^^^^^^^
     │
 
-error: expected `num` but found `bool`
+error: expected `num` but found `bool` in expression
 
     ┌── tests/sources/expressions_err.move:22:7 ───
     │
@@ -31,7 +31,7 @@ error: no matching declaration of `>`
     │
     = outruled candidate `>(num, num): bool` (expected `num` but found `vector<num>` for argument 1)
 
-error: expected `(num, bool)` but found `bool`
+error: expected `(num, bool)` but found `bool` in expression
 
     ┌── tests/sources/expressions_err.move:32:7 ───
     │
@@ -39,39 +39,28 @@ error: expected `(num, bool)` but found `bool`
     │       ^^^^^
     │
 
-error: no matching declaration of `wrongly_typed_callee`
+error: no matching declaration of `M::wrongly_typed_callee`
 
     ┌── tests/sources/expressions_err.move:37:42 ───
     │
  37 │     define wrongly_typed_caller(): num { wrongly_typed_callee(1, 1) }
     │                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^
     │
-    = outruled candidate `wrongly_typed_callee(num, bool): num` (expected `bool` but found `u128` for argument 2)
+    = outruled candidate `M::wrongly_typed_callee(num, bool): num` (expected `bool` but found `u128` for argument 2)
 
-error: no matching declaration of `wrongly_typed_fun_arg_callee`
+error: expected `num` but found `bool` in expression
 
-    ┌── tests/sources/expressions_err.move:41:50 ───
+    ┌── tests/sources/expressions_err.move:41:83 ───
     │
  41 │     define wrongly_typed_fun_arg_caller(): num { wrongly_typed_fun_arg_callee(|x| false) }
-    │                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    │                                                                                   ^^^^^
     │
-    = outruled candidate `wrongly_typed_fun_arg_callee(|num|num): num` (expected `num` but found `bool` for argument 1)
 
-error: ambiguous application of `ambigous_callee`
+error: no matching declaration of `M::wrong_instantiation`
 
-    ┌── tests/sources/expressions_err.move:48:7 ───
+    ┌── tests/sources/expressions_err.move:46:7 ───
     │
- 48 │       ambigous_callee()
-    │       ^^^^^^^^^^^^^^^^^
-    │
-    = matching candidate `ambigous_callee(): num`
-    = matching candidate `ambigous_callee(): num`
-
-error: no matching declaration of `wrong_instantiation`
-
-    ┌── tests/sources/expressions_err.move:54:7 ───
-    │
- 54 │       wrong_instantiation<u64>(x)
+ 46 │       wrong_instantiation<u64>(x)
     │       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
     │
-    = outruled candidate `wrong_instantiation(#0): #0` (generic count mismatch (expected 2 but found 1))
+    = outruled candidate `M::wrong_instantiation(#0): #0` (generic count mismatch (expected 2 but found 1))

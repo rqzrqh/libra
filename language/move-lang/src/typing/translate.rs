@@ -3,7 +3,7 @@
 
 use super::{
     core::{self, Context, Subst},
-    expand, globals,
+    expand, globals, infinite_instantiations, recursive_structs,
 };
 use crate::{
     errors::Errors,
@@ -14,7 +14,7 @@ use crate::{
     typing::ast as T,
 };
 use move_ir_types::location::*;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 //**************************************************************************************************
 // Entry
@@ -23,10 +23,13 @@ use std::collections::{BTreeSet, VecDeque};
 pub fn program(prog: N::Program, errors: Errors) -> (T::Program, Errors) {
     let mut context = Context::new(&prog, errors);
     let modules = modules(&mut context, prog.modules);
-    let main = main_function(&mut context, prog.main);
+    let scripts = scripts(&mut context, prog.scripts);
 
     assert!(context.constraints.is_empty());
-    (T::Program { modules, main }, context.get_errors())
+    let mut errors = context.get_errors();
+    recursive_structs::modules(&mut errors, &modules);
+    infinite_instantiations::modules(&mut errors, &modules);
+    (T::Program { modules, scripts }, errors)
 }
 
 fn modules(
@@ -52,7 +55,7 @@ fn module(
     structs
         .iter_mut()
         .for_each(|(name, s)| struct_def(context, name, s));
-    let functions = n_functions.map(|name, f| function(context, name, f));
+    let functions = n_functions.map(|name, f| function(context, name, f, false));
     assert!(context.constraints.is_empty());
     T::ModuleDefinition {
         is_source_module,
@@ -62,64 +65,89 @@ fn module(
     }
 }
 
-fn main_function(
+fn scripts(
     context: &mut Context,
-    main: Option<(Address, FunctionName, N::Function)>,
-) -> Option<(Address, FunctionName, T::Function)> {
+    nscripts: BTreeMap<String, N::Script>,
+) -> BTreeMap<String, T::Script> {
+    nscripts
+        .into_iter()
+        .map(|(n, s)| (n, script(context, s)))
+        .collect()
+}
+
+fn script(context: &mut Context, nscript: N::Script) -> T::Script {
     context.current_module = None;
-    main.map(|(addr, name, f)| (addr, name.clone(), main_function_(context, name, f)))
-}
-
-fn main_function_(context: &mut Context, name: FunctionName, f: N::Function) -> T::Function {
-    let loc = name.loc();
-    let fdef = function(context, name, f);
-    for (_, param_ty) in &fdef.signature.parameters {
-        check_primitive_main_arg(context, loc, param_ty);
-    }
-    subtype(
-        context,
+    let N::Script {
         loc,
-        || "Invalid main return type",
-        fdef.signature.return_type.clone(),
-        sp(loc, Type_::Unit),
-    );
-    fdef
-}
-
-fn check_primitive_main_arg(context: &mut Context, mloc: Loc, ty: &Type) {
-    let sp!(loc, ty_) = ty;
-    match (ty_.builtin_name(), ty_) {
-        (Some(_), Type_::Apply(_, _, ss)) => ss
-            .iter()
-            .for_each(|s| check_primitive_main_arg(context, mloc, s)),
-        _ => check_primitive_main_arg_error(
-            context,
-            mloc,
-            *loc,
-            core::error_format(ty, &Subst::empty()),
-        ),
+        function_name,
+        function: nfunction,
+    } = nscript;
+    let function = function(context, function_name.clone(), nfunction, true);
+    T::Script {
+        loc,
+        function_name,
+        function,
     }
 }
 
-fn check_primitive_main_arg_error(context: &mut Context, mloc: Loc, tloc: Loc, tystr: String) {
-    let mmsg = format!("Invalid parameter for '{}'", FunctionName::MAIN_NAME);
-    let tmsg = format!(
-        "Found: {}. But expected: {}",
-        tystr,
-        format_comma(
-            N::BuiltinTypeName_::all_names()
-                .iter()
-                .map(|b| format!("'{}'", b))
-        ),
-    );
-    context.error(vec![(mloc, mmsg), (tloc, tmsg)])
+fn check_primitive_script_arg(context: &mut Context, mloc: Loc, idx: usize, ty: &Type) {
+    let loc = ty.loc;
+
+    let signer_ref = sp(loc, Type_::Ref(false, Box::new(Type_::signer(loc))));
+    let acceptable_types = vec![
+        Type_::u8(loc),
+        Type_::u64(loc),
+        Type_::u128(loc),
+        Type_::bool(loc),
+        Type_::address(loc),
+        Type_::vector(loc, Type_::u8(loc)),
+        signer_ref.clone(),
+    ];
+    let ty_is_an_acceptable_type = acceptable_types.iter().all(|acceptable_type| {
+        subtype_no_report(context, ty.clone(), acceptable_type.clone()).is_err()
+    });
+    if ty_is_an_acceptable_type {
+        let mmsg = format!(
+            "Invalid parameter for script function '{}'",
+            context.current_function.as_ref().unwrap()
+        );
+        let tys = acceptable_types
+            .iter()
+            .map(|t| core::error_format(t, &Subst::empty()));
+        let tmsg = format!(
+            "Found: {}. But expected: {}",
+            core::error_format(ty, &Subst::empty()),
+            format_comma(tys),
+        );
+        context.error(vec![(mloc, mmsg), (loc, tmsg)]);
+        return;
+    }
+
+    if idx != 0 && subtype_no_report(context, ty.clone(), signer_ref.clone()).is_ok() {
+        let mmsg = format!(
+            "Invalid parameter for script function '{}'",
+            context.current_function.as_ref().unwrap()
+        );
+        let tmsg = format!(
+            "{} must be the first argument to a script",
+            core::error_format(&signer_ref, &Subst::empty()),
+        );
+        context.error(vec![(mloc, mmsg), (loc, tmsg)]);
+        return;
+    }
 }
 
 //**************************************************************************************************
 // Functions
 //**************************************************************************************************
 
-fn function(context: &mut Context, name: FunctionName, f: N::Function) -> T::Function {
+fn function(
+    context: &mut Context,
+    name: FunctionName,
+    f: N::Function,
+    is_script: bool,
+) -> T::Function {
+    let loc = name.loc();
     context.current_function = Some(name);
     let N::Function {
         visibility,
@@ -131,6 +159,18 @@ fn function(context: &mut Context, name: FunctionName, f: N::Function) -> T::Fun
     context.reset_for_module_item();
 
     function_signature(context, &signature);
+    if is_script {
+        for (idx, (_, param_ty)) in signature.parameters.iter().enumerate() {
+            check_primitive_script_arg(context, loc, idx, param_ty);
+        }
+        subtype(
+            context,
+            loc,
+            || "Invalid main return type",
+            signature.return_type.clone(),
+            sp(loc, Type_::Unit),
+        );
+    }
     expand::function_signature(context, &mut signature);
 
     let body = function_body(context, &acquires, n_body);
@@ -171,7 +211,7 @@ fn function_signature(context: &mut Context, sig: &N::FunctionSignature) {
 
 fn function_body(
     context: &mut Context,
-    acquires: &BTreeSet<StructName>,
+    acquires: &BTreeMap<StructName, Loc>,
     sp!(loc, nb_): N::FunctionBody,
 ) -> T::FunctionBody {
     assert!(context.constraints.is_empty());
@@ -214,7 +254,7 @@ fn struct_def(context: &mut Context, _name: StructName, s: &mut N::StructDefinit
 
     for (_field, idx_ty) in field_map.iter() {
         let inst_ty = core::instantiate(context, idx_ty.1.clone());
-        context.add_single_type_constraint(inst_ty.loc, "Invalid field type", inst_ty);
+        context.add_base_type_constraint(inst_ty.loc, "Invalid field type", inst_ty);
     }
     core::solve_constraints(context);
 
@@ -274,6 +314,20 @@ fn typing_error<T: Into<String>, F: FnOnce() -> T>(
         ],
     };
     context.error(error);
+}
+
+fn subtype_no_report(
+    context: &mut Context,
+    pre_lhs: Type,
+    pre_rhs: Type,
+) -> Result<Type, core::TypingError> {
+    let subst = std::mem::replace(&mut context.subst, Subst::empty());
+    let lhs = core::ready_tvars(&subst, pre_lhs);
+    let rhs = core::ready_tvars(&subst, pre_rhs);
+    core::subtype(subst, &lhs, &rhs).map(|(next_subst, ty)| {
+        context.subst = next_subst;
+        ty
+    })
 }
 
 fn subtype<T: Into<String>, F: FnOnce() -> T>(
@@ -455,7 +509,7 @@ fn exp_(context: &mut Context, sp!(eloc, ne_): N::Exp) -> T::Exp {
     use N::Exp_ as NE;
     use T::UnannotatedExp_ as TE;
     let (ty, e_) = match ne_ {
-        NE::Unit => (sp(eloc, Type_::Unit), TE::Unit),
+        NE::Unit { trailing } => (sp(eloc, Type_::Unit), TE::Unit { trailing }),
         NE::Value(sp!(vloc, v)) => (v.type_(vloc), TE::Value(sp(vloc, v))),
         NE::InferredNum(v) => (core::make_num_tvar(context, eloc), TE::InferredNum(v)),
 
@@ -670,8 +724,8 @@ fn exp_(context: &mut Context, sp!(eloc, ne_): N::Exp) -> T::Exp {
                     let msg = format!("Invalid arguments to '{}'", &bop);
                     context.add_single_type_constraint(eloc, msg, ty.clone());
                     let msg = format!(
-                        "Cannot use '{}' on resource values. This would destroy the resource. \
-                         Try borrowing the values with '&' first.'",
+                        "Cannot use '{}' on resource values. This would destroy the resource. Try \
+                         borrowing the values with '&' first.'",
                         &bop
                     );
                     context.add_copyable_constraint(eloc, msg, ty.clone());
@@ -732,8 +786,8 @@ fn exp_(context: &mut Context, sp!(eloc, ne_): N::Exp) -> T::Exp {
             });
             if !context.is_current_module(&m) {
                 let msg = format!(
-                    "Invalid instantiation of '{}::{}'.\n\
-                     All structs can only be constructed in the module in which they are declared",
+                    "Invalid instantiation of '{}::{}'.\nAll structs can only be constructed in \
+                     the module in which they are declared",
                     &m, &n,
                 );
                 context.error(vec![(eloc, msg)])
@@ -1047,8 +1101,8 @@ fn lvalue(
             });
             if !context.is_current_module(&m) {
                 let msg = format!(
-                    "Invalid deconstruction {} of '{}::{}'.\n All \
-                     structs can only be deconstructed in the module in which they are declared",
+                    "Invalid deconstruction {} of '{}::{}'.\n All structs can only be \
+                     deconstructed in the module in which they are declared",
                     verb, &m, &n,
                 );
                 context.error(vec![(loc, msg)])
@@ -1107,8 +1161,8 @@ fn resolve_field(context: &mut Context, loc: Loc, ty: Type, field: &Field) -> Ty
         sp!(_, Apply(_, sp!(_, ModuleType(m, n)), targs)) => {
             if !context.is_current_module(&m) {
                 let msg = format!(
-                    "Invalid access of field '{}' on '{}::{}'. \
-                     Fields can only be accessed inside the struct's module",
+                    "Invalid access of field '{}' on '{}::{}'. Fields can only be accessed inside \
+                     the struct's module",
                     field, &m, &n
                 );
                 context.error(vec![(loc, msg)])
@@ -1145,8 +1199,8 @@ fn add_field_types<T>(
         N::StructFields::Defined(m) => m,
         N::StructFields::Native(nloc) => {
             let msg = format!(
-                "Invalid {} usage for native struct '{}::{}'. Native structs cannot \
-                 be directly constructed/deconstructd, and their fields cannot be dirctly accessed",
+                "Invalid {} usage for native struct '{}::{}'. Native structs cannot be directly \
+                 constructed/deconstructd, and their fields cannot be dirctly accessed",
                 verb, m, n
             );
             context.error(vec![(loc, msg), (nloc, "Declared 'native' here".into())]);
@@ -1383,6 +1437,13 @@ fn builtin_call(
             params_ty = vec![ty_arg];
             ret_ty = sp(loc, Type_::Unit);
         }
+        NB::MoveTo(ty_arg_opt) => {
+            let ty_arg = mk_ty_arg(ty_arg_opt);
+            b_ = TB::MoveTo(ty_arg.clone());
+            let signer_ = Box::new(Type_::signer(bloc));
+            params_ty = vec![sp(bloc, Type_::Ref(false, signer_)), ty_arg];
+            ret_ty = sp(loc, Type_::Unit);
+        }
         NB::MoveFrom(ty_arg_opt) => {
             let ty_arg = mk_ty_arg(ty_arg_opt);
             b_ = TB::MoveFrom(ty_arg.clone());
@@ -1406,6 +1467,11 @@ fn builtin_call(
             b_ = TB::Freeze(ty_arg.clone());
             params_ty = vec![sp(bloc, Type_::Ref(true, Box::new(ty_arg.clone())))];
             ret_ty = sp(loc, Type_::Ref(false, Box::new(ty_arg)));
+        }
+        NB::Assert => {
+            b_ = TB::Assert;
+            params_ty = vec![Type_::bool(bloc), Type_::u64(bloc)];
+            ret_ty = sp(loc, Type_::Unit);
         }
     };
     let (arguments, arg_tys) = call_args(
@@ -1442,7 +1508,10 @@ fn call_args<S: std::fmt::Display, F: Fn() -> S>(
     let tys = args.iter().map(|e| e.ty.clone()).collect();
     let tys = make_arg_types(context, loc, msg, arity, argloc, tys);
     let arg = match args.len() {
-        0 => T::exp(sp(argloc, Type_::Unit), sp(argloc, TE::Unit)),
+        0 => T::exp(
+            sp(argloc, Type_::Unit),
+            sp(argloc, TE::Unit { trailing: false }),
+        ),
         1 => args.pop().unwrap(),
         _ => {
             let ty = Type_::multiple(argloc, tys.clone());

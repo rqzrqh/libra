@@ -1,11 +1,11 @@
-address 0x1:
+address 0x2 {
 
 module X {
     resource struct R {}
 }
 
 module M {
-    use 0x1::X;
+    use 0x2::X;
 
     fun t0(): X::R {
         loop {}
@@ -19,7 +19,7 @@ module M {
         foo(loop {})
     }
 
-    fun foo(x: u64) {}
+    fun foo(_x: u64) {}
 
     fun t3(): X::R {
         let x: X::R = loop { 0; };
@@ -30,5 +30,7 @@ module M {
         let () = loop { break };
         let () = loop { if (false) break };
     }
+
+}
 
 }

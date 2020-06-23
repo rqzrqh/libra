@@ -7,7 +7,7 @@ pub use crate::protocols::rpc::error::RpcError;
 use crate::{
     error::NetworkError,
     peer_manager::{
-        ConnectionRequestSender, ConnectionStatusNotification, PeerManagerNotification,
+        ConnectionNotification, ConnectionRequestSender, PeerManagerNotification,
         PeerManagerRequestSender,
     },
     ProtocolId,
@@ -19,16 +19,11 @@ use futures::{
     stream::{FusedStream, Map, Select, Stream, StreamExt},
     task::{Context, Poll},
 };
+use libra_network_address::NetworkAddress;
 use libra_types::PeerId;
-use parity_multiaddr::Multiaddr;
 use pin_project::pin_project;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{marker::PhantomData, pin::Pin, time::Duration};
-
-#[cfg(any(feature = "testing", test))]
-pub mod dummy;
-#[cfg(test)]
-mod test;
 
 pub trait Message: DeserializeOwned + Serialize {}
 impl<T: DeserializeOwned + Serialize> Message for T {}
@@ -75,8 +70,7 @@ impl<TMessage: PartialEq> PartialEq for Event<TMessage> {
 
 /// A `Stream` of `Event<TMessage>` from the lower network layer to an upper
 /// network application that deserializes inbound network direct-send and rpc
-/// messages into `TMessage`, which is some protobuf format implementing
-/// the `prost::Message` trait.
+/// messages into `TMessage`.
 ///
 /// `NetworkEvents` is really just a thin wrapper around a
 /// `channel::Receiver<NetworkNotification>` that deserializes inbound messages.
@@ -89,17 +83,25 @@ pub struct NetworkEvents<TMessage> {
             fn(PeerManagerNotification) -> Result<Event<TMessage>, NetworkError>,
         >,
         Map<
-            libra_channel::Receiver<PeerId, ConnectionStatusNotification>,
-            fn(ConnectionStatusNotification) -> Result<Event<TMessage>, NetworkError>,
+            libra_channel::Receiver<PeerId, ConnectionNotification>,
+            fn(ConnectionNotification) -> Result<Event<TMessage>, NetworkError>,
         >,
     >,
     _marker: PhantomData<TMessage>,
 }
 
-impl<TMessage: Message> NetworkEvents<TMessage> {
-    pub fn new(
+/// Trait specifying the signature for `new()` `NetworkEvents`
+pub trait NewNetworkEvents {
+    fn new(
         peer_mgr_notifs_rx: libra_channel::Receiver<(PeerId, ProtocolId), PeerManagerNotification>,
-        connection_notifs_rx: libra_channel::Receiver<PeerId, ConnectionStatusNotification>,
+        connection_notifs_rx: libra_channel::Receiver<PeerId, ConnectionNotification>,
+    ) -> Self;
+}
+
+impl<TMessage: Message> NewNetworkEvents for NetworkEvents<TMessage> {
+    fn new(
+        peer_mgr_notifs_rx: libra_channel::Receiver<(PeerId, ProtocolId), PeerManagerNotification>,
+        connection_notifs_rx: libra_channel::Receiver<PeerId, ConnectionNotification>,
     ) -> Self {
         let data_event_stream = peer_mgr_notifs_rx.map(
             peer_mgr_notif_to_event
@@ -107,7 +109,7 @@ impl<TMessage: Message> NetworkEvents<TMessage> {
         );
         let control_event_stream = connection_notifs_rx.map(
             control_msg_to_event
-                as fn(ConnectionStatusNotification) -> Result<Event<TMessage>, NetworkError>,
+                as fn(ConnectionNotification) -> Result<Event<TMessage>, NetworkError>,
         );
         Self {
             event_stream: ::futures::stream::select(data_event_stream, control_event_stream),
@@ -144,13 +146,11 @@ fn peer_mgr_notif_to_event<TMessage: Message>(
 }
 
 fn control_msg_to_event<TMessage>(
-    notif: ConnectionStatusNotification,
+    notif: ConnectionNotification,
 ) -> Result<Event<TMessage>, NetworkError> {
     match notif {
-        ConnectionStatusNotification::NewPeer(peer_id, _addr) => Ok(Event::NewPeer(peer_id)),
-        ConnectionStatusNotification::LostPeer(peer_id, _addr, _reason) => {
-            Ok(Event::LostPeer(peer_id))
-        }
+        ConnectionNotification::NewPeer(peer_id, _addr) => Ok(Event::NewPeer(peer_id)),
+        ConnectionNotification::LostPeer(peer_id, _addr, _reason) => Ok(Event::LostPeer(peer_id)),
     }
 }
 
@@ -174,7 +174,6 @@ impl<TMessage> FusedStream for NetworkEvents<TMessage> {
 /// `MempoolNetworkSender` only exposes a `send_to` function.
 ///
 /// Provide Protobuf wrapper over `[peer_manager::PeerManagerRequestSender]`
-/// The `TMessage` generic is a protobuf message type (`prost::Message`).
 #[derive(Clone)]
 pub struct NetworkSender<TMessage> {
     peer_mgr_reqs_tx: PeerManagerRequestSender,
@@ -182,8 +181,16 @@ pub struct NetworkSender<TMessage> {
     _marker: PhantomData<TMessage>,
 }
 
-impl<TMessage> NetworkSender<TMessage> {
-    pub fn new(
+/// Trait specifying the signature for `new()` `NetworkSender`s
+pub trait NewNetworkSender {
+    fn new(
+        peer_mgr_reqs_tx: PeerManagerRequestSender,
+        connection_reqs_tx: ConnectionRequestSender,
+    ) -> Self;
+}
+
+impl<TMessage> NewNetworkSender for NetworkSender<TMessage> {
+    fn new(
         peer_mgr_reqs_tx: PeerManagerRequestSender,
         connection_reqs_tx: ConnectionRequestSender,
     ) -> Self {
@@ -193,10 +200,16 @@ impl<TMessage> NetworkSender<TMessage> {
             _marker: PhantomData,
         }
     }
+}
 
-    /// Request that a given Peer be dialed at the provided `Multiaddr` and synchronously wait for
-    /// the request to be performed.
-    pub async fn dial_peer(&mut self, peer: PeerId, addr: Multiaddr) -> Result<(), NetworkError> {
+impl<TMessage> NetworkSender<TMessage> {
+    /// Request that a given Peer be dialed at the provided `NetworkAddress` and
+    /// synchronously wait for the request to be performed.
+    pub async fn dial_peer(
+        &mut self,
+        peer: PeerId,
+        addr: NetworkAddress,
+    ) -> Result<(), NetworkError> {
         self.connection_reqs_tx.dial_peer(peer, addr).await?;
         Ok(())
     }

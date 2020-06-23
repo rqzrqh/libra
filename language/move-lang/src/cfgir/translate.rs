@@ -13,7 +13,10 @@ use crate::{
     shared::unique_map::UniqueMap,
 };
 use move_ir_types::location::*;
-use std::{collections::BTreeSet, mem};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    mem,
+};
 
 //**************************************************************************************************
 // Context
@@ -27,6 +30,7 @@ struct Context {
     next_label: Option<Label>,
     label_count: usize,
     blocks: BasicBlocks,
+    block_ordering: BTreeMap<Label, usize>,
     infinite_loop_starts: BTreeSet<Label>,
 }
 
@@ -40,6 +44,7 @@ impl Context {
             start: None,
             label_count: 0,
             blocks: BasicBlocks::new(),
+            block_ordering: BTreeMap::new(),
             infinite_loop_starts: BTreeSet::new(),
         }
     }
@@ -59,15 +64,33 @@ impl Context {
         Label(count)
     }
 
+    fn insert_block(&mut self, lbl: Label, basic_block: BasicBlock) {
+        assert!(self.block_ordering.insert(lbl, self.blocks.len()).is_none());
+        assert!(self.blocks.insert(lbl, basic_block).is_none());
+    }
+
+    // Returns the blocks inserted in insertion ordering
     pub fn finish_blocks(&mut self) -> (Label, BasicBlocks, BTreeSet<Label>) {
         self.next_label = None;
         let start = mem::replace(&mut self.start, None);
         let blocks = mem::replace(&mut self.blocks, BasicBlocks::new());
+        let block_ordering = mem::replace(&mut self.block_ordering, BTreeMap::new());
         let infinite_loop_starts = mem::replace(&mut self.infinite_loop_starts, BTreeSet::new());
         self.label_count = 0;
         self.loop_begin = None;
         self.loop_end = None;
-        (start.unwrap(), blocks, infinite_loop_starts)
+
+        // Blocks will eventually be ordered and outputted to bytecode the label. But labels are
+        // initially created depth first
+        // So the labels need to be remapped based on the insertion order of the block
+        // This preserves the original layout of the code as specified by the user (since code is
+        // finshed+inserted into the map in original code order)
+        let remapping = block_ordering
+            .into_iter()
+            .map(|(lbl, ordering)| (lbl, Label(ordering)))
+            .collect();
+        let (start, blocks) = G::remap_labels(&remapping, start.unwrap(), blocks);
+        (start, blocks, infinite_loop_starts)
     }
 }
 
@@ -78,11 +101,9 @@ impl Context {
 pub fn program(errors: Errors, prog: H::Program) -> (G::Program, Errors) {
     let mut context = Context::new(&prog, errors);
     let modules = modules(&mut context, prog.modules);
-    let main = prog
-        .main
-        .map(|(addr, n, fdef)| (addr, n.clone(), function(&mut context, n, fdef)));
+    let scripts = scripts(&mut context, prog.scripts);
 
-    (G::Program { modules, main }, context.get_errors())
+    (G::Program { modules, scripts }, context.get_errors())
 }
 
 fn modules(
@@ -115,6 +136,30 @@ fn module(
     )
 }
 
+fn scripts(
+    context: &mut Context,
+    hscripts: BTreeMap<String, H::Script>,
+) -> BTreeMap<String, G::Script> {
+    hscripts
+        .into_iter()
+        .map(|(n, s)| (n, script(context, s)))
+        .collect()
+}
+
+fn script(context: &mut Context, hscript: H::Script) -> G::Script {
+    let H::Script {
+        loc,
+        function_name,
+        function: hfunction,
+    } = hscript;
+    let function = function(context, function_name.clone(), hfunction);
+    G::Script {
+        loc,
+        function_name,
+        function,
+    }
+}
+
 //**************************************************************************************************
 // Functions
 //**************************************************************************************************
@@ -135,7 +180,7 @@ fn function(context: &mut Context, _name: FunctionName, f: H::Function) -> G::Fu
 fn function_body(
     context: &mut Context,
     signature: &H::FunctionSignature,
-    acquires: &BTreeSet<StructName>,
+    acquires: &BTreeMap<StructName, Loc>,
     sp!(loc, tb_): H::FunctionBody,
 ) -> G::FunctionBody {
     use G::FunctionBody_ as GB;
@@ -143,6 +188,7 @@ fn function_body(
     assert!(context.next_label.is_none());
     assert!(context.start.is_none());
     assert!(context.blocks.is_empty());
+    assert!(context.block_ordering.is_empty());
     assert!(context.loop_begin.is_none());
     assert!(context.loop_end.is_none());
     assert!(context.infinite_loop_starts.is_empty());
@@ -165,7 +211,9 @@ fn function_body(
                 &mut cfg,
                 &infinite_loop_starts,
             );
-            cfgir::optimize(signature, &locals, &mut cfg);
+            if context.errors.is_empty() {
+                cfgir::optimize(signature, &locals, &mut cfg);
+            }
 
             GB::Defined {
                 locals,
@@ -205,7 +253,7 @@ fn block(context: &mut Context, mut cur_label: Label, blocks: H::Block) {
         }
         _ => (),
     }
-    context.blocks.insert(cur_label, basic_block);
+    context.insert_block(cur_label, basic_block);
 }
 
 fn block_(context: &mut Context, cur_label: &mut Label, blocks: H::Block) -> BasicBlock {
@@ -218,7 +266,7 @@ fn block_(context: &mut Context, cur_label: &mut Label, blocks: H::Block) -> Bas
         (next_label: $next_label:expr) => {{
             let lbl = mem::replace(cur_label, $next_label);
             let bb = mem::replace(&mut basic_block, BasicBlock::new());
-            context.blocks.insert(lbl, bb);
+            context.insert_block(lbl, bb);
         }};
     }
 

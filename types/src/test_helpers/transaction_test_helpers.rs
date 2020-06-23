@@ -3,19 +3,18 @@
 
 use crate::{
     account_address::AccountAddress,
-    account_config::lbr_type_tag,
-    language_storage::TypeTag,
+    account_config::LBR_NAME,
     transaction::{Module, RawTransaction, Script, SignatureCheckedTransaction, SignedTransaction},
     write_set::WriteSet,
 };
 use libra_crypto::{ed25519::*, hash::CryptoHash, traits::*};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const MAX_GAS_AMOUNT: u64 = 400_000;
-const MAX_GAS_PRICE: u64 = 1;
+const MAX_GAS_AMOUNT: u64 = 1_000_000;
+const TEST_GAS_PRICE: u64 = 0;
 
 static EMPTY_SCRIPT: &[u8] =
-    include_bytes!("../../../language/stdlib/staged/transaction_scripts/empty_script.mv");
+    include_bytes!("../../../language/stdlib/compiled/transaction_scripts/empty_script.mv");
 
 // Test helper for transaction creation
 pub fn get_test_signed_module_publishing_transaction(
@@ -35,8 +34,8 @@ pub fn get_test_signed_module_publishing_transaction(
         sequence_number,
         module,
         MAX_GAS_AMOUNT,
-        MAX_GAS_PRICE,
-        lbr_type_tag(),
+        TEST_GAS_PRICE,
+        LBR_NAME.to_owned(),
         Duration::from_secs(expiration_time),
     );
 
@@ -54,16 +53,16 @@ pub fn get_test_signed_transaction(
     script: Option<Script>,
     expiration_time: u64,
     gas_unit_price: u64,
-    gas_specifier: TypeTag,
+    gas_currency_code: String,
     max_gas_amount: Option<u64>,
 ) -> SignedTransaction {
     let raw_txn = RawTransaction::new_script(
         sender,
         sequence_number,
-        script.unwrap_or_else(|| Script::new(EMPTY_SCRIPT.to_vec(), Vec::new())),
+        script.unwrap_or_else(|| Script::new(EMPTY_SCRIPT.to_vec(), vec![], Vec::new())),
         max_gas_amount.unwrap_or(MAX_GAS_AMOUNT),
         gas_unit_price,
-        gas_specifier,
+        gas_currency_code,
         Duration::from_secs(expiration_time),
     );
 
@@ -81,16 +80,16 @@ pub fn get_test_unchecked_transaction(
     script: Option<Script>,
     expiration_time: u64,
     gas_unit_price: u64,
-    gas_specifier: TypeTag,
+    gas_currency_code: String,
     max_gas_amount: Option<u64>,
 ) -> SignedTransaction {
     let raw_txn = RawTransaction::new_script(
         sender,
         sequence_number,
-        script.unwrap_or_else(|| Script::new(EMPTY_SCRIPT.to_vec(), Vec::new())),
+        script.unwrap_or_else(|| Script::new(EMPTY_SCRIPT.to_vec(), vec![], Vec::new())),
         max_gas_amount.unwrap_or(MAX_GAS_AMOUNT),
         gas_unit_price,
-        gas_specifier,
+        gas_currency_code,
         Duration::from_secs(expiration_time),
     );
 
@@ -120,8 +119,8 @@ pub fn get_test_signed_txn(
         public_key,
         script,
         expiration_time,
-        MAX_GAS_PRICE,
-        lbr_type_tag(),
+        TEST_GAS_PRICE,
+        LBR_NAME.to_owned(),
         None,
     )
 }
@@ -145,8 +144,8 @@ pub fn get_test_unchecked_txn(
         public_key,
         script,
         expiration_time,
-        MAX_GAS_PRICE,
-        lbr_type_tag(),
+        TEST_GAS_PRICE,
+        LBR_NAME.to_owned(),
         None,
     )
 }

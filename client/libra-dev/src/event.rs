@@ -10,8 +10,8 @@ use libra_types::{
     account_config::{ReceivedPaymentEvent, SentPaymentEvent},
     contract_event::ContractEvent,
     event::EventKey,
-    language_storage::TypeTag,
 };
+use move_core_types::language_storage::TypeTag;
 use std::{convert::TryFrom, ffi::CString, ops::Deref, slice};
 
 const MAX_BUFFER_LENGTH: usize = 255;
@@ -174,20 +174,21 @@ pub unsafe extern "C" fn libra_LibraEvent_free(ptr: *mut LibraEvent) {
 
 #[test]
 fn test_libra_LibraEvent_from() {
-    use libra_crypto::ed25519::compat;
+    use libra_crypto::{ed25519::Ed25519PrivateKey, PrivateKey, Uniform};
     use libra_types::{
-        account_address::AccountAddress,
-        account_config::SentPaymentEvent,
+        account_address::{self, AccountAddress},
+        account_config::{self, from_currency_code_string, SentPaymentEvent, LBR_NAME},
         contract_event::ContractEvent,
         event::{EventHandle, EventKey},
+    };
+    use move_core_types::{
+        identifier::Identifier,
         language_storage::{StructTag, TypeTag::Struct},
     };
-    use move_core_types::identifier::Identifier;
     use std::ffi::CStr;
 
-    let keypair = compat::generate_keypair(None);
-    let public_key = keypair.1;
-    let sender_address = AccountAddress::from_public_key(&public_key);
+    let public_key = Ed25519PrivateKey::generate_for_testing().public_key();
+    let sender_address = account_address::from_public_key(&public_key);
     let sent_event_handle = EventHandle::new(EventKey::new_from_address(&sender_address, 0), 0);
     let sequence_number = sent_event_handle.count();
     let event_key = sent_event_handle.key();
@@ -195,29 +196,36 @@ fn test_libra_LibraEvent_from() {
     let name = "SentPaymentEvent";
 
     let type_tag = Struct(StructTag {
-        address: AccountAddress::new([0; AccountAddress::LENGTH]),
+        address: account_config::CORE_CODE_ADDRESS,
         module: Identifier::new(module).unwrap(),
         name: Identifier::new(name).unwrap(),
         type_params: [].to_vec(),
     });
     let amount = 50_000_000;
     let receiver_address = AccountAddress::random();
-    let event_data = SentPaymentEvent::new(amount, receiver_address, vec![]);
+    let event_data = SentPaymentEvent::new(
+        amount,
+        from_currency_code_string(LBR_NAME).unwrap(),
+        receiver_address,
+        vec![],
+    );
     let event_data_bytes = lcs::to_bytes(&event_data).unwrap();
 
     let event = ContractEvent::new(*event_key, sequence_number, type_tag, event_data_bytes);
 
-    let proto_txn = libra_types::proto::types::Event::from(event);
+    let key = event.key().to_vec();
+    let type_tag = lcs::to_bytes(&event.type_tag()).expect("Failed to serialize.");
+    let event_data = event.event_data().to_vec();
 
     let mut libra_event: *mut LibraEvent = std::ptr::null_mut();
     let result = unsafe {
         libra_LibraEvent_from(
-            proto_txn.key.as_ptr(),
-            proto_txn.key.len(),
-            proto_txn.event_data.as_ptr(),
-            proto_txn.event_data.len(),
-            proto_txn.type_tag.as_ptr(),
-            proto_txn.type_tag.len(),
+            key.as_ptr(),
+            key.len(),
+            event_data.as_ptr(),
+            event_data.len(),
+            type_tag.as_ptr(),
+            type_tag.len(),
             &mut libra_event,
         )
     };

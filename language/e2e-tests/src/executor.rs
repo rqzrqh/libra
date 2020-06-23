@@ -5,28 +5,35 @@
 
 use crate::{
     account::{Account, AccountData},
-    data_store::{FakeDataStore, GENESIS_WRITE_SET},
+    data_store::{FakeDataStore, GENESIS_CHANGE_SET, GENESIS_CHANGE_SET_FRESH},
 };
 use bytecode_verifier::VerifiedModule;
+use compiled_stdlib::{stdlib_modules, transaction_scripts::StdlibScript, StdLibOptions};
 use libra_config::generator;
 use libra_crypto::HashValue;
 use libra_state_view::StateView;
 use libra_types::{
     access_path::AccessPath,
-    account_config::{AccountResource, BalanceResource},
+    account_config::{AccountResource, BalanceResource, CORE_CODE_ADDRESS},
     block_metadata::{new_block_event_key, BlockMetadata, NewBlockEvent},
-    language_storage::ModuleId,
-    on_chain_config::VMPublishingOption,
+    on_chain_config::{OnChainConfig, VMPublishingOption, ValidatorSet},
     transaction::{
-        SignedTransaction, Transaction, TransactionOutput, TransactionPayload, TransactionStatus,
-        VMValidatorResult,
+        SignedTransaction, Transaction, TransactionOutput, TransactionStatus, VMValidatorResult,
     },
-    validator_set::ValidatorSet,
     vm_error::{StatusCode, VMStatus},
     write_set::WriteSet,
 };
-use libra_vm::{LibraVM, VMExecutor, VMVerifier};
-use stdlib::{stdlib_modules, transaction_scripts::StdlibScript, StdLibOptions};
+use libra_vm::{data_cache::RemoteStorage, LibraVM, VMExecutor, VMValidator};
+use move_core_types::{
+    gas_schedule::{GasAlgebra, GasUnits},
+    identifier::Identifier,
+    language_storage::{ModuleId, TypeTag},
+};
+use move_vm_runtime::{data_cache::TransactionDataCache, move_vm::MoveVM};
+use move_vm_types::{
+    gas_schedule::{zero_cost_schedule, CostStrategy},
+    values::Value,
+};
 use vm::CompiledModule;
 use vm_genesis::GENESIS_KEYPAIR;
 
@@ -52,12 +59,17 @@ impl FakeExecutor {
 
     /// Creates an executor from the genesis file GENESIS_FILE_LOCATION
     pub fn from_genesis_file() -> Self {
-        Self::from_genesis(&GENESIS_WRITE_SET)
+        Self::from_genesis(GENESIS_CHANGE_SET.clone().write_set())
+    }
+
+    /// Creates an executor using the standard genesis.
+    pub fn from_fresh_genesis() -> Self {
+        Self::from_genesis(GENESIS_CHANGE_SET_FRESH.clone().write_set())
     }
 
     pub fn whitelist_genesis() -> Self {
         Self::custom_genesis(
-            Some(stdlib_modules(StdLibOptions::Staged).to_vec()),
+            stdlib_modules(StdLibOptions::Compiled).to_vec(),
             None,
             VMPublishingOption::Locked(StdlibScript::whitelist()),
         )
@@ -72,7 +84,7 @@ impl FakeExecutor {
         }
 
         Self::custom_genesis(
-            Some(stdlib_modules(StdLibOptions::Staged).to_vec()),
+            stdlib_modules(StdLibOptions::Compiled).to_vec(),
             None,
             publishing_options,
         )
@@ -86,38 +98,25 @@ impl FakeExecutor {
         }
     }
 
-    /// Creates fresh genesis from the stdlib modules passed in. If none are passed in the staged
-    /// genesis write set is used.
+    /// Creates fresh genesis from the stdlib modules passed in.
     pub fn custom_genesis(
-        genesis_modules: Option<Vec<VerifiedModule>>,
-        validator_set: Option<ValidatorSet>,
+        genesis_modules: Vec<VerifiedModule>,
+        validator_accounts: Option<usize>,
         publishing_options: VMPublishingOption,
     ) -> Self {
-        let genesis_write_set = if genesis_modules.is_none() && validator_set.is_none() {
-            GENESIS_WRITE_SET.clone()
-        } else {
-            let validator_set_len: usize = validator_set.as_ref().map_or(10, |s| s.len());
-            let swarm = generator::validator_swarm_for_testing(validator_set_len);
-            let validator_set = validator_set.unwrap_or(swarm.validator_set);
-            let discovery_set = vm_genesis::make_placeholder_discovery_set(&validator_set);
-            let stdlib_modules =
-                genesis_modules.unwrap_or_else(|| stdlib_modules(StdLibOptions::Staged).to_vec());
-            match vm_genesis::encode_genesis_transaction(
-                &GENESIS_KEYPAIR.0,
-                GENESIS_KEYPAIR.1.clone(),
-                &swarm.nodes,
-                validator_set,
-                discovery_set,
-                &stdlib_modules,
+        let genesis_change_set = {
+            let validator_count = validator_accounts.map_or(10, |s| s);
+            let swarm = generator::validator_swarm_for_testing(validator_count);
+
+            vm_genesis::encode_genesis_change_set(
+                &GENESIS_KEYPAIR.1,
+                &vm_genesis::validator_registrations(&swarm.nodes),
+                &genesis_modules,
                 publishing_options,
             )
-            .payload()
-            {
-                TransactionPayload::WriteSet(ws) => ws.write_set().clone(),
-                _ => panic!("Expected writeset txn in genesis txn"),
-            }
+            .0
         };
-        Self::from_genesis(&genesis_write_set)
+        Self::from_genesis(genesis_change_set.write_set())
     }
 
     /// Creates a number of [`Account`] instances all with the same balance and sequence number,
@@ -158,22 +157,19 @@ impl FakeExecutor {
         lcs::from_bytes(data_blob.as_slice()).ok()
     }
 
-    /// Reads the balance resource value for an account from this executor's data store.
-    pub fn read_balance_resource(&self, account: &Account) -> Option<BalanceResource> {
-        let ap = account.make_balance_access_path();
-        let data_blob = StateView::get(&self.data_store, &ap)
-            .expect("account must exist in data store")
-            .expect("data must exist in data store");
-        lcs::from_bytes(data_blob.as_slice()).ok()
-    }
-
-    /// Reads the AccountResource and BalanceResource for this account. These are coupled together.
-    pub fn read_account_info(
+    /// Reads the balance resource value for an account from this executor's data store with the
+    /// given balance currency_code.
+    pub fn read_balance_resource(
         &self,
         account: &Account,
-    ) -> Option<(AccountResource, BalanceResource)> {
-        self.read_account_resource(account)
-            .and_then(|ar| self.read_balance_resource(account).map(|br| (ar, br)))
+        balance_currency_code: Identifier,
+    ) -> Option<BalanceResource> {
+        let ap = account.make_balance_access_path(balance_currency_code);
+        StateView::get(&self.data_store, &ap)
+            .unwrap_or_else(|_| panic!("account {:?} must exist in data store", account.address()))
+            .map(|data_blob| {
+                lcs::from_bytes(data_blob.as_slice()).expect("Failure decoding balance resource")
+            })
     }
 
     /// Executes the given block of transactions.
@@ -248,15 +244,15 @@ impl FakeExecutor {
     }
 
     pub fn new_block(&mut self) {
-        let validator_address =
-            *generator::validator_swarm_for_testing(10).validator_set[0].account_address();
+        let validator_set = ValidatorSet::fetch_config(&self.data_store)
+            .expect("Unable to retrieve the validator set from storage");
         self.block_time += 1;
         let new_block = BlockMetadata::new(
             HashValue::zero(),
             0,
             self.block_time,
             vec![],
-            validator_address,
+            *validator_set.payload()[0].account_address(),
         );
         let output = self
             .execute_transaction_block(vec![Transaction::BlockMetadata(new_block)])
@@ -268,5 +264,44 @@ impl FakeExecutor {
         assert!(event.key() == &new_block_event_key());
         assert!(lcs::from_bytes::<NewBlockEvent>(event.event_data()).is_ok());
         self.apply_write_set(output.write_set());
+    }
+
+    fn module(name: &str) -> ModuleId {
+        ModuleId::new(CORE_CODE_ADDRESS, Identifier::new(name).unwrap())
+    }
+
+    fn name(name: &str) -> Identifier {
+        Identifier::new(name).unwrap()
+    }
+
+    pub fn set_block_time(&mut self, new_block_time: u64) {
+        self.block_time = new_block_time;
+    }
+
+    pub fn exec(
+        &mut self,
+        module_name: &str,
+        function_name: &str,
+        type_params: Vec<TypeTag>,
+        args: Vec<Value>,
+    ) {
+        let write_set = {
+            let cost_table = zero_cost_schedule();
+            let mut cost_strategy = CostStrategy::system(&cost_table, GasUnits::new(100_000_000));
+            let vm = MoveVM::new();
+            let remote_view = RemoteStorage::new(&self.data_store);
+            let mut cache = TransactionDataCache::new(&remote_view);
+            vm.execute_function(
+                &Self::module(module_name),
+                &Self::name(function_name),
+                type_params,
+                args,
+                &mut cache,
+                &mut cost_strategy,
+            )
+            .unwrap_or_else(|e| panic!("Error calling {}.{}: {}", module_name, function_name, e));
+            cache.make_write_set().expect("Failed to generate writeset")
+        };
+        self.data_store.add_write_set(&write_set);
     }
 }

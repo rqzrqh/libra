@@ -43,9 +43,7 @@ impl StateStore {
         address: AccountAddress,
         version: Version,
     ) -> Result<(Option<AccountStateBlob>, SparseMerkleProof)> {
-        let (blob, proof) =
-            JellyfishMerkleTree::new(self).get_with_proof(address.hash(), version)?;
-        Ok((blob, proof))
+        JellyfishMerkleTree::new(self).get_with_proof(address.hash(), version)
     }
 
     /// Gets the proof that proves a range of accounts.
@@ -110,6 +108,10 @@ impl StateStore {
         JellyfishMerkleTree::new(self).get_root_hash(version)
     }
 
+    pub fn get_root_hash_option(&self, version: Version) -> Result<Option<HashValue>> {
+        JellyfishMerkleTree::new(self).get_root_hash_option(version)
+    }
+
     /// Finds the rightmost leaf by scanning the entire DB.
     #[cfg(test)]
     pub fn get_rightmost_leaf_naive(&self) -> Result<Option<(NodeKey, LeafNode)>> {
@@ -118,7 +120,7 @@ impl StateStore {
         let mut iter = self
             .db
             .iter::<JellyfishMerkleNodeSchema>(Default::default())?;
-        iter.seek_to_first()?;
+        iter.seek_to_first();
 
         while let Some((node_key, node)) = iter.next().transpose()? {
             if let Node::Leaf(leaf_node) = node {
@@ -148,7 +150,7 @@ impl TreeReader for StateStore {
         let mut iter = self
             .db
             .iter::<JellyfishMerkleNodeSchema>(Default::default())?;
-        iter.seek_to_first()?;
+        iter.seek_to_first();
         let version = match iter.next().transpose()? {
             Some((node_key, _node)) => node_key.version(),
             None => return Ok(None),

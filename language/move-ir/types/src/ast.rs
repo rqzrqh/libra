@@ -6,8 +6,8 @@ use crate::{
     spec_language_ast::{Condition, Invariant, SyntheticDefinition},
 };
 use anyhow::Result;
-use libra_types::{account_address::AccountAddress, language_storage::ModuleId};
-use move_core_types::identifier::Identifier;
+use libra_types::account_address::AccountAddress;
+use move_core_types::{identifier::Identifier, language_storage::ModuleId};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -158,8 +158,8 @@ pub enum Kind {
     All,
     /// `Resource` types must follow move semantics and various resource safety rules.
     Resource,
-    /// `Unrestricted` types do not need to follow the `Resource` rules.
-    Unrestricted,
+    /// `Copyable` types do not need to follow the `Resource` rules.
+    Copyable,
 }
 
 //**************************************************************************************************
@@ -171,6 +171,8 @@ pub enum Kind {
 pub enum Type {
     /// `address`
     Address,
+    /// `signer`
+    Signer,
     /// `u8`
     U8,
     /// `u64`
@@ -356,6 +358,8 @@ pub enum Builtin {
     MoveFrom(StructName, Vec<Type>),
     /// Publish an instantiated struct object into sender's account.
     MoveToSender(StructName, Vec<Type>),
+    /// Publish an instantiated struct object into signer's (signer is the first arg) account.
+    MoveTo(StructName, Vec<Type>),
 
     /// Convert a mutable reference into an immutable one
     Freeze,
@@ -660,6 +664,7 @@ pub enum Bytecode_ {
     Exists(StructName, Vec<Type>),
     MoveFrom(StructName, Vec<Type>),
     MoveToSender(StructName, Vec<Type>),
+    MoveTo(StructName, Vec<Type>),
     Shl,
     Shr,
 }
@@ -953,12 +958,12 @@ impl FunctionSignature {
     pub fn new(
         formals: Vec<(Var, Type)>,
         return_type: Vec<Type>,
-        type_formals: Vec<(TypeVar, Kind)>,
+        type_parameters: Vec<(TypeVar, Kind)>,
     ) -> Self {
         FunctionSignature {
             formals,
             return_type,
-            type_formals,
+            type_formals: type_parameters,
         }
     }
 }
@@ -970,12 +975,12 @@ impl Function_ {
         visibility: FunctionVisibility,
         formals: Vec<(Var, Type)>,
         return_type: Vec<Type>,
-        type_formals: Vec<(TypeVar, Kind)>,
+        type_parameters: Vec<(TypeVar, Kind)>,
         acquires: Vec<StructName>,
         specifications: Vec<Condition>,
         body: FunctionBody,
     ) -> Self {
-        let signature = FunctionSignature::new(formals, return_type, type_formals);
+        let signature = FunctionSignature::new(formals, return_type, type_parameters);
         Function_ {
             visibility,
             signature,
@@ -1231,7 +1236,7 @@ impl fmt::Display for Kind {
             match self {
                 Kind::All => "all",
                 Kind::Resource => "resource",
-                Kind::Unrestricted => "unrestricted",
+                Kind::Copyable => "copyable",
             }
         )
     }
@@ -1486,6 +1491,7 @@ impl fmt::Display for Type {
             Type::U128 => write!(f, "u128"),
             Type::Bool => write!(f, "bool"),
             Type::Address => write!(f, "address"),
+            Type::Signer => write!(f, "signer"),
             Type::Vector(ty) => write!(f, "vector<{}>", ty),
             Type::Struct(ident, tys) => write!(f, "{}{}", ident, format_type_actuals(tys)),
             Type::Reference(is_mutable, t) => {
@@ -1521,6 +1527,7 @@ impl fmt::Display for Builtin {
             Builtin::MoveToSender(t, tys) => {
                 write!(f, "move_to_sender<{}{}>", t, format_type_actuals(tys))
             }
+            Builtin::MoveTo(t, tys) => write!(f, "move_to<{}{}>", t, format_type_actuals(tys)),
             Builtin::Freeze => write!(f, "freeze"),
             Builtin::ToU8 => write!(f, "to_u8"),
             Builtin::ToU64 => write!(f, "to_u64"),
@@ -1827,6 +1834,7 @@ impl fmt::Display for Bytecode_ {
             Bytecode_::MoveToSender(n, tys) => {
                 write!(f, "MoveToSender {}{}", n, format_type_actuals(tys))
             }
+            Bytecode_::MoveTo(n, tys) => write!(f, "MoveTo {}{}", n, format_type_actuals(tys)),
             Bytecode_::Shl => write!(f, "Shl"),
             Bytecode_::Shr => write!(f, "Shr"),
         }

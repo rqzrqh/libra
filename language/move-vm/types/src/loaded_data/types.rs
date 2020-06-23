@@ -4,24 +4,29 @@
 
 use libra_types::{
     account_address::AccountAddress,
-    language_storage::{StructTag, TypeTag},
     vm_error::{StatusCode, VMStatus},
 };
-use move_core_types::identifier::Identifier;
+use move_core_types::{
+    identifier::Identifier,
+    language_storage::{StructTag, TypeTag},
+    value::{MoveStructLayout, MoveTypeLayout},
+};
+use std::{convert::TryInto, fmt::Write};
 use vm::errors::VMResult;
 
-#[cfg(feature = "fuzzing")]
+use libra_types::access_path::AccessPath;
 use serde::{Deserialize, Serialize};
 
 /// VM representation of a struct type in Move.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "fuzzing", derive(Serialize, Deserialize, Eq, PartialEq))]
-pub struct StructType {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "fuzzing", derive(Eq, PartialEq))]
+pub struct FatStructType {
     pub address: AccountAddress,
     pub module: Identifier,
     pub name: Identifier,
-    pub ty_args: Vec<Type>,
-    pub layout: Vec<Type>,
+    pub is_resource: bool,
+    pub ty_args: Vec<FatType>,
+    pub layout: Vec<FatType>,
 }
 
 /// VM representation of a Move type that gives access to both the fully qualified
@@ -31,66 +36,87 @@ pub struct StructType {
 /// should NOT be serialized in any form. Currently we still derive `Serialize` and
 /// `Deserialize`, but this is a hack for fuzzing and should be guarded behind the
 /// "fuzzing" feature flag. We should look into ways to get rid of this.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "fuzzing", derive(Serialize, Deserialize, Eq, PartialEq))]
-pub enum Type {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "fuzzing", derive(Eq, PartialEq))]
+pub enum FatType {
     Bool,
     U8,
     U64,
     U128,
     Address,
-    Vector(Box<Type>),
-    Struct(Box<StructType>),
-    Reference(Box<Type>),
-    MutableReference(Box<Type>),
+    Signer,
+    Vector(Box<FatType>),
+    Struct(Box<FatStructType>),
+    Reference(Box<FatType>),
+    MutableReference(Box<FatType>),
     TyParam(usize),
 }
 
-impl StructType {
-    pub fn subst(self, ty_args: &[Type]) -> VMResult<StructType> {
+impl FatStructType {
+    pub fn resource_path(&self) -> VMResult<Vec<u8>> {
+        Ok(AccessPath::resource_access_vec(&self.struct_tag()?))
+    }
+
+    pub fn subst(&self, ty_args: &[FatType]) -> VMResult<FatStructType> {
         Ok(Self {
             address: self.address,
-            module: self.module,
-            name: self.name,
+            module: self.module.clone(),
+            name: self.name.clone(),
+            is_resource: self.is_resource,
             ty_args: self
                 .ty_args
-                .into_iter()
+                .iter()
                 .map(|ty| ty.subst(ty_args))
                 .collect::<VMResult<_>>()?,
             layout: self
                 .layout
-                .into_iter()
+                .iter()
                 .map(|ty| ty.subst(ty_args))
                 .collect::<VMResult<_>>()?,
         })
     }
 
-    pub fn into_struct_tag(self) -> VMResult<StructTag> {
+    pub fn struct_tag(&self) -> VMResult<StructTag> {
         let ty_args = self
             .ty_args
-            .into_iter()
-            .map(|ty| ty.into_type_tag())
+            .iter()
+            .map(|ty| ty.type_tag())
             .collect::<VMResult<Vec<_>>>()?;
         Ok(StructTag {
             address: self.address,
-            module: self.module,
-            name: self.name,
+            module: self.module.clone(),
+            name: self.name.clone(),
             type_params: ty_args,
         })
     }
+
+    pub fn debug_print<B: Write>(&self, buf: &mut B) -> VMResult<()> {
+        debug_write!(buf, "{}::{}", self.module, self.name)?;
+        let mut it = self.ty_args.iter();
+        if let Some(ty) = it.next() {
+            debug_write!(buf, "<")?;
+            ty.debug_print(buf)?;
+            for ty in it {
+                debug_write!(buf, ", ")?;
+                ty.debug_print(buf)?;
+            }
+            debug_write!(buf, ">")?;
+        }
+        Ok(())
+    }
 }
 
-impl Type {
-    pub fn subst(self, ty_args: &[Type]) -> VMResult<Type> {
-        use Type::*;
+impl FatType {
+    pub fn subst(&self, ty_args: &[FatType]) -> VMResult<FatType> {
+        use FatType::*;
 
         let res = match self {
-            TyParam(idx) => match ty_args.get(idx) {
+            TyParam(idx) => match ty_args.get(*idx) {
                 Some(ty) => ty.clone(),
                 None => {
                     return Err(VMStatus::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                         .with_message(format!(
-                            "type substitution failed: index out of bounds -- len {} got {}",
+                            "fat type substitution failed: index out of bounds -- len {} got {}",
                             ty_args.len(),
                             idx
                         )));
@@ -102,6 +128,7 @@ impl Type {
             U64 => U64,
             U128 => U128,
             Address => Address,
+            Signer => Signer,
             Vector(ty) => Vector(Box::new(ty.subst(ty_args)?)),
             Reference(ty) => Reference(Box::new(ty.subst(ty_args)?)),
             MutableReference(ty) => MutableReference(Box::new(ty.subst(ty_args)?)),
@@ -112,8 +139,8 @@ impl Type {
         Ok(res)
     }
 
-    pub fn into_type_tag(self) -> VMResult<TypeTag> {
-        use Type::*;
+    pub fn type_tag(&self) -> VMResult<TypeTag> {
+        use FatType::*;
 
         let res = match self {
             Bool => TypeTag::Bool,
@@ -121,8 +148,9 @@ impl Type {
             U64 => TypeTag::U64,
             U128 => TypeTag::U128,
             Address => TypeTag::Address,
-            Vector(ty) => TypeTag::Vector(Box::new(ty.into_type_tag()?)),
-            Struct(struct_ty) => TypeTag::Struct(struct_ty.into_struct_tag()?),
+            Signer => TypeTag::Signer,
+            Vector(ty) => TypeTag::Vector(Box::new(ty.type_tag()?)),
+            Struct(struct_ty) => TypeTag::Struct(struct_ty.struct_tag()?),
 
             ty @ Reference(_) | ty @ MutableReference(_) | ty @ TyParam(_) => {
                 return Err(VMStatus::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
@@ -132,6 +160,53 @@ impl Type {
 
         Ok(res)
     }
+
+    pub fn is_resource(&self) -> VMResult<bool> {
+        use FatType::*;
+
+        match self {
+            Bool | U8 | U64 | U128 | Address | Reference(_) | MutableReference(_) => Ok(false),
+            Signer => Ok(true),
+            Vector(ty) => ty.is_resource(),
+            Struct(struct_ty) => Ok(struct_ty.is_resource),
+            // In the VM, concrete type arguments are required for type resolution and the only place
+            // uninstantiated type parameters can show up is the cache.
+            //
+            // Therefore `is_resource` should only be called upon types outside the cache, in which
+            // case it will always succeed. (Internal invariant violation otherwise.)
+            TyParam(_) => Err(VMStatus::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
+                .with_message("cannot check if a type parameter is a resource or not".to_string())),
+        }
+    }
+
+    pub fn debug_print<B: Write>(&self, buf: &mut B) -> VMResult<()> {
+        use FatType::*;
+
+        match self {
+            Bool => debug_write!(buf, "bool"),
+            U8 => debug_write!(buf, "u8"),
+            U64 => debug_write!(buf, "u64"),
+            U128 => debug_write!(buf, "u128"),
+            Address => debug_write!(buf, "address"),
+            Signer => debug_write!(buf, "signer"),
+            Vector(elem_ty) => {
+                debug_write!(buf, "vector<")?;
+                elem_ty.debug_print(buf)?;
+                debug_write!(buf, ">")
+            }
+            Struct(struct_ty) => struct_ty.debug_print(buf),
+            Reference(ty) => {
+                debug_write!(buf, "&")?;
+                ty.debug_print(buf)
+            }
+            MutableReference(ty) => {
+                debug_write!(buf, "&mut ")?;
+                ty.debug_print(buf)
+            }
+            TyParam(_) => Err(VMStatus::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
+                .with_message("cannot print out uninstantiated type params".to_string())),
+        }
+    }
 }
 
 #[cfg(feature = "fuzzing")]
@@ -139,12 +214,19 @@ pub mod prop {
     use super::*;
     use proptest::{collection::vec, prelude::*};
 
-    impl Type {
+    impl FatType {
         /// Generate a random primitive Type, no Struct or Vector.
         pub fn single_value_strategy() -> impl Strategy<Value = Self> {
-            use Type::*;
+            use FatType::*;
 
-            prop_oneof![Just(Bool), Just(U8), Just(U64), Just(U128), Just(Address),]
+            prop_oneof![
+                Just(Bool),
+                Just(U8),
+                Just(U64),
+                Just(U128),
+                Just(Address),
+                Just(Signer)
+            ]
         }
 
         /// Generate a primitive Value, a Struct or a Vector.
@@ -153,43 +235,82 @@ pub mod prop {
             desired_size: u32,
             expected_branch_size: u32,
         ) -> impl Strategy<Value = Self> {
-            use Type::*;
+            use FatType::*;
 
             let leaf = Self::single_value_strategy();
             leaf.prop_recursive(depth, desired_size, expected_branch_size, |inner| {
                 prop_oneof![
                     inner
                         .clone()
-                        .prop_map(|layout| Type::Vector(Box::new(layout))),
+                        .prop_map(|layout| FatType::Vector(Box::new(layout))),
                     (
                         any::<AccountAddress>(),
                         any::<Identifier>(),
                         any::<Identifier>(),
+                        any::<bool>(),
                         vec(inner.clone(), 0..4),
                         vec(inner, 0..10)
                     )
                         .prop_map(
-                            |(address, module, name, ty_args, layout)| Struct(Box::new(
-                                StructType {
+                            |(address, module, name, is_resource, ty_args, layout)| Struct(
+                                Box::new(FatStructType {
                                     address,
                                     module,
                                     name,
+                                    is_resource,
                                     ty_args,
                                     layout,
-                                }
-                            ))
+                                })
+                            )
                         ),
                 ]
             })
         }
     }
 
-    impl Arbitrary for Type {
+    impl Arbitrary for FatType {
         type Parameters = ();
         fn arbitrary_with(_args: ()) -> Self::Strategy {
             Self::nested_strategy(3, 20, 10).boxed()
         }
 
         type Strategy = BoxedStrategy<Self>;
+    }
+}
+
+impl TryInto<MoveStructLayout> for &FatStructType {
+    type Error = VMStatus;
+
+    fn try_into(self) -> Result<MoveStructLayout, Self::Error> {
+        Ok(MoveStructLayout::new(
+            self.layout
+                .iter()
+                .map(|ty| ty.try_into())
+                .collect::<VMResult<Vec<_>>>()?,
+        ))
+    }
+}
+
+impl TryInto<MoveTypeLayout> for &FatType {
+    type Error = VMStatus;
+
+    fn try_into(self) -> Result<MoveTypeLayout, Self::Error> {
+        Ok(match self {
+            FatType::Address => MoveTypeLayout::Address,
+            FatType::U8 => MoveTypeLayout::U8,
+            FatType::U64 => MoveTypeLayout::U64,
+            FatType::U128 => MoveTypeLayout::U128,
+            FatType::Bool => MoveTypeLayout::Bool,
+            FatType::Vector(v) => MoveTypeLayout::Vector(Box::new(v.as_ref().try_into()?)),
+            FatType::Struct(s) => MoveTypeLayout::Struct(MoveStructLayout::new(
+                s.layout
+                    .iter()
+                    .map(|ty| ty.try_into())
+                    .collect::<VMResult<Vec<_>>>()?,
+            )),
+            FatType::Signer => MoveTypeLayout::Signer,
+
+            _ => return Err(VMStatus::new(StatusCode::ABORT_TYPE_MISMATCH_ERROR)),
+        })
     }
 }

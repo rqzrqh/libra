@@ -3,14 +3,16 @@
 
 use crate::state_replication::TxnManager;
 use anyhow::{format_err, Result};
+use consensus_types::{block::Block, common::Payload};
 use debug_interface::prelude::*;
 use executor_types::StateComputeResult;
 use futures::channel::{mpsc, oneshot};
-use libra_crypto::HashValue;
+use itertools::Itertools;
 use libra_mempool::{
     CommittedTransaction, ConsensusRequest, ConsensusResponse, TransactionExclusion,
 };
-use libra_types::transaction::{SignedTransaction, TransactionStatus};
+use libra_metrics::monitor;
+use libra_types::transaction::TransactionStatus;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -30,13 +32,7 @@ impl MempoolProxy {
 
 #[async_trait::async_trait]
 impl TxnManager for MempoolProxy {
-    type Payload = Vec<SignedTransaction>;
-
-    async fn pull_txns(
-        &mut self,
-        max_size: u64,
-        exclude_payloads: Vec<&Self::Payload>,
-    ) -> Result<Self::Payload> {
+    async fn pull_txns(&self, max_size: u64, exclude_payloads: Vec<&Payload>) -> Result<Payload> {
         let mut exclude_txns = vec![];
         for payload in exclude_payloads {
             for transaction in payload {
@@ -51,7 +47,10 @@ impl TxnManager for MempoolProxy {
         // send to shared mempool
         self.consensus_to_mempool_sender.clone().try_send(req)?;
         // wait for response
-        match timeout(Duration::from_secs(1), callback_rcv).await {
+        match monitor!(
+            "pull_txn",
+            timeout(Duration::from_secs(1), callback_rcv).await
+        ) {
             Err(_) => Err(format_err!(
                 "[consensus] did not receive GetBlockResponse on time"
             )),
@@ -64,14 +63,18 @@ impl TxnManager for MempoolProxy {
         }
     }
 
-    // Consensus notifies mempool of committed transactions that were rejected
-    async fn commit_txns(
-        &mut self,
-        txns: &Self::Payload,
-        compute_results: &StateComputeResult,
-    ) -> Result<()> {
+    // Consensus notifies mempool of executed transactions
+    async fn notify(&self, block: &Block, compute_results: &StateComputeResult) -> Result<()> {
         let mut rejected_txns = vec![];
-        for (txn, status) in txns.iter().zip(compute_results.compute_status().iter()) {
+        let txns = match block.payload() {
+            Some(txns) => txns,
+            None => return Ok(()),
+        };
+        // skip the block metadata txn result
+        for (txn, status) in txns
+            .iter()
+            .zip_eq(compute_results.compute_status().iter().skip(1))
+        {
             if let TransactionStatus::Discard(_) = status {
                 rejected_txns.push(CommittedTransaction {
                     sender: txn.sender(),
@@ -90,20 +93,21 @@ impl TxnManager for MempoolProxy {
         // send to shared mempool
         self.consensus_to_mempool_sender.clone().try_send(req)?;
 
-        if let Err(e) = timeout(Duration::from_secs(1), callback_rcv).await {
+        if let Err(e) = monitor!(
+            "notify_mempool",
+            timeout(Duration::from_secs(1), callback_rcv).await
+        ) {
             Err(format_err!("[consensus] txn manager did not receive ACK for commit notification sent to mempool on time: {:?}", e))
         } else {
             Ok(())
         }
     }
 
-    fn _clone_box(&self) -> Box<dyn TxnManager<Payload = Self::Payload>> {
-        Box::new(self.clone())
-    }
-
-    fn trace_transactions(&self, txns: &Self::Payload, block_id: HashValue) {
-        for txn in txns.iter() {
-            trace_edge!("pull_txns", {"txn", txn.sender(), txn.sequence_number()}, {"block", block_id});
-        }
+    fn trace_transactions(&self, block: &Block) {
+        if let Some(txns) = block.payload() {
+            for txn in txns.iter() {
+                trace_edge!("pull_txns", {"txn", txn.sender(), txn.sequence_number()}, {"block", block.id()});
+            }
+        };
     }
 }

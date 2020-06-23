@@ -4,24 +4,26 @@
 #[cfg(test)]
 mod mock_vm_test;
 
-use libra_crypto::ed25519::compat;
+use libra_crypto::{ed25519::Ed25519PrivateKey, PrivateKey, Uniform};
 use libra_state_view::StateView;
 use libra_types::{
     access_path::AccessPath,
     account_address::AccountAddress,
-    account_config::lbr_type_tag,
+    account_config::{association_address, validator_set_address, LBR_NAME},
     contract_event::ContractEvent,
     event::EventKey,
-    language_storage::TypeTag,
+    on_chain_config::{
+        config_address, new_epoch_event_key, ConfigurationResource, OnChainConfig, ValidatorSet,
+    },
     transaction::{
         RawTransaction, Script, SignedTransaction, Transaction, TransactionArgument,
         TransactionOutput, TransactionPayload, TransactionStatus,
     },
-    validator_set::ValidatorSet,
     vm_error::{StatusCode, VMStatus},
     write_set::{WriteOp, WriteSet, WriteSetMut},
 };
 use libra_vm::VMExecutor;
+use move_core_types::{language_storage::TypeTag, move_resource::MoveResource};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
@@ -64,10 +66,10 @@ impl VMExecutor for MockVM {
                 gen_genesis_writeset(),
                 // mock the validator set event
                 vec![ContractEvent::new(
-                    ValidatorSet::change_event_key(),
+                    new_epoch_event_key(),
                     0,
                     TypeTag::Bool,
-                    lcs::to_bytes(&ValidatorSet::new(vec![])).unwrap(),
+                    lcs::to_bytes(&0).unwrap(),
                 )],
                 0,
                 KEEP_STATUS.clone(),
@@ -142,18 +144,17 @@ impl VMExecutor for MockVM {
                     ));
                 }
                 MockVMTransaction::Reconfiguration => {
-                    let account = AccountAddress::new([0xff; AccountAddress::LENGTH]);
-                    let balance_access_path = balance_ap(account);
-                    read_balance_from_storage(state_view, &balance_access_path);
+                    read_balance_from_storage(state_view, &balance_ap(validator_set_address()));
+                    read_balance_from_storage(state_view, &balance_ap(association_address()));
                     outputs.push(TransactionOutput::new(
                         // WriteSet cannot be empty so use genesis writeset only for testing.
                         gen_genesis_writeset(),
                         // mock the validator set event
                         vec![ContractEvent::new(
-                            ValidatorSet::change_event_key(),
+                            new_epoch_event_key(),
                             0,
                             TypeTag::Bool,
-                            lcs::to_bytes(&ValidatorSet::new(vec![])).unwrap(),
+                            lcs::to_bytes(&0).unwrap(),
                         )],
                         0,
                         KEEP_STATUS.clone(),
@@ -220,12 +221,15 @@ fn seqnum_ap(account: AccountAddress) -> AccessPath {
 }
 
 fn gen_genesis_writeset() -> WriteSet {
-    let address = AccountAddress::new([0xff; AccountAddress::LENGTH]);
-    let path = b"hello".to_vec();
     let mut write_set = WriteSetMut::default();
+    let validator_set_ap = ValidatorSet::CONFIG_ID.access_path();
     write_set.push((
-        AccessPath::new(address, path),
-        WriteOp::Value(b"world".to_vec()),
+        validator_set_ap,
+        WriteOp::Value(lcs::to_bytes(&ValidatorSet::new(vec![])).unwrap()),
+    ));
+    write_set.push((
+        AccessPath::new(config_address(), ConfigurationResource::resource_path()),
+        WriteOp::Value(lcs::to_bytes(&ConfigurationResource::default()).unwrap()),
     ));
     write_set
         .freeze()
@@ -281,13 +285,13 @@ fn gen_events(sender: AccountAddress) -> Vec<ContractEvent> {
 
 pub fn encode_mint_program(amount: u64) -> Script {
     let argument = TransactionArgument::U64(amount);
-    Script::new(vec![], vec![argument])
+    Script::new(vec![], vec![], vec![argument])
 }
 
 pub fn encode_transfer_program(recipient: AccountAddress, amount: u64) -> Script {
     let argument1 = TransactionArgument::Address(recipient);
     let argument2 = TransactionArgument::U64(amount);
-    Script::new(vec![], vec![argument1, argument2])
+    Script::new(vec![], vec![], vec![argument1, argument2])
 }
 
 pub fn encode_mint_transaction(sender: AccountAddress, amount: u64) -> Transaction {
@@ -309,14 +313,14 @@ fn encode_transaction(sender: AccountAddress, program: Script) -> Transaction {
         program,
         0,
         0,
-        lbr_type_tag(),
+        LBR_NAME.to_owned(),
         std::time::Duration::from_secs(0),
     );
 
-    let (privkey, pubkey) = compat::generate_keypair(None);
+    let privkey = Ed25519PrivateKey::generate_for_testing();
     Transaction::UserTransaction(
         raw_transaction
-            .sign(&privkey, pubkey)
+            .sign(&privkey, privkey.public_key())
             .expect("Failed to sign raw transaction.")
             .into_inner(),
     )
@@ -325,10 +329,10 @@ fn encode_transaction(sender: AccountAddress, program: Script) -> Transaction {
 pub fn encode_reconfiguration_transaction(sender: AccountAddress) -> Transaction {
     let raw_transaction = RawTransaction::new_write_set(sender, 0, WriteSet::default());
 
-    let (privkey, pubkey) = compat::generate_keypair(None);
+    let privkey = Ed25519PrivateKey::generate_for_testing();
     Transaction::UserTransaction(
         raw_transaction
-            .sign(&privkey, pubkey)
+            .sign(&privkey, privkey.public_key())
             .expect("Failed to sign raw transaction.")
             .into_inner(),
     )
@@ -365,9 +369,6 @@ fn decode_transaction(txn: &SignedTransaction) -> MockVMTransaction {
         TransactionPayload::WriteSet(_) => {
             // Use WriteSet for reconfig only for testing.
             MockVMTransaction::Reconfiguration
-        }
-        TransactionPayload::Program => {
-            unimplemented!("MockVM does not support Program transaction payload.")
         }
         TransactionPayload::Module(_) => {
             unimplemented!("MockVM does not support Module transaction payload.")

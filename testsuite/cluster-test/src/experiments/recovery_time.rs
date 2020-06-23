@@ -10,7 +10,6 @@ use tokio::time;
 
 use crate::{
     cluster::Cluster,
-    effects::{Action, DeleteLibraData, Effect, StopContainer},
     experiments::{Context, Experiment, ExperimentParam},
     instance::Instance,
     tx_emitter::EmitJobRequest,
@@ -54,8 +53,6 @@ impl Experiment for RecoveryTime {
     }
 
     async fn run(&mut self, context: &mut Context<'_>) -> anyhow::Result<()> {
-        let stop_effect = StopContainer::new(self.instance.clone());
-        let delete_action = DeleteLibraData::new(self.instance.clone());
         context
             .tx_emitter
             .mint_accounts(
@@ -67,13 +64,11 @@ impl Experiment for RecoveryTime {
             )
             .await?;
         info!("Stopping {}", self.instance);
-        stop_effect.activate().await?;
-        info!("Deleted db for {}", self.instance);
-        delete_action.apply().await?;
-        info!("Starting instance {}", self.instance);
-        stop_effect.deactivate().await?;
+        self.instance.stop().await?;
+        info!("Deleting db and restarting node for {}", self.instance);
+        self.instance.start(true).await?;
         info!("Waiting for instance to be up: {}", self.instance);
-        while !self.instance.is_up() {
+        while self.instance.try_json_rpc().await.is_err() {
             time::delay_for(Duration::from_secs(1)).await;
         }
         let start_instant = Instant::now();

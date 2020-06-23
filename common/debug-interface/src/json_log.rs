@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
 use serde_json::{self, value as json};
-use std::{collections::VecDeque, sync::Mutex, time::SystemTime};
+use std::{collections::VecDeque, convert::TryInto, sync::Mutex, time::SystemTime};
 
+#[derive(Serialize, Deserialize, Clone)]
 pub struct JsonLogEntry {
-    pub name: &'static str,
-    pub timestamp: u128,
+    pub name: String,
+    pub timestamp: u64,
     pub json: json::Value,
 }
 
@@ -37,9 +39,11 @@ impl JsonLogEntry {
         let timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("now > UNIX_EPOCH")
-            .as_millis();
+            .as_millis()
+            .try_into()
+            .expect("Unable to convert u128 into u64");
         JsonLogEntry {
-            name,
+            name: name.into(),
             timestamp,
             json,
         }

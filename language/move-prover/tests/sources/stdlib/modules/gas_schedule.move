@@ -1,6 +1,4 @@
-// dep: tests/sources/stdlib/modules/transaction.move
-// dep: tests/sources/stdlib/modules/vector.move
-address 0x0:
+address 0x1 {
 
 // The gas schedule keeps two separate schedules for the gas:
 // * The instruction_schedule: This holds the gas for each bytecode instruction.
@@ -14,8 +12,8 @@ address 0x0:
 //    address, and will preload the vector with the gas schedule for instructions. The VM will then
 //    load this into memory at the startup of each block.
 module GasSchedule {
-    use 0x0::Vector;
-    use 0x0::Transaction;
+    use 0x1::Transaction;
+    use 0x1::Vector;
 
     // The gas cost for each instruction is represented using two amounts;
     // one for the cpu, and the other for storage.
@@ -31,7 +29,7 @@ module GasSchedule {
 
     // Initialize the table under the association account
     fun initialize(gas_schedule: T) {
-        Transaction::assert(Transaction::sender() == 0xA550C18, 0);
+        assert(Transaction::sender() == 0xA550C18, 0);
         move_to_sender<T>(gas_schedule);
     }
 
@@ -46,4 +44,5 @@ module GasSchedule {
         let native_table_len = Vector::length(&table.native_schedule);
         native_table_len
     }
+}
 }

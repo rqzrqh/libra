@@ -46,11 +46,13 @@ fn main() {
 
     if config.metrics.enabled {
         for network in &config.full_node_networks {
-            setup_metrics(network.peer_id, &config);
+            let peer_id = network.peer_id();
+            setup_metrics(peer_id, &config);
         }
 
         if let Some(network) = config.validator_network.as_ref() {
-            setup_metrics(network.peer_id, &config);
+            let peer_id = network.peer_id();
+            setup_metrics(peer_id, &config);
         }
     }
 

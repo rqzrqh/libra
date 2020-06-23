@@ -3,15 +3,15 @@
 
 use crate::{
     errors::Errors,
-    expansion::ast::Fields,
+    expansion::ast::{Fields, Value_},
     hlir::ast::{self as H, Block},
     naming::ast as N,
-    parser::ast::{BinOp_, Field, FunctionName, ModuleIdent, StructName, Value_, Var},
+    parser::ast::{BinOp_, Field, FunctionName, Kind_, ModuleIdent, StructName, Var},
     shared::{unique_map::UniqueMap, *},
     typing::ast as T,
 };
 use move_ir_types::location::*;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 //**************************************************************************************************
 // Vars
@@ -43,7 +43,7 @@ pub fn display_var(s: &str) -> DisplayVar {
         DisplayVar::Tmp
     } else {
         let mut orig = s.to_owned();
-        orig.split_off(orig.find('#').unwrap_or_else(|| s.len()));
+        orig.truncate(orig.find('#').unwrap_or_else(|| s.len()));
         DisplayVar::Orig(orig)
     }
 }
@@ -58,7 +58,7 @@ struct Context {
     function_locals: UniqueMap<Var, H::SingleType>,
     local_scope: UniqueMap<Var, Var>,
     used_locals: BTreeSet<Var>,
-    return_type: Option<H::Type>,
+    signature: Option<H::FunctionSignature>,
     has_return_abort: bool,
 }
 
@@ -70,7 +70,7 @@ impl Context {
             function_locals: UniqueMap::new(),
             local_scope: UniqueMap::new(),
             used_locals: BTreeSet::new(),
-            return_type: None,
+            signature: None,
             has_return_abort: false,
         }
     }
@@ -154,11 +154,9 @@ impl Context {
 pub fn program(prog: T::Program) -> (H::Program, Errors) {
     let mut context = Context::new(vec![]);
     let modules = modules(&mut context, prog.modules);
-    let main = prog
-        .main
-        .map(|(addr, n, fdef)| (addr, n.clone(), function(&mut context, n, fdef)));
+    let scripts = scripts(&mut context, prog.scripts);
 
-    (H::Program { modules, main }, context.get_errors())
+    (H::Program { modules, scripts }, context.get_errors())
 }
 
 fn modules(
@@ -196,6 +194,30 @@ fn module(
     )
 }
 
+fn scripts(
+    context: &mut Context,
+    tscripts: BTreeMap<String, T::Script>,
+) -> BTreeMap<String, H::Script> {
+    tscripts
+        .into_iter()
+        .map(|(n, s)| (n, script(context, s)))
+        .collect()
+}
+
+fn script(context: &mut Context, tscript: T::Script) -> H::Script {
+    let T::Script {
+        loc,
+        function_name,
+        function: tfunction,
+    } = tscript;
+    let function = function(context, function_name.clone(), tfunction);
+    H::Script {
+        loc,
+        function_name,
+        function,
+    }
+}
+
 //**************************************************************************************************
 // Functions
 //**************************************************************************************************
@@ -205,7 +227,7 @@ fn function(context: &mut Context, _name: FunctionName, f: T::Function) -> H::Fu
     let visibility = f.visibility;
     let signature = function_signature(context, f.signature);
     let acquires = f.acquires;
-    let body = function_body(context, &signature.return_type, f.body);
+    let body = function_body(context, &signature, f.body);
     H::Function {
         visibility,
         signature,
@@ -221,7 +243,6 @@ fn function_signature(context: &mut Context, sig: N::FunctionSignature) -> H::Fu
         .into_iter()
         .map(|(v, tty)| {
             let ty = single_type(context, tty);
-            context.used_locals.insert(v.clone());
             context.bind_local(v.clone(), ty.clone());
             (v, ty)
         })
@@ -236,7 +257,7 @@ fn function_signature(context: &mut Context, sig: N::FunctionSignature) -> H::Fu
 
 fn function_body(
     context: &mut Context,
-    ret_ty: &H::Type,
+    sig: &H::FunctionSignature,
     sp!(loc, tb_): T::FunctionBody,
 ) -> H::FunctionBody {
     use H::FunctionBody_ as HB;
@@ -248,11 +269,9 @@ fn function_body(
         }
         TB::Defined(seq) => {
             let mut body = VecDeque::new();
-            context.return_type = Some(ret_ty.clone());
+            context.signature = Some(sig.clone());
             assert!(!context.has_return_abort);
-            let final_exp = block(context, &mut body, loc, Some(&ret_ty), seq);
-            context.return_type = None;
-            context.has_return_abort = false;
+            let final_exp = block(context, &mut body, loc, Some(&sig.return_type), seq);
             match &final_exp.exp.value {
                 H::UnannotatedExp_::Unreachable => (),
                 _ => {
@@ -264,7 +283,10 @@ fn function_body(
             }
             let (mut locals, used) = context.extract_function_locals();
             let unused = check_unused_locals(context, &mut locals, used);
+            check_trailing_unit(context, &mut body);
             remove_unused_bindings(&unused, &mut body);
+            context.signature = None;
+            context.has_return_abort = false;
             HB::Defined { locals, body }
         }
     };
@@ -330,7 +352,10 @@ fn base_type(context: &Context, sp!(loc, nb_): N::Type) -> H::BaseType {
     use N::Type_ as NT;
     let b_ = match nb_ {
         NT::Var(_) => panic!("ICE tvar not expanded: {}:{}", loc.file(), loc.span()),
-        NT::Apply(None, _, _) => panic!("ICE kind not expanded: {:#?}", loc),
+        NT::Apply(None, n, tys) => {
+            crate::shared::ast_debug::print_verbose(&NT::Apply(None, n, tys));
+            panic!("ICE kind not expanded: {:#?}", loc)
+        }
         NT::Apply(Some(k), n, nbs) => HB::Apply(k, type_name(context, n), base_types(context, nbs)),
         NT::Param(tp) => HB::Param(tp),
         NT::UnresolvedError => HB::UnresolvedError,
@@ -375,7 +400,10 @@ fn type_(context: &Context, sp!(loc, ty_): N::Type) -> H::Type {
     use N::{TypeName_ as TN, Type_ as NT};
     let t_ = match ty_ {
         NT::Unit => HT::Unit,
-        NT::Apply(None, _, _) => panic!("ICE kind not expanded: {:#?}", loc),
+        NT::Apply(None, n, tys) => {
+            crate::shared::ast_debug::print_verbose(&NT::Apply(None, n, tys));
+            panic!("ICE kind not expanded: {:#?}", loc)
+        }
         NT::Apply(Some(_), sp!(_, TN::Multiple(_)), ss) => HT::Multiple(single_types(context, ss)),
         _ => HT::Single(single_type(context, sp(loc, ty_))),
     };
@@ -395,7 +423,12 @@ fn block(
 ) -> H::Exp {
     use T::SequenceItem_ as S;
     let last = match seq.pop_back() {
-        None => return H::exp(sp(loc, H::Type_::Unit), sp(loc, H::UnannotatedExp_::Unit)),
+        None => {
+            return H::exp(
+                sp(loc, H::Type_::Unit),
+                sp(loc, H::UnannotatedExp_::Unit { trailing: false }),
+            )
+        }
         Some(sp!(_, S::Seq(last))) => last,
         Some(_) => panic!("ICE last sequence item should be exp"),
     };
@@ -718,7 +751,7 @@ fn exp_impl(context: &mut Context, result: &mut Block, e: T::Exp) -> H::Exp {
                 block: loop_block,
             };
             result.push_back(sp(eloc, s_));
-            HE::Unit
+            HE::Unit { trailing: false }
         }
         TE::Loop {
             has_break,
@@ -735,14 +768,14 @@ fn exp_impl(context: &mut Context, result: &mut Block, e: T::Exp) -> H::Exp {
             if !has_break {
                 HE::Unreachable
             } else {
-                HE::Unit
+                HE::Unit { trailing: false }
             }
         }
         TE::Block(seq) => return block(context, result, eloc, None, seq),
 
         // Command-like expressions
         TE::Return(te) => {
-            let expected_type = context.return_type.clone();
+            let expected_type = context.signature.as_ref().map(|s| s.return_type.clone());
             let e = exp_(context, result, expected_type.as_ref(), *te);
             context.has_return_abort = true;
             let c = sp(eloc, C::Return(e));
@@ -770,17 +803,17 @@ fn exp_impl(context: &mut Context, result: &mut Block, e: T::Exp) -> H::Exp {
             let expected_type = expected_types(context, eloc, lvalue_ty);
             let e = exp_(context, result, Some(&expected_type), *te);
             assign_command(context, result, eloc, assigns, e);
-            HE::Unit
+            HE::Unit { trailing: false }
         }
         TE::Mutate(tl, tr) => {
             let er = exp(context, result, None, *tr);
             let el = exp(context, result, None, *tl);
             let c = sp(eloc, C::Mutate(el, er));
             result.push_back(sp(eloc, S::Command(c)));
-            HE::Unit
+            HE::Unit { trailing: false }
         }
         // All other expressiosn
-        TE::Unit => HE::Unit,
+        TE::Unit { trailing } => HE::Unit { trailing },
         TE::Value(v) => HE::Value(v),
         TE::InferredNum(_) => panic!("ICE unexpanded inferred num"),
         TE::Move { from_user, var } => HE::Move {
@@ -795,7 +828,6 @@ fn exp_impl(context: &mut Context, result: &mut Block, e: T::Exp) -> H::Exp {
 
         TE::Use(_) => panic!("ICE unexpanded use"),
         TE::ModuleCall(call) => {
-            use crate::shared::fake_natives::transaction as TXN;
             let T::ModuleCall {
                 module,
                 name,
@@ -804,48 +836,6 @@ fn exp_impl(context: &mut Context, result: &mut Block, e: T::Exp) -> H::Exp {
                 parameter_types,
                 acquires,
             } = *call;
-            let (a, m, f) = (
-                &module.0.value.address,
-                module.0.value.name.value(),
-                name.value(),
-            );
-            if let (&Address::LIBRA_CORE, TXN::MOD, TXN::ASSERT) = (a, m, f) {
-                let tbool = N::Type_::bool(eloc);
-                let tu64 = N::Type_::u64(eloc);
-                let tunit = sp(eloc, N::Type_::Unit);
-                let vcond = Var(sp(eloc, new_temp_name()));
-                let vcode = Var(sp(eloc, new_temp_name()));
-
-                let mut stmts = VecDeque::new();
-
-                let bvar = |v, st| sp(eloc, T::LValue_::Var(v, st));
-                let bind_list = sp(
-                    eloc,
-                    vec![
-                        bvar(vcond.clone(), Box::new(tbool.clone())),
-                        bvar(vcode.clone(), Box::new(tu64.clone())),
-                    ],
-                );
-                let tys = vec![Some(tbool.clone()), Some(tu64.clone())];
-                let bind = sp(eloc, T::SequenceItem_::Bind(bind_list, tys, arguments));
-                stmts.push_back(bind);
-
-                let mvar = |var, st| {
-                    let from_user = false;
-                    let mv = TE::Move { from_user, var };
-                    T::exp(st, sp(eloc, mv))
-                };
-                let econd = mvar(vcond, tu64);
-                let ecode = mvar(vcode, tbool);
-                let eabort = T::exp(tunit.clone(), sp(eloc, TE::Abort(Box::new(ecode))));
-                let eunit = T::exp(tunit.clone(), sp(eloc, TE::Unit));
-                let inlined_ = TE::IfElse(Box::new(econd), Box::new(eunit), Box::new(eabort));
-                let inlined = T::exp(tunit.clone(), sp(eloc, inlined_));
-                stmts.push_back(sp(eloc, T::SequenceItem_::Seq(Box::new(inlined))));
-
-                let block = T::exp(tunit, sp(eloc, TE::Block(stmts)));
-                return exp_impl(context, result, block);
-            }
             let expected_type = H::Type_::from_vec(eloc, single_types(context, parameter_types));
             let htys = base_types(context, type_arguments);
             let harg = exp(context, result, Some(&expected_type), *arguments);
@@ -858,10 +848,44 @@ fn exp_impl(context: &mut Context, result: &mut Block, e: T::Exp) -> H::Exp {
             };
             HE::ModuleCall(Box::new(call))
         }
-        TE::Builtin(bf, targ) => {
-            let arg = exp(context, result, None, *targ);
-            builtin(context, result, eloc, *bf, arg)
+        TE::Builtin(bt, arguments) if matches!(&*bt, sp!(_, T::BuiltinFunction_::Assert)) => {
+            let tbool = N::Type_::bool(eloc);
+            let tu64 = N::Type_::u64(eloc);
+            let tunit = sp(eloc, N::Type_::Unit);
+            let vcond = Var(sp(eloc, new_temp_name()));
+            let vcode = Var(sp(eloc, new_temp_name()));
+
+            let mut stmts = VecDeque::new();
+
+            let bvar = |v, st| sp(eloc, T::LValue_::Var(v, st));
+            let bind_list = sp(
+                eloc,
+                vec![
+                    bvar(vcond.clone(), Box::new(tbool.clone())),
+                    bvar(vcode.clone(), Box::new(tu64.clone())),
+                ],
+            );
+            let tys = vec![Some(tbool.clone()), Some(tu64.clone())];
+            let bind = sp(eloc, T::SequenceItem_::Bind(bind_list, tys, arguments));
+            stmts.push_back(bind);
+
+            let mvar = |var, st| {
+                let from_user = false;
+                let mv = TE::Move { from_user, var };
+                T::exp(st, sp(eloc, mv))
+            };
+            let econd = mvar(vcond, tu64);
+            let ecode = mvar(vcode, tbool);
+            let eabort = T::exp(tunit.clone(), sp(eloc, TE::Abort(Box::new(ecode))));
+            let eunit = T::exp(tunit.clone(), sp(eloc, TE::Unit { trailing: false }));
+            let inlined_ = TE::IfElse(Box::new(econd), Box::new(eunit), Box::new(eabort));
+            let inlined = T::exp(tunit.clone(), sp(eloc, inlined_));
+            stmts.push_back(sp(eloc, T::SequenceItem_::Seq(Box::new(inlined))));
+
+            let block = T::exp(tunit, sp(eloc, TE::Block(stmts)));
+            return exp_impl(context, result, block);
         }
+        TE::Builtin(bf, targ) => builtin(context, result, eloc, *bf, targ),
         TE::Dereference(te) => {
             let e = exp(context, result, None, *te);
             HE::Dereference(e)
@@ -1126,7 +1150,7 @@ fn bind_exp_(
     if tmps.is_empty() {
         let cmd = sp(loc, C::IgnoreAndPop { pop_num: 0, exp: e });
         result.push_back(sp(loc, S::Command(cmd)));
-        return E::Unit;
+        return E::Unit { trailing: false };
     }
     let lvalues = tmps
         .iter()
@@ -1164,31 +1188,54 @@ fn use_tmp(var: Var) -> H::UnannotatedExp_ {
 
 fn builtin(
     context: &mut Context,
-    _result: &mut Block,
+    result: &mut Block,
     _eloc: Loc,
     sp!(loc, tb_): T::BuiltinFunction,
-    arg: Box<H::Exp>,
+    targ: Box<T::Exp>,
 ) -> H::UnannotatedExp_ {
     use H::{BuiltinFunction_ as HB, UnannotatedExp_ as E};
     use T::BuiltinFunction_ as TB;
     match tb_ {
+        TB::MoveTo(bt) => {
+            let texpected_tys = vec![
+                sp(loc, N::Type_::Ref(false, Box::new(N::Type_::signer(loc)))),
+                bt.clone(),
+            ];
+            let texpected_ty_ = N::Type_::Apply(
+                Some(sp(loc, Kind_::Resource)),
+                sp(loc, N::TypeName_::Multiple(texpected_tys.len())),
+                texpected_tys,
+            );
+            let expected_ty = type_(context, sp(loc, texpected_ty_));
+            let arg = exp(context, result, Some(&expected_ty), *targ);
+            let ty = base_type(context, bt);
+            E::Builtin(Box::new(sp(loc, HB::MoveTo(ty))), arg)
+        }
         TB::MoveToSender(bt) => {
             let ty = base_type(context, bt);
+            let arg = exp(context, result, None, *targ);
             E::Builtin(Box::new(sp(loc, HB::MoveToSender(ty))), arg)
         }
         TB::MoveFrom(bt) => {
             let ty = base_type(context, bt);
+            let arg = exp(context, result, None, *targ);
             E::Builtin(Box::new(sp(loc, HB::MoveFrom(ty))), arg)
         }
         TB::BorrowGlobal(mut_, bt) => {
             let ty = base_type(context, bt);
+            let arg = exp(context, result, None, *targ);
             E::Builtin(Box::new(sp(loc, HB::BorrowGlobal(mut_, ty))), arg)
         }
         TB::Exists(bt) => {
             let ty = base_type(context, bt);
+            let arg = exp(context, result, None, *targ);
             E::Builtin(Box::new(sp(loc, HB::Exists(ty))), arg)
         }
-        TB::Freeze(_bt) => E::Freeze(arg),
+        TB::Freeze(_bt) => {
+            let arg = exp(context, result, None, *targ);
+            E::Freeze(arg)
+        }
+        TB::Assert => unreachable!(),
     }
 }
 
@@ -1347,7 +1394,7 @@ fn bind_for_short_circuit(e: &T::Exp) -> bool {
         | TE::TempBorrow(_, _)
         | TE::BinopExp(_, _, _, _) => true,
 
-        TE::Unit
+        TE::Unit { .. }
         | TE::Spec(_, _)
         | TE::Assign(_, _, _)
         | TE::Mutate(_, _)
@@ -1370,6 +1417,127 @@ fn bind_for_short_circuit_sequence(seq: &T::Sequence) -> bool {
 }
 
 //**************************************************************************************************
+// Trailing semicolon
+//**************************************************************************************************
+
+fn check_trailing_unit(context: &mut Context, block: &mut Block) {
+    use H::{Command_ as C, Statement_ as S, UnannotatedExp_ as E};
+    macro_rules! hcmd {
+        ($loc:pat, $cmd:pat) => {
+            sp!(_, S::Command(sp!($loc, $cmd)))
+        };
+    }
+    macro_rules! hignored {
+        ($loc:pat, $e:pat) => {
+            hcmd!(_, C::IgnoreAndPop { exp: H::Exp { exp: sp!($loc, $e), .. }, .. })
+        };
+    }
+    macro_rules! trailing {
+        ($uloc: pat) => {
+           hcmd!(
+               _,
+               C::IgnoreAndPop {
+                    exp: H::Exp { exp: sp!($uloc, E::Unit { trailing: true }), .. }, ..
+                }
+            )
+        }
+    }
+    macro_rules! trailing_returned {
+        ($uloc:pat) => {
+            hcmd!(
+                _,
+                C::Return(H::Exp {
+                    exp: sp!($uloc, E::Unit { trailing: true }),
+                    ..
+                })
+            )
+        };
+    }
+    fn divergent_block(block: &Block) -> bool {
+        matches!(
+            block.back(),
+            Some(hcmd!(_, C::Break))
+                | Some(hcmd!(_, C::Continue))
+                | Some(hcmd!(_, C::Abort(_)))
+                | Some(hcmd!(_, C::Return(_)))
+                | Some(hignored!(_, E::Unreachable))
+        )
+    }
+    macro_rules! invalid_trailing_unit {
+        ($context:ident, $loc:expr, $uloc:expr) => {{
+            let semi_msg = "Invalid trailing ';'";
+            let unreachable_msg = "Any code after this expression will not be reached";
+            let info_msg = "A trailing ';' in an expression block implicitly adds a '()' value \
+                        after the semicolon. That '()' value will not be reachable";
+            $context.error(vec![
+                ($uloc, semi_msg),
+                ($loc, unreachable_msg),
+                ($uloc, info_msg),
+            ]);
+            block.pop_back();
+        }};
+    }
+
+    block
+        .iter_mut()
+        .for_each(|s| check_trailing_unit_statement(context, s));
+    let len = block.len();
+    if len < 2 {
+        return;
+    }
+    match (&block[len - 2], &block[len - 1]) {
+        (sp!(loc, S::IfElse { if_block, else_block, ..}), trailing!(uloc))
+        | (sp!(loc, S::IfElse { if_block, else_block, ..}), trailing_returned!(uloc))
+            if divergent_block(if_block) && divergent_block(else_block) =>
+        {
+            invalid_trailing_unit!(context, *loc, *uloc)
+        }
+        (sp!(loc, S::Loop { has_break, ..}), trailing!(uloc))
+        | (sp!(loc, S::Loop { has_break, ..}), trailing_returned!(uloc))
+            if !has_break =>
+        {
+            invalid_trailing_unit!(context, *loc, *uloc)
+        }
+        (hcmd!(loc, C::Break), trailing!(uloc))
+        | (hcmd!(loc, C::Break), trailing_returned!(uloc))
+        | (hcmd!(loc, C::Continue), trailing!(uloc))
+        | (hcmd!(loc, C::Continue), trailing_returned!(uloc))
+        | (hcmd!(loc, C::Abort(_)), trailing!(uloc))
+        | (hcmd!(loc, C::Abort(_)), trailing_returned!(uloc))
+        | (hcmd!(loc, C::Return(_)), trailing!(uloc))
+        | (hcmd!(loc, C::Return(_)), trailing_returned!(uloc))
+        | (hignored!(loc, E::Unreachable), trailing!(uloc))
+        | (hignored!(loc, E::Unreachable), trailing_returned!(uloc)) => {
+            invalid_trailing_unit!(context, *loc, *uloc)
+        }
+        _ => (),
+    };
+}
+
+fn check_trailing_unit_statement(context: &mut Context, sp!(_, s_): &mut H::Statement) {
+    use H::Statement_ as S;
+    match s_ {
+        S::Command(_) => (),
+        S::IfElse {
+            if_block,
+            else_block,
+            ..
+        } => {
+            check_trailing_unit(context, if_block);
+            check_trailing_unit(context, else_block)
+        }
+        S::While {
+            cond: (cond_block, _),
+            block,
+        } => {
+            check_trailing_unit(context, cond_block);
+            check_trailing_unit(context, block)
+        }
+        S::Loop { block, .. } => check_trailing_unit(context, block),
+    }
+}
+
+//**************************************************************************************************
 // Unused locals
 //**************************************************************************************************
 
@@ -1378,18 +1546,39 @@ fn check_unused_locals(
     locals: &mut UniqueMap<Var, H::SingleType>,
     used: BTreeSet<Var>,
 ) -> BTreeSet<Var> {
+    let signature = context
+        .signature
+        .as_ref()
+        .expect("ICE Signature should always be defined when checking a function body");
     let mut unused = BTreeSet::new();
-    for (v, _) in locals.iter().filter(|(v, _)| !used.contains(v)) {
+    let mut errors = Vec::new();
+    // report unused locals
+    for (v, _) in locals
+        .iter()
+        .filter(|(v, _)| !used.contains(v) && !v.starts_with_underscore())
+    {
         let vstr = match display_var(v.value()) {
             DisplayVar::Tmp => panic!("ICE unused tmp"),
             DisplayVar::Orig(vstr) => vstr,
         };
-        let msg = format!(
-            "Unused local '{0}'. Consider removing or prefixing with an underscore: '_{0}'",
-            vstr
-        );
-        context.error(vec![(v.loc(), msg)]);
-        unused.insert(v);
+        let loc = v.loc();
+        let msg = if signature.is_parameter(&v) {
+            format!(
+                "Unused parameter '{0}'. Consider removing or prefixing with an underscore: '_{0}'",
+                vstr
+            )
+        } else {
+            // unused local variable; mark for removal
+            unused.insert(v);
+            format!(
+                "Unused local '{0}'. Consider removing or prefixing with an underscore: '_{0}'",
+                vstr
+            )
+        };
+        errors.push((loc, msg));
+    }
+    for error in errors {
+        context.error(vec![error]);
     }
     for v in &unused {
         locals.remove(v);

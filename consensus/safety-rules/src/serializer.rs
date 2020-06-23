@@ -3,31 +3,29 @@
 
 use crate::{ConsensusState, Error, SafetyRules, TSafetyRules};
 use consensus_types::{
-    block::Block, block_data::BlockData, common::Payload, quorum_cert::QuorumCert,
-    timeout::Timeout, vote::Vote, vote_proposal::VoteProposal,
+    block::Block, block_data::BlockData, timeout::Timeout, vote::Vote, vote_proposal::VoteProposal,
 };
 use libra_crypto::ed25519::Ed25519Signature;
+use libra_logger::warn;
+use libra_types::epoch_change::EpochChangeProof;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
 #[derive(Deserialize, Serialize)]
-pub enum SafetyRulesInput<T> {
+pub enum SafetyRulesInput {
     ConsensusState,
-    Update(Box<QuorumCert>),
-    StartNewEpoch(Box<QuorumCert>),
-    #[serde(bound = "T: Payload")]
-    ConstructAndSignVote(Box<VoteProposal<T>>),
-    #[serde(bound = "T: Payload")]
-    SignProposal(Box<BlockData<T>>),
+    Initialize(Box<EpochChangeProof>),
+    ConstructAndSignVote(Box<VoteProposal>),
+    SignProposal(Box<BlockData>),
     SignTimeout(Box<Timeout>),
 }
 
-pub struct SerializerService<T> {
-    internal: SafetyRules<T>,
+pub struct SerializerService {
+    internal: SafetyRules,
 }
 
-impl<T: Payload> SerializerService<T> {
-    pub fn new(internal: SafetyRules<T>) -> Self {
+impl SerializerService {
+    pub fn new(internal: SafetyRules) -> Self {
         Self { internal }
     }
 
@@ -35,19 +33,21 @@ impl<T: Payload> SerializerService<T> {
         let input = lcs::from_bytes(&input_message)?;
 
         let output = match input {
-            SafetyRulesInput::ConsensusState => lcs::to_bytes(&self.internal.consensus_state()),
-            SafetyRulesInput::Update(qc) => lcs::to_bytes(&self.internal.update(&qc)),
-            SafetyRulesInput::StartNewEpoch(qc) => {
-                lcs::to_bytes(&self.internal.start_new_epoch(&qc))
+            SafetyRulesInput::ConsensusState => {
+                log_and_serialize(self.internal.consensus_state(), "ConsensusState")
             }
-            SafetyRulesInput::ConstructAndSignVote(vote_proposal) => {
-                lcs::to_bytes(&self.internal.construct_and_sign_vote(&vote_proposal))
+            SafetyRulesInput::Initialize(li) => {
+                log_and_serialize(self.internal.initialize(&li), "Initialize")
             }
+            SafetyRulesInput::ConstructAndSignVote(vote_proposal) => log_and_serialize(
+                self.internal.construct_and_sign_vote(&vote_proposal),
+                "ConstructAndSignVote",
+            ),
             SafetyRulesInput::SignProposal(block_data) => {
-                lcs::to_bytes(&self.internal.sign_proposal(*block_data))
+                log_and_serialize(self.internal.sign_proposal(*block_data), "SignProposal")
             }
             SafetyRulesInput::SignTimeout(timeout) => {
-                lcs::to_bytes(&self.internal.sign_timeout(&timeout))
+                log_and_serialize(self.internal.sign_timeout(&timeout), "SignTimeout")
             }
         };
 
@@ -55,49 +55,54 @@ impl<T: Payload> SerializerService<T> {
     }
 }
 
-pub struct SerializerClient<T> {
-    service: Box<dyn TSerializerClient<T>>,
+fn log_and_serialize<T: Serialize>(
+    response: Result<T, Error>,
+    from: &'static str,
+) -> Result<Vec<u8>, lcs::Error> {
+    if let Err(e) = &response {
+        warn!("[SafetyRules] {} failed: {}", from, e);
+    }
+    lcs::to_bytes(&response)
 }
 
-impl<T: Payload> SerializerClient<T> {
-    pub fn new(serializer_service: Arc<RwLock<SerializerService<T>>>) -> Self {
+pub struct SerializerClient {
+    service: Box<dyn TSerializerClient>,
+}
+
+impl SerializerClient {
+    pub fn new(serializer_service: Arc<RwLock<SerializerService>>) -> Self {
         let service = Box::new(LocalService { serializer_service });
         Self { service }
     }
 
-    pub fn new_client(service: Box<dyn TSerializerClient<T>>) -> Self {
+    pub fn new_client(service: Box<dyn TSerializerClient>) -> Self {
         Self { service }
     }
 
-    fn request(&mut self, input: SafetyRulesInput<T>) -> Result<Vec<u8>, Error> {
+    fn request(&mut self, input: SafetyRulesInput) -> Result<Vec<u8>, Error> {
         self.service.request(input)
     }
 }
 
-impl<T: Payload> TSafetyRules<T> for SerializerClient<T> {
+impl TSafetyRules for SerializerClient {
     fn consensus_state(&mut self) -> Result<ConsensusState, Error> {
         let response = self.request(SafetyRulesInput::ConsensusState)?;
         lcs::from_bytes(&response)?
     }
 
-    fn update(&mut self, qc: &QuorumCert) -> Result<(), Error> {
-        let response = self.request(SafetyRulesInput::Update(Box::new(qc.clone())))?;
+    fn initialize(&mut self, proof: &EpochChangeProof) -> Result<(), Error> {
+        let response = self.request(SafetyRulesInput::Initialize(Box::new(proof.clone())))?;
         lcs::from_bytes(&response)?
     }
 
-    fn start_new_epoch(&mut self, qc: &QuorumCert) -> Result<(), Error> {
-        let response = self.request(SafetyRulesInput::StartNewEpoch(Box::new(qc.clone())))?;
-        lcs::from_bytes(&response)?
-    }
-
-    fn construct_and_sign_vote(&mut self, vote_proposal: &VoteProposal<T>) -> Result<Vote, Error> {
+    fn construct_and_sign_vote(&mut self, vote_proposal: &VoteProposal) -> Result<Vote, Error> {
         let response = self.request(SafetyRulesInput::ConstructAndSignVote(Box::new(
             vote_proposal.clone(),
         )))?;
         lcs::from_bytes(&response)?
     }
 
-    fn sign_proposal(&mut self, block_data: BlockData<T>) -> Result<Block<T>, Error> {
+    fn sign_proposal(&mut self, block_data: BlockData) -> Result<Block, Error> {
         let response = self.request(SafetyRulesInput::SignProposal(Box::new(block_data)))?;
         lcs::from_bytes(&response)?
     }
@@ -108,16 +113,16 @@ impl<T: Payload> TSafetyRules<T> for SerializerClient<T> {
     }
 }
 
-pub trait TSerializerClient<T>: Send + Sync {
-    fn request(&mut self, input: SafetyRulesInput<T>) -> Result<Vec<u8>, Error>;
+pub trait TSerializerClient: Send + Sync {
+    fn request(&mut self, input: SafetyRulesInput) -> Result<Vec<u8>, Error>;
 }
 
-struct LocalService<T> {
-    pub serializer_service: Arc<RwLock<SerializerService<T>>>,
+struct LocalService {
+    pub serializer_service: Arc<RwLock<SerializerService>>,
 }
 
-impl<T: Payload> TSerializerClient<T> for LocalService<T> {
-    fn request(&mut self, input: SafetyRulesInput<T>) -> Result<Vec<u8>, Error> {
+impl TSerializerClient for LocalService {
+    fn request(&mut self, input: SafetyRulesInput) -> Result<Vec<u8>, Error> {
         let input_message = lcs::to_bytes(&input)?;
         self.serializer_service
             .write()

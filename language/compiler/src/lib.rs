@@ -11,18 +11,18 @@ mod unit_tests;
 use anyhow::Result;
 use bytecode_source_map::source_map::SourceMap;
 use bytecode_verifier::VerifiedModule;
+use compiled_stdlib::{stdlib_modules, StdLibOptions};
 use ir_to_bytecode::{
     compiler::{compile_module, compile_script},
     parser::{parse_module, parse_script},
 };
-use libra_types::account_address::AccountAddress;
+use libra_types::{account_address::AccountAddress, account_config};
 use move_ir_types::location::Loc;
 use std::mem;
-use stdlib::{stdlib_modules, StdLibOptions};
 use vm::file_format::{CompiledModule, CompiledScript};
 
 /// An API for the compiler. Supports setting custom options.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Compiler {
     /// The address used as the sender for the compiler.
     pub address: AccountAddress,
@@ -41,6 +41,17 @@ pub struct Compiler {
     #[allow(missing_docs)]
     #[doc(hidden)]
     pub _non_exhaustive: (),
+}
+
+impl Default for Compiler {
+    fn default() -> Self {
+        Self {
+            address: account_config::CORE_CODE_ADDRESS,
+            skip_stdlib_deps: false,
+            extra_deps: vec![],
+            _non_exhaustive: (),
+        }
+    }
 }
 
 impl Compiler {
@@ -84,7 +95,7 @@ impl Compiler {
     ) -> Result<(CompiledScript, SourceMap<Loc>, Vec<VerifiedModule>)> {
         let parsed_script = parse_script(file_name, code)?;
         let deps = self.deps();
-        let (compiled_script, source_map) = compile_script(self.address, parsed_script, &deps)?;
+        let (compiled_script, source_map) = compile_script(None, parsed_script, &deps)?;
         Ok((compiled_script, source_map, deps))
     }
 
@@ -104,7 +115,7 @@ impl Compiler {
         if self.skip_stdlib_deps {
             extra_deps
         } else {
-            let mut deps = stdlib_modules(StdLibOptions::Staged).to_vec();
+            let mut deps = stdlib_modules(StdLibOptions::Compiled).to_vec();
             deps.extend(extra_deps);
             deps
         }

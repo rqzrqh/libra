@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    expansion::ast::SpecId,
+    expansion::ast::{SpecId, Value},
     naming::ast::{BuiltinTypeName, BuiltinTypeName_, TParam},
     parser::ast::{
         BinOp, Field, FunctionName, FunctionVisibility, Kind, Kind_, ModuleIdent, ResourceLoc,
-        StructName, UnaryOp, Value, Var,
+        StructName, UnaryOp, Var,
     },
-    shared::{ast_debug::*, unique_map::UniqueMap, *},
+    shared::{ast_debug::*, unique_map::UniqueMap},
 };
 use move_ir_types::location::*;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -22,7 +22,18 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[derive(Debug)]
 pub struct Program {
     pub modules: UniqueMap<ModuleIdent, ModuleDefinition>,
-    pub main: Option<(Address, FunctionName, Function)>,
+    pub scripts: BTreeMap<String, Script>,
+}
+
+//**************************************************************************************************
+// Scripts
+//**************************************************************************************************
+
+#[derive(Debug)]
+pub struct Script {
+    pub loc: Loc,
+    pub function_name: FunctionName,
+    pub function: Function,
 }
 
 //**************************************************************************************************
@@ -80,7 +91,7 @@ pub type FunctionBody = Spanned<FunctionBody_>;
 pub struct Function {
     pub visibility: FunctionVisibility,
     pub signature: FunctionSignature,
-    pub acquires: BTreeSet<StructName>,
+    pub acquires: BTreeMap<StructName, Loc>,
     pub body: FunctionBody,
 }
 
@@ -199,12 +210,13 @@ pub struct ModuleCall {
     pub name: FunctionName,
     pub type_arguments: Vec<BaseType>,
     pub arguments: Box<Exp>,
-    pub acquires: BTreeSet<StructName>,
+    pub acquires: BTreeMap<StructName, Loc>,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum BuiltinFunction_ {
     MoveToSender(BaseType),
+    MoveTo(BaseType),
     MoveFrom(BaseType),
     BorrowGlobal(bool, BaseType),
     Exists(BaseType),
@@ -213,7 +225,7 @@ pub type BuiltinFunction = Spanned<BuiltinFunction_>;
 
 #[derive(Debug, PartialEq)]
 pub enum UnannotatedExp_ {
-    Unit,
+    Unit { trailing: bool },
     Value(Value),
     Move { from_user: bool, var: Var },
     Copy { from_user: bool, var: Var },
@@ -309,13 +321,13 @@ impl Command_ {
             }
             Abort(_) | Return(_) => (),
             Jump(lbl) => {
-                successors.insert(lbl.clone());
+                successors.insert(*lbl);
             }
             JumpIf {
                 if_true, if_false, ..
             } => {
-                successors.insert(if_true.clone());
-                successors.insert(if_false.clone());
+                successors.insert(*if_true);
+                successors.insert(*if_false);
             }
         }
         successors
@@ -331,7 +343,9 @@ impl Exp {
 impl UnannotatedExp_ {
     pub fn is_unit(&self) -> bool {
         match self {
-            UnannotatedExp_::Unit => true,
+            UnannotatedExp_::Unit {
+                trailing: _trailing,
+            } => true,
             _ => false,
         }
     }
@@ -342,7 +356,8 @@ impl BaseType_ {
         use BuiltinTypeName_::*;
 
         let kind = match b_ {
-            U8 | U64 | U128 | Bool | Address => sp(loc, Kind_::Unrestricted),
+            U8 | U64 | U128 | Bool | Address => sp(loc, Kind_::Copyable),
+            Signer => sp(loc, Kind_::Resource),
             Vector => {
                 assert!(
                     ty_args.len() == 1,
@@ -360,8 +375,8 @@ impl BaseType_ {
             BaseType_::Apply(k, _, _) => k.clone(),
             BaseType_::Param(TParam { kind, .. }) => kind.clone(),
             BaseType_::Unreachable | BaseType_::UnresolvedError => panic!(
-                "ICE unreachable/unresolved error has no kind. \
-                 Should only exist in dead code that should not be analyzed"
+                "ICE unreachable/unresolved error has no kind. Should only exist in dead code \
+                 that should not be analyzed"
             ),
         }
     }
@@ -374,8 +389,16 @@ impl BaseType_ {
         Self::builtin(loc, BuiltinTypeName_::Address, vec![])
     }
 
+    pub fn u8(loc: Loc) -> BaseType {
+        Self::builtin(loc, BuiltinTypeName_::U8, vec![])
+    }
+
     pub fn u64(loc: Loc) -> BaseType {
         Self::builtin(loc, BuiltinTypeName_::U64, vec![])
+    }
+
+    pub fn u128(loc: Loc) -> BaseType {
+        Self::builtin(loc, BuiltinTypeName_::U128, vec![])
     }
 }
 
@@ -392,13 +415,21 @@ impl SingleType_ {
         Self::base(BaseType_::address(loc))
     }
 
+    pub fn u8(loc: Loc) -> SingleType {
+        Self::base(BaseType_::u8(loc))
+    }
+
     pub fn u64(loc: Loc) -> SingleType {
         Self::base(BaseType_::u64(loc))
     }
 
+    pub fn u128(loc: Loc) -> SingleType {
+        Self::base(BaseType_::u128(loc))
+    }
+
     pub fn kind(&self, loc: Loc) -> Kind {
         match self {
-            SingleType_::Ref(_, _) => sp(loc, Kind_::Unrestricted),
+            SingleType_::Ref(_, _) => sp(loc, Kind_::Copyable),
             SingleType_::Base(b) => b.value.kind(),
         }
     }
@@ -421,8 +452,16 @@ impl Type_ {
         Self::single(SingleType_::address(loc))
     }
 
+    pub fn u8(loc: Loc) -> Type {
+        Self::single(SingleType_::u8(loc))
+    }
+
     pub fn u64(loc: Loc) -> Type {
         Self::single(SingleType_::u64(loc))
+    }
+
+    pub fn u128(loc: Loc) -> Type {
+        Self::single(SingleType_::u128(loc))
     }
 
     pub fn type_at_index(&self, idx: usize) -> &SingleType {
@@ -475,17 +514,29 @@ impl std::fmt::Display for Label {
 
 impl AstDebug for Program {
     fn ast_debug(&self, w: &mut AstWriter) {
-        let Program { modules, main } = self;
+        let Program { modules, scripts } = self;
         for (m, mdef) in modules {
             w.write(&format!("module {}", m));
             w.block(|w| mdef.ast_debug(w));
             w.new_line();
         }
 
-        if let Some((addr, n, fdef)) = main {
-            w.writeln(&format!("address {}:", addr));
-            (n.clone(), fdef).ast_debug(w);
+        for (n, s) in scripts {
+            w.write(&format!("script {}", n));
+            w.block(|w| s.ast_debug(w));
+            w.new_line()
         }
+    }
+}
+
+impl AstDebug for Script {
+    fn ast_debug(&self, w: &mut AstWriter) {
+        let Script {
+            loc: _loc,
+            function_name,
+            function,
+        } = self;
+        (function_name.clone(), function).ast_debug(w);
     }
 }
 
@@ -563,7 +614,7 @@ impl AstDebug for (FunctionName, &Function) {
         signature.ast_debug(w);
         if !acquires.is_empty() {
             w.write(" acquires ");
-            w.comma(acquires, |w, s| w.write(&format!("{}", s)));
+            w.comma(acquires.keys(), |w, s| w.write(&format!("{}", s)));
             w.write(" ");
         }
         match &body.value {
@@ -790,7 +841,10 @@ impl AstDebug for UnannotatedExp_ {
     fn ast_debug(&self, w: &mut AstWriter) {
         use UnannotatedExp_ as E;
         match self {
-            E::Unit => w.write("()"),
+            E::Unit { trailing } if !trailing => w.write("()"),
+            E::Unit {
+                trailing: _trailing,
+            } => w.write("/*()*/"),
             E::Value(v) => v.ast_debug(w),
             E::Move {
                 from_user: false,
@@ -908,7 +962,7 @@ impl AstDebug for ModuleCall {
         w.write(&format!("{}::{}", module, name));
         if !acquires.is_empty() {
             w.write("[acquires: [");
-            w.comma(acquires, |w, s| w.write(&format!("{}", s)));
+            w.comma(acquires.keys(), |w, s| w.write(&format!("{}", s)));
             w.write("]], ");
         }
         w.write("<");
@@ -926,6 +980,7 @@ impl AstDebug for BuiltinFunction_ {
         use BuiltinFunction_ as F;
         let (n, bt) = match self {
             F::MoveToSender(bt) => (NF::MOVE_TO_SENDER, bt),
+            F::MoveTo(bt) => (NF::MOVE_TO, bt),
             F::MoveFrom(bt) => (NF::MOVE_FROM, bt),
             F::BorrowGlobal(true, bt) => (NF::BORROW_GLOBAL_MUT, bt),
             F::BorrowGlobal(false, bt) => (NF::BORROW_GLOBAL, bt),

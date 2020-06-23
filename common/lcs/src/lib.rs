@@ -78,7 +78,7 @@
 //! |                           |2^14 = 16384           |0x00004000         |[808001]           |
 //! |                           |2^21 = 2097152         |0x00200000         |[80808001]         |
 //! |                           |2^28 = 268435456       |0x10000000         |[8080808001]       |
-//! |                           |9687                   |0x0000250f         |[8f4a]             |
+//! |                           |9487                   |0x0000250f         |[8f4a]             |
 //!
 //! In general, a ULEB128 encoding consists of a little-endian sequence of base-128 (7-bit)
 //! digits. Each digit is completed into a byte by setting the highest bit to 1, except for the
@@ -284,4 +284,4 @@ pub const MAX_SEQUENCE_LENGTH: usize = 1 << 31;
 
 pub use de::{from_bytes, from_bytes_seed};
 pub use error::{Error, Result};
-pub use ser::{is_human_readable, to_bytes};
+pub use ser::{is_human_readable, serialize_into, serialized_size, to_bytes};

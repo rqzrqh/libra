@@ -21,11 +21,18 @@ use pretty::RcDoc;
 use regex::Regex;
 
 use spec_lang::{
-    env::{FunId, FunctionEnv, GlobalEnv, Loc, ModuleId, StructId},
+    code_writer::CodeWriter,
+    env::{FunId, GlobalEnv, Loc, ModuleId, StructId},
     ty::{PrimitiveType, Type},
 };
 
-use crate::{cli::Options, code_writer::CodeWriter};
+use crate::cli::Options;
+// DEBUG
+// use backtrace::Backtrace;
+use spec_lang::env::NodeId;
+use stackless_bytecode_generator::{
+    function_target::FunctionTarget, function_target_pipeline::FunctionTargetsHolder,
+};
 
 /// A type alias for the way how we use crate `pretty`'s document type. `pretty` is a
 /// Wadler-style pretty printer. Our simple usage doesn't require any lifetime management.
@@ -37,6 +44,7 @@ type PrettyDoc = RcDoc<'static, ()>;
 /// Represents the boogie wrapper.
 pub struct BoogieWrapper<'env> {
     pub env: &'env GlobalEnv,
+    pub targets: &'env FunctionTargetsHolder,
     pub writer: &'env CodeWriter,
     pub options: &'env Options,
     pub boogie_file_id: FileId,
@@ -88,38 +96,103 @@ pub enum TraceKind {
 impl<'env> BoogieWrapper<'env> {
     /// Calls boogie on the given file. On success, returns a struct representing the analyzed
     /// output of boogie.
-    pub fn call_boogie(&self, boogie_file: &str) -> anyhow::Result<BoogieOutput> {
+    pub fn call_boogie(
+        &self,
+        bench_repeat: usize,
+        boogie_file: &str,
+    ) -> anyhow::Result<BoogieOutput> {
         let args = self.options.get_boogie_command(boogie_file);
-        info!("calling boogie");
+        info!("running solver");
         debug!("command line: {}", args.iter().join(" "));
-        let output = Command::new(&args[0]).args(&args[1..]).output()?;
-        if !output.status.success() {
-            Err(anyhow!(
-                "boogie exited with status {:?}",
-                output.status.code()
-            ))
-        } else {
-            let out = String::from_utf8_lossy(&output.stdout).to_string();
-            let mut errors = self.extract_verification_errors(&out);
-            errors.extend(self.extract_compilation_errors(&out));
-            Ok(BoogieOutput {
-                errors,
-                all_output: out,
-            })
+        for count in 0..bench_repeat {
+            let output = Command::new(&args[0]).args(&args[1..]).output()?;
+            if !output.status.success() {
+                return Err(anyhow!("boogie exited with: {:?}", output));
+            } else if count == bench_repeat - 1 {
+                if count > 0 {
+                    info!("run #{} done", count + 1);
+                }
+                debug!("analyzing boogie output");
+                let out = String::from_utf8_lossy(&output.stdout).to_string();
+                let mut errors = self.extract_verification_errors(&out);
+                errors.extend(self.extract_compilation_errors(&out));
+                return Ok(BoogieOutput {
+                    errors,
+                    all_output: out,
+                });
+            } else {
+                info!("run #{} done", count + 1);
+            }
         }
+        Err(anyhow!("--bench-repeat=0, prover not run!"))
     }
 
     /// Calls boogie and analyzes output.
-    pub fn call_boogie_and_verify_output(&self, boogie_file: &str) -> anyhow::Result<()> {
-        let BoogieOutput { errors, all_output } = self.call_boogie(boogie_file)?;
+    pub fn call_boogie_and_verify_output(
+        &self,
+        bench_repeat: usize,
+        boogie_file: &str,
+    ) -> anyhow::Result<()> {
+        let BoogieOutput { errors, all_output } = self.call_boogie(bench_repeat, boogie_file)?;
         let boogie_log_file = self.options.get_boogie_log_file(boogie_file);
-        info!("writing boogie log to {}", boogie_log_file);
+        debug!("writing boogie log to {}", boogie_log_file);
         fs::write(&boogie_log_file, &all_output)?;
 
+        // Keep the set of locations which had a negative condition failure. These are errors
+        // which are expected.
+        let mut negative_cond_errors = BTreeSet::new();
+
         for error in &errors {
-            self.add_error(error);
+            if let Some(fun) = self.try_get_negative_error(error) {
+                negative_cond_errors.insert(fun);
+            } else {
+                // Errors from counter examples to the specification
+                self.add_error(error);
+            }
         }
+
+        // Add errors for functions with smoke tests
+        self.add_negative_errors(negative_cond_errors);
+
         Ok(())
+    }
+
+    /// Determine whether the boogie error represents the failure of a negative condition
+    /// and return its location of so.
+    fn try_get_negative_error(&self, error: &BoogieError) -> Option<Loc> {
+        // Find the source location of the error
+        let (_, loc_opt) = self.get_locations(error.position);
+        let source_loc = self.to_proper_source_location(loc_opt).and_then(|loc| {
+            if error.kind.is_from_verification() {
+                Some(loc)
+            } else {
+                None
+            }
+        })?;
+
+        // Check whether the condition which failed was a negative one.
+        self.env
+            .get_condition_info(&source_loc)
+            .filter(|info| info.negative_cond)?;
+        Some(source_loc)
+    }
+
+    /// Go over all negative conditions and check whether errors occurred for them.
+    /// For those which did not occur, report error.
+    fn add_negative_errors(&self, negative_cond_errors: BTreeSet<Loc>) {
+        self.env.with_condition_infos(|loc, info| {
+            if !info.negative_cond || negative_cond_errors.contains(loc) {
+                // Not a negative condition, or expected error happened.
+                return;
+            }
+            // Expected error did not happen, report it.
+            let diag = Diagnostic::new(
+                Severity::Error,
+                info.message.clone(),
+                Label::new(loc.file_id(), loc.span(), ""),
+            );
+            self.env.add_diag(diag);
+        });
     }
 
     /// Helper to add a boogie error as a codespan Diagnostic.
@@ -141,6 +214,11 @@ impl<'env> BoogieWrapper<'env> {
         };
 
         // Create the error
+        let (show_trace, message) = loc_opt
+            .as_ref()
+            .and_then(|loc| self.env.get_condition_info(loc))
+            .map(|info| (!info.omit_trace, info.message))
+            .unwrap_or_else(|| (true, error.message.clone()));
         let mut diag = Diagnostic::new(
             if on_source {
                 Severity::Error
@@ -148,14 +226,20 @@ impl<'env> BoogieWrapper<'env> {
                 // Consider diags on boogie source as bugs
                 Severity::Bug
             },
-            &error.message,
+            message,
             label,
         );
 
         // Now add trace diagnostics.
-        if error.kind.is_from_verification() && !error.execution_trace.is_empty() {
+        if error.kind.is_from_verification()
+            && show_trace
+            && !error.execution_trace.is_empty()
+            // Reporting errors on boogie source seems to have some non-determinism, so skip
+            // this if stable output is required
+            && (on_source || !self.options.prover.stable_test_output)
+        {
             let mut locals_shown = BTreeSet::new();
-            let mut aborted = false;
+            let mut aborted = None;
             let cleaned_trace = error
                 .execution_trace
                 .iter()
@@ -174,7 +258,7 @@ impl<'env> BoogieWrapper<'env> {
                 .dedup_by(|(_, _, source_pos1, _, _), (_, _, source_pos2, kind2, _)| {
                     // Removes consecutive entries which point to the same location if trace
                     // minimization is active.
-                    if !self.options.minimize_execution_trace {
+                    if !self.options.prover.minimize_execution_trace {
                         return false;
                     }
                     if *kind2 != &TraceKind::Regular {
@@ -186,16 +270,28 @@ impl<'env> BoogieWrapper<'env> {
                 // Cut the trace after abort -- the remaining only propagates the abort up
                 // the call stack and isn't useful.
                 .filter_map(|(orig_pos, source_loc, source_pos, mut kind, msg)| {
-                    if aborted {
+                    if aborted.is_some() {
                         return None;
                     }
-                    aborted = error
+                    // DEBUG
+                    //warn!(
+                    //    "checking abort at {}.{}",
+                    //    source_pos.1.line, source_pos.1.column
+                    //);
+                    // END DEBUG
+                    let aborts_here = error
                         .model
                         .as_ref()
-                        .map(|model| model.tracked_aborts.get(&source_loc).is_some())
+                        .map(|model| {
+                            model
+                                .tracked_aborts
+                                .get(&(source_pos.0.clone(), source_pos.1.line))
+                                .is_some()
+                        })
                         .unwrap_or(false);
-                    if aborted {
-                        kind = &TraceKind::Aborted
+                    if aborts_here {
+                        kind = &TraceKind::Aborted;
+                        aborted = Some(source_loc.clone());
                     }
                     Some((orig_pos, source_loc, source_pos, kind, msg))
                 })
@@ -233,7 +329,33 @@ impl<'env> BoogieWrapper<'env> {
                         .collect_vec()
                 })
                 .collect_vec();
+            if let Some(abort_loc) = aborted {
+                // Patch the diag for aborted case. In this case, none of the aborts_if clauses
+                // covered the abort case, and the error message can be misleading.
+                diag.message = "abort not covered by any of the `aborts_if` clauses".to_string();
+                diag.secondary_labels = vec![Label::new(
+                    abort_loc.file_id(),
+                    abort_loc.span(),
+                    "abort happened here",
+                )];
+            }
             diag = diag.with_notes(trace);
+        }
+        // Inject secondary labels about expression values.
+        if let Some(m) = &error.model {
+            for (desc, values) in &m.tracked_exps {
+                let module_env = self.env.get_module(desc.module_id);
+                let loc = module_env.get_node_loc(desc.node_id);
+                let ty = module_env.get_node_type(desc.node_id);
+                let value_display = values
+                    .iter()
+                    .filter_map(|v| Some(v.pretty_or_raw(self, m, &ty)).map(|p| self.render(&p)))
+                    .join(", ");
+                if !value_display.is_empty() {
+                    let label = Label::new(loc.file_id(), loc.span(), value_display);
+                    diag.secondary_labels.push(label);
+                }
+            }
         }
         self.env.add_diag(diag);
     }
@@ -245,16 +367,21 @@ impl<'env> BoogieWrapper<'env> {
 
     /// Renders trace information.
     fn render_trace_info(&self, file: String, pos: Location, info: PrettyDoc) -> String {
+        self.render(
+            &PrettyDoc::text(format!(
+                "    at {}:{}:{}: ",
+                file,
+                pos.line.0 + 1,
+                pos.column.0 + 1
+            ))
+            .append(info.nest(8)),
+        )
+    }
+
+    /// Renders the doc.
+    fn render(&self, doc: &PrettyDoc) -> String {
         let mut lines = vec![];
-        PrettyDoc::text(format!(
-            "    at {}:{}:{}: ",
-            file,
-            pos.line.0 + 1,
-            pos.column.0 + 1
-        ))
-        .append(info.nest(8))
-        .render(70, &mut lines)
-        .unwrap();
+        doc.render(70, &mut lines).unwrap();
         String::from_utf8_lossy(&lines).to_string()
     }
 
@@ -295,7 +422,11 @@ impl<'env> BoogieWrapper<'env> {
             _ => "",
         };
         if let Some(func_env) = self.env.get_enclosing_function(loc.clone()) {
-            let func_name = format!("{}", func_env.get_name().display(func_env.symbol_pool()));
+            let func_target = self.targets.get_target(&func_env);
+            let func_name = format!(
+                "{}",
+                func_target.get_name().display(func_target.symbol_pool())
+            );
             let func_display = format!("{}{}", func_name, kind_tag);
             if is_last {
                 // If this is the last trace entry, set the location to the end of the function.
@@ -304,11 +435,11 @@ impl<'env> BoogieWrapper<'env> {
             }
             let model_info = if let Some(model) = model_opt {
                 let displayed_info = model
-                    .relevant_tracked_locals(&func_env, loc, locals_shown)
+                    .relevant_tracked_locals(&func_target, loc, locals_shown)
                     .iter()
                     .map(|(var, val)| {
-                        let ty = self.get_type_of_local_or_return(&func_env, var.var_idx);
-                        var.pretty(self, &func_env, model, &ty, val)
+                        let ty = self.get_type_of_local_or_return(&func_target, var.var_idx);
+                        var.pretty(self, &func_target, model, &ty, val)
                     })
                     .collect_vec();
                 has_info = !displayed_info.is_empty();
@@ -334,12 +465,16 @@ impl<'env> BoogieWrapper<'env> {
     }
 
     /// Returns the type of either a local or a return parameter.
-    fn get_type_of_local_or_return(&self, func_env: &FunctionEnv<'_>, idx: usize) -> Type {
-        let n = func_env.get_local_count();
+    fn get_type_of_local_or_return(
+        &self,
+        func_target: &'env FunctionTarget<'env>,
+        idx: usize,
+    ) -> &'env Type {
+        let n = func_target.get_local_count();
         if idx < n {
-            func_env.get_local_type(idx)
+            func_target.get_local_type(idx)
         } else {
-            func_env.get_return_types()[idx - n].clone()
+            func_target.get_return_type(idx - n)
         }
     }
 
@@ -365,7 +500,7 @@ impl<'env> BoogieWrapper<'env> {
         let verification_diag_start =
             Regex::new(r"(?m)^.*\((?P<line>\d+),(?P<col>\d+)\): Error BP\d+:(?P<msg>.*)$").unwrap();
         let verification_diag_related =
-            Regex::new(r"(?m)^.+\((?P<line>\d+),(?P<col>\d+)\): Related.*$").unwrap();
+            Regex::new(r"^\n.+\((?P<line>\d+),(?P<col>\d+)\): Related.*\n").unwrap();
         let verification_diag_trace = Regex::new(r"(?m)^Execution trace:$").unwrap();
         let verification_diag_trace_entry =
             Regex::new(r"(?m)^    .*\((?P<line>\d+),(?P<col>\d+)\): (?P<msg>.*)$").unwrap();
@@ -374,10 +509,17 @@ impl<'env> BoogieWrapper<'env> {
         loop {
             let model = model_region.captures(&out[at..]).and_then(|cap| {
                 at += cap.get(0).unwrap().end();
-                match Model::parse(self.env, cap.name("mod").unwrap().as_str()) {
+                match Model::parse(self, cap.name("mod").unwrap().as_str()) {
                     Ok(model) => Some(model),
                     Err(parse_error) => {
-                        warn!("failed to parse boogie model: {}", parse_error.0);
+                        let context_module = self
+                            .env
+                            .symbol_pool()
+                            .string(self.env.get_modules().last().unwrap().get_name().name());
+                        warn!(
+                            "failed to parse boogie model (module context `{}`): {}",
+                            context_module, parse_error.0
+                        );
                         None
                     }
                 }
@@ -482,17 +624,26 @@ fn make_position(line_str: &str, col_str: &str) -> Location {
 // -----------------------------------------------
 // # Boogie Model Analysis
 
+/// Represents whether the Vector type is implemented at the SMT level using integer maps or sequences
+#[derive(Debug, PartialEq, Eq)]
+pub enum ValueArrayRep {
+    ValueArrayIsMap,
+    ValueArrayIsSeq,
+}
+
 /// Represents a boogie model.
 #[derive(Debug)]
 pub struct Model {
     vars: BTreeMap<ModelValue, ModelValue>,
     tracked_locals: BTreeMap<Loc, Vec<(LocalDescriptor, ModelValue)>>,
-    tracked_aborts: BTreeMap<Loc, AbortDescriptor>,
+    tracked_aborts: BTreeMap<(String, LineIndex), AbortDescriptor>,
+    tracked_exps: BTreeMap<ExpDescriptor, Vec<ModelValue>>,
+    value_array_rep: ValueArrayRep,
 }
 
 impl Model {
     /// Parses the given string into a model. The string is expected to end with MODULE_END_MARKER.
-    fn parse(env: &GlobalEnv, input: &str) -> Result<Model, ModelParseError> {
+    fn parse(wrapper: &BoogieWrapper<'_>, input: &str) -> Result<Model, ModelParseError> {
         let mut model_parser = ModelParser { input, at: 0 };
         model_parser
             .parse_map()
@@ -516,10 +667,10 @@ impl Model {
                     if k == &ModelValue::literal("else") {
                         continue;
                     }
-                    let (var, loc, value) = Self::extract_debug_var(env, k)?;
+                    let (var, loc, value) = Self::extract_debug_var(wrapper, k)?;
                     tracked_locals
                         .entry(loc)
-                        .or_insert_with(|| vec![])
+                        .or_insert_with(Vec::new)
                         .push((var, value));
                 }
 
@@ -533,9 +684,31 @@ impl Model {
                     if k == &ModelValue::literal("else") {
                         continue;
                     }
-                    let (mark, loc) = Self::extract_abort_marker(env, k)?;
-                    tracked_aborts.insert(loc, mark);
+                    let (mark, loc) = Self::extract_abort_marker(wrapper, k)?;
+                    let pos = wrapper
+                        .env
+                        .get_position(loc)
+                        .ok_or_else(Self::invalid_track_info)?;
+                    tracked_aborts.insert((pos.0, pos.1.line), mark);
                 }
+
+                // Extract the tracked expressions.
+                let mut tracked_exps = BTreeMap::new();
+                let track_exp_map = vars
+                    .get(&ModelValue::literal("$DebugTrackExp"))
+                    .and_then(|x| x.extract_map())
+                    .ok_or_else(Self::invalid_track_info)?;
+                for k in track_exp_map.keys() {
+                    if k == &ModelValue::literal("else") {
+                        continue;
+                    }
+                    let (desc, value) = Self::extract_debug_exp(wrapper, k)?;
+                    tracked_exps
+                        .entry(desc)
+                        .or_insert_with(Vec::new)
+                        .push(value);
+                }
+
                 // DEBUG
                 // for (loc, values) in &tracked_locals {
                 //     info!("{} -> ", loc.span());
@@ -544,10 +717,26 @@ impl Model {
                 //     }
                 // }
                 // END DEBUG
+                // DEBUG
+                // for (pos, mark) in &tracked_aborts {
+                //    warn!(
+                //        "{} -> {}",
+                //       pos.1,
+                //        mark.func_id.symbol().display(wrapper.env.symbol_pool())
+                //    );
+                // }
+                // END DEBUG
+                let value_array_rep = if wrapper.options.backend.vector_using_sequences {
+                    ValueArrayRep::ValueArrayIsSeq
+                } else {
+                    ValueArrayRep::ValueArrayIsMap
+                };
                 let model = Model {
                     vars,
                     tracked_locals,
                     tracked_aborts,
+                    tracked_exps,
+                    value_array_rep,
                 };
                 Ok(model)
             })
@@ -555,27 +744,29 @@ impl Model {
 
     /// Extract and validate a tracked local from $DebugTrackLocal map.
     fn extract_debug_var(
-        env: &GlobalEnv,
+        wrapper: &BoogieWrapper<'_>,
         map_entry: &ModelValue,
     ) -> Result<(LocalDescriptor, Loc, ModelValue), ModelParseError> {
         if let ModelValue::List(args) = map_entry {
             if args.len() != 4 {
                 return Err(Self::invalid_track_info());
             }
-            let loc = Self::extract_loc(env, args)?;
-            let func_env = env
+            let loc = Self::extract_loc(wrapper, args)?;
+            let func_env = wrapper
+                .env
                 .get_enclosing_function(loc.clone())
                 .ok_or_else(Self::invalid_track_info)?;
+            let func_target = wrapper.targets.get_target(&func_env);
             let var_idx = args[2]
                 .extract_number()
                 .ok_or_else(Self::invalid_track_info)
                 .and_then(Self::index_range_check(
-                    func_env.get_local_count() + func_env.get_return_count(),
+                    func_target.get_local_count() + func_target.get_return_count(),
                 ))?;
             Ok((
                 LocalDescriptor {
-                    module_id: func_env.module_env.get_id(),
-                    func_id: func_env.get_id(),
+                    module_id: func_target.func_env.module_env.get_id(),
+                    func_id: func_target.get_id(),
                     var_idx,
                 },
                 loc,
@@ -588,21 +779,23 @@ impl Model {
 
     /// Extract and validate a tracked abort from $DebugTrackAbort map.
     fn extract_abort_marker(
-        env: &GlobalEnv,
+        wrapper: &BoogieWrapper<'_>,
         map_entry: &ModelValue,
     ) -> Result<(AbortDescriptor, Loc), ModelParseError> {
         if let ModelValue::List(args) = map_entry {
             if args.len() != 2 {
                 return Err(Self::invalid_track_info());
             }
-            let loc = Self::extract_loc(env, args)?;
-            let func_env = env
+            let loc = Self::extract_loc(wrapper, args)?;
+            let func_env = wrapper
+                .env
                 .get_enclosing_function(loc.clone())
                 .ok_or_else(Self::invalid_track_info)?;
+            let func_target = wrapper.targets.get_target(&func_env);
             Ok((
                 AbortDescriptor {
-                    module_id: func_env.module_env.get_id(),
-                    func_id: func_env.get_id(),
+                    module_id: func_target.func_env.module_env.get_id(),
+                    func_id: func_target.get_id(),
                 },
                 loc,
             ))
@@ -611,16 +804,49 @@ impl Model {
         }
     }
 
+    /// Extract and validate a tracked expression from $DebugTrackExp map.
+    fn extract_debug_exp(
+        wrapper: &BoogieWrapper<'_>,
+        map_entry: &ModelValue,
+    ) -> Result<(ExpDescriptor, ModelValue), ModelParseError> {
+        if let ModelValue::List(args) = map_entry {
+            if args.len() != 3 {
+                return Err(Self::invalid_track_info());
+            }
+            let module_id = ModuleId::new(
+                args[0]
+                    .extract_number()
+                    .ok_or_else(Self::invalid_track_info)
+                    .and_then(Self::index_range_check(wrapper.env.get_module_count()))?,
+            );
+            let module_env = wrapper.env.get_module(module_id);
+            let node_id = NodeId::new(
+                args[1]
+                    .extract_number()
+                    .ok_or_else(Self::invalid_track_info)?,
+            );
+            if module_env.get_node_type(node_id) == Type::Error {
+                return Err(Self::invalid_track_info());
+            }
+            Ok((ExpDescriptor { module_id, node_id }, args[2].clone()))
+        } else {
+            Err(Self::invalid_track_info())
+        }
+    }
+
     // Extract Loc from model values.
-    fn extract_loc(env: &GlobalEnv, args: &[ModelValue]) -> Result<Loc, ModelParseError> {
+    fn extract_loc(
+        wrapper: &BoogieWrapper<'_>,
+        args: &[ModelValue],
+    ) -> Result<Loc, ModelParseError> {
         if args.len() < 2 {
             Err(Self::invalid_track_info())
         } else {
             let file_idx = args[0]
                 .extract_number()
                 .ok_or_else(Self::invalid_track_info)
-                .and_then(Self::index_range_check(env.get_file_count()))?;
-            let file_id = env.file_idx_to_id(file_idx as u16);
+                .and_then(Self::index_range_check(wrapper.env.get_file_count()))?;
+            let file_id = wrapper.env.file_idx_to_id(file_idx as u16);
             let byte_index = ByteIndex(
                 args[1]
                     .extract_number()
@@ -636,6 +862,9 @@ impl Model {
     }
 
     fn invalid_track_info() -> ModelParseError {
+        // DEBUG
+        // let bt = Backtrace::new();
+        // ModelParseError::new(&format!("invalid debug track info. Stack trace:\n{:?}", bt))
         ModelParseError::new("invalid debug track info")
     }
 
@@ -663,18 +892,18 @@ impl Model {
     /// cases seen so far, but may need further refinement.
     fn relevant_tracked_locals(
         &self,
-        func_env: &FunctionEnv<'_>,
+        func_target: &FunctionTarget<'_>,
         loc: Loc,
         locals_shown: &mut BTreeSet<(Loc, LocalDescriptor)>,
     ) -> BTreeSet<(LocalDescriptor, ModelValue)> {
-        let func_loc = func_env.get_loc();
+        let func_loc = func_target.get_loc();
         self.tracked_locals
             .range(func_loc.at_start()..loc.at_end())
             .flat_map(|(loc, vars)| {
                 let mut res = vec![];
                 for (var, val) in vars {
-                    let var_name = func_env.get_local_name(var.var_idx);
-                    if func_env.symbol_pool().string(var_name).contains("$$") {
+                    let var_name = func_target.get_local_name(var.var_idx);
+                    if func_target.symbol_pool().string(var_name).contains("$$") {
                         // Do not show temporaries generated by the move compiler.
                         continue;
                     }
@@ -721,52 +950,94 @@ impl ModelValue {
     /// Extracts a vector from `(Vector value_array)`. This follows indirections in the model
     /// to extract the actual values.
     fn extract_vector(&self, model: &Model) -> Option<ModelValueVector> {
-        let args = self.extract_list("Vector")?;
+        let args = self.extract_list("$Vector")?;
         if args.len() != 1 {
             return None;
         }
         args[0].extract_value_array(model)
     }
 
-    /// Extracts a value array from `(ValueArray map_key size)`. This follows indirections in the
-    /// model. We find the value array map at `Select_[$int]Value`. This has e.g. the form
-    ///
+    /// Extracts a value array from it's representation.
+    /// If the representation uses maps it is defined by `(ValueArray map_key size)`. The function
+    /// follows indirections in the model. We find the value array map at `Select_[$int]$Value`.
+    /// This has e.g. the form
     /// ```model
-    ///   Select_[$int]Value -> {
-    //      |T@[Int]Value!val!1| 0 -> (Integer 2)
-    //      |T@[Int]Value!val!1| 22 -> (Integer 2)
-    //      else -> (Integer 0)
-    //    }
-    // ```
+    ///   Select_[$int]$Value -> {
+    ///      |T@[Int]Value!val!1| 0 -> (Integer 2)
+    ///      |T@[Int]Value!val!1| 22 -> (Integer 2)
+    ///      else -> (Integer 0)
+    ///    }
+    /// ```
+    /// If the value array is represented by a sequence instead, there are no indirections.
+    /// It has the form
+    /// ```(seq.++ (seq.unit (Integer 0)) (seq.unit (Integer 1)))```
+    /// or
+    /// ```(as seq.empty (Seq T@$Value))```
+    /// depending on whether it is an empty or nonempty sequence, respectively.
+    // In this case the sequence representation does not explicitly denote a constructor like ValueArray(..),
+    // instead reducing expressions to native SMT sequence theory expressions.
+
     fn extract_value_array(&self, model: &Model) -> Option<ModelValueVector> {
-        let args = self.extract_list("ValueArray")?;
-        if args.len() != 2 {
-            return None;
-        }
-        let size = (&args[1]).extract_number()?;
-        let map_key = &args[0];
-        let value_array_map = model
-            .vars
-            .get(&ModelValue::literal("Select_[$int]Value"))?
-            .extract_map()?;
-        let mut values = BTreeMap::new();
-        let mut default = ModelValue::error();
-        for (key, value) in value_array_map {
-            if let ModelValue::List(elems) = key {
-                if elems.len() == 2 && &elems[0] == map_key {
-                    if let Some(idx) = elems[1].extract_number() {
-                        values.insert(idx, value.clone());
-                    }
+        if ValueArrayRep::ValueArrayIsSeq == model.value_array_rep {
+            // Implementation of $ValueArray using sequences
+            let seq_type_modelvalue = ModelValue::List(vec![
+                ModelValue::literal("Seq"),
+                ModelValue::List(vec![ModelValue::literal("T@$Value")]),
+            ]);
+            let empty_seq_model_value = ModelValue::List(vec![
+                ModelValue::literal("as"),
+                ModelValue::List(vec![ModelValue::literal("seq.empty")]),
+                seq_type_modelvalue,
+            ]);
+            let default = ModelValue::error();
+            let (size, values) = if &empty_seq_model_value == self {
+                (0, BTreeMap::new())
+            } else {
+                let mut values = BTreeMap::new();
+                let seq_elems = self.extract_list("seq.++")?;
+                for (index, wrapped_seq_value_at_index) in seq_elems.iter().enumerate() {
+                    let seq_value_at_index =
+                        (&wrapped_seq_value_at_index).extract_list("seq.unit")?;
+                    values.insert(index, (&seq_value_at_index[0]).clone());
                 }
-            } else if key == &ModelValue::literal("else") {
-                default = value.clone();
+                (seq_elems.len(), values)
+            };
+            Some(ModelValueVector {
+                size,
+                values,
+                default,
+            })
+        } else {
+            // Implementation of $ValueArray using integer maps
+            let args = self.extract_list("$ValueArray")?;
+            if args.len() != 2 {
+                return None;
             }
+            let size = (&args[1]).extract_number()?;
+            let map_key = &args[0];
+            let value_array_map = model
+                .vars
+                .get(&ModelValue::literal("Select_[$int]$Value"))?
+                .extract_map()?;
+            let mut values = BTreeMap::new();
+            let mut default = ModelValue::error();
+            for (key, value) in value_array_map {
+                if let ModelValue::List(elems) = key {
+                    if elems.len() == 2 && &elems[0] == map_key {
+                        if let Some(idx) = elems[1].extract_number() {
+                            values.insert(idx, value.clone());
+                        }
+                    }
+                } else if key == &ModelValue::literal("else") {
+                    default = value.clone();
+                }
+            }
+            Some(ModelValueVector {
+                size,
+                values,
+                default,
+            })
         }
-        Some(ModelValueVector {
-            size,
-            values,
-            default,
-        })
     }
 
     fn extract_map(&self) -> Option<&BTreeMap<ModelValue, ModelValue>> {
@@ -817,7 +1088,7 @@ impl ModelValue {
     /// Pretty prints the given model value which has given type. If printing fails, falls
     /// back to print the debug value.
     pub fn pretty_or_raw(&self, wrapper: &BoogieWrapper, model: &Model, ty: &Type) -> PrettyDoc {
-        if wrapper.options.stable_test_output {
+        if wrapper.options.prover.stable_test_output {
             return PrettyDoc::text("<redacted>");
         }
         self.pretty(wrapper, model, ty).unwrap_or_else(|| {
@@ -835,25 +1106,25 @@ impl ModelValue {
         match ty {
             Type::Primitive(PrimitiveType::U8) => Some(PrettyDoc::text(format!(
                 "{}u8",
-                self.extract_primitive("Integer")?
+                self.extract_primitive("$Integer")?
             ))),
             Type::Primitive(PrimitiveType::U64) => Some(PrettyDoc::text(
-                self.extract_primitive("Integer")?.to_string(),
+                self.extract_primitive("$Integer")?.to_string(),
             )),
             Type::Primitive(PrimitiveType::U128) => Some(PrettyDoc::text(format!(
                 "{}u128",
-                self.extract_primitive("Integer")?.to_string()
+                self.extract_primitive("$Integer")?.to_string()
             ))),
             Type::Primitive(PrimitiveType::Num) => Some(PrettyDoc::text(format!(
                 "{}u128",
-                self.extract_primitive("Integer")?.to_string()
+                self.extract_primitive("$Integer")?.to_string()
             ))),
             Type::Primitive(PrimitiveType::Bool) => Some(PrettyDoc::text(
-                self.extract_primitive("Boolean")?.to_string(),
+                self.extract_primitive("$Boolean")?.to_string(),
             )),
             Type::Primitive(PrimitiveType::Address) => {
                 let addr = BigInt::parse_bytes(
-                    &self.extract_primitive("Address")?.clone().into_bytes(),
+                    &self.extract_primitive("$Address")?.clone().into_bytes(),
                     10,
                 )?;
                 Some(PrettyDoc::text(format!("0x{}", &addr.to_str_radix(16))))
@@ -903,6 +1174,10 @@ impl ModelValue {
         let mut next = 0;
         let mut sparse = false;
         for idx in values.values.keys().sorted() {
+            if *idx >= values.size {
+                // outside of domain, ignore.
+                continue;
+            }
             let mut p = values.values.get(idx)?.pretty_or_raw(wrapper, model, param);
             if *idx > next {
                 p = PrettyDoc::text(format!("{}: ", idx)).append(p);
@@ -916,7 +1191,8 @@ impl ModelValue {
                 .default
                 .pretty(wrapper, model, param)
                 .unwrap_or_else(|| PrettyDoc::text("undef"));
-            entries.push(PrettyDoc::text("else: ").append(default));
+            entries.insert(0, PrettyDoc::text(format!("(size): {}", values.size)));
+            entries.push(PrettyDoc::text("default: ").append(default));
         }
         Some(PrettyDoc::text("vector").append(Self::pretty_vec_or_struct_body(entries)))
     }
@@ -976,24 +1252,24 @@ impl LocalDescriptor {
     fn pretty(
         &self,
         wrapper: &BoogieWrapper,
-        func_env: &FunctionEnv<'_>,
+        func_target: &FunctionTarget<'_>,
         model: &Model,
         ty: &Type,
         resolved_value: &ModelValue,
     ) -> PrettyDoc {
-        let n = func_env.get_local_count();
+        let n = func_target.get_local_count();
         let var_name = if self.var_idx >= n {
-            if func_env.get_return_count() > 1 {
-                format!("result_{}", self.var_idx - n)
+            if func_target.get_return_count() > 1 {
+                format!("result_{}", self.var_idx - n + 1)
             } else {
                 "result".to_string()
             }
         } else {
             format!(
                 "{}",
-                func_env
+                func_target
                     .get_local_name(self.var_idx)
-                    .display(func_env.symbol_pool())
+                    .display(func_target.symbol_pool())
             )
         };
         PrettyDoc::text(var_name)
@@ -1013,6 +1289,13 @@ impl LocalDescriptor {
 struct AbortDescriptor {
     module_id: ModuleId,
     func_id: FunId,
+}
+
+/// Represents an expression descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct ExpDescriptor {
+    module_id: ModuleId,
+    node_id: NodeId,
 }
 
 /// Represents parser for a boogie model.

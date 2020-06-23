@@ -8,6 +8,7 @@
 // Allow writing 1 * KiB or 1 * MiB
 #![allow(clippy::identity_op)]
 
+use bytes::Bytes;
 use criterion::{
     criterion_group, criterion_main, AxisScale, Bencher, Criterion, ParameterizedBenchmark,
     PlotConfiguration, Throughput,
@@ -19,13 +20,8 @@ use futures::{
     stream::{FuturesUnordered, StreamExt},
 };
 use libra_types::PeerId;
-use network::protocols::{
-    network::{
-        dummy::{setup_network, DummyMsg, DummyNetworkSender},
-        Event,
-    },
-    rpc::error::RpcError,
-};
+use network::protocols::{network::Event, rpc::error::RpcError};
+use network_builder::dummy::{setup_network, DummyMsg, DummyNetworkSender};
 use std::time::Duration;
 
 const KiB: usize = 1 << 10;
@@ -48,7 +44,7 @@ fn direct_send_bench(b: &mut Bencher, msg_len: &usize) {
     // the iteration once NUM_MSGS messages are received.
     let f_listener = async move {
         let mut counter = 0u32;
-        while let Some(_) = listener_events.next().await {
+        while listener_events.next().await.is_some() {
             counter += 1;
             // By the nature of DirectSend protocol, some messages may be lost when a connection is
             // broken temporarily.
@@ -82,15 +78,16 @@ fn rpc_bench(b: &mut Bencher, msg_len: &usize) {
     // Compose RequestBlock message and RespondBlock message with `msg_len` bytes payload
     let req = DummyMsg(vec![]);
     let res = DummyMsg(vec![0u8; *msg_len]);
+    let res: Bytes = lcs::to_bytes(&res)
+        .expect("failed to serialize message")
+        .into();
 
     // The listener side keeps receiving RPC requests and sending responses back
     let f_listener = async move {
         while let Some(Ok(event)) = listener_events.next().await {
             match event {
                 Event::RpcRequest((_, _, res_tx)) => res_tx
-                    .send(Ok(lcs::to_bytes(&res)
-                        .expect("fail to serialize proto")
-                        .into()))
+                    .send(Ok(res.clone()))
                     .expect("fail to send rpc response to network"),
                 event => panic!("Unexpected event: {:?}", event),
             }

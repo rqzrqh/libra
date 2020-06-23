@@ -1,42 +1,44 @@
-address 0x1:
+address 0x2 {
 
 module A {
-    use 0x1::B;
+    use 0x2::B;
 
     struct S{}
 
     public fun s(): S { S{} }
 
     fun foo(): B::S {
-        0x1::B::s()
+        0x2::B::s()
     }
 }
 
 module B {
-    use 0x1::C;
+    use 0x2::C;
 
     struct S{}
 
     public fun s(): S { S{} }
 
     fun foo(): C::S {
-        0x1::C::s()
+        0x2::C::s()
     }
 }
 
 module C {
-    use 0x1::A;
+    use 0x2::A;
 
     struct S{}
 
     public fun s(): S { S{} }
 
     fun foo(): A::S {
-        0x1::A::s()
+        0x2::A::s()
     }
 }
 
-address 0x2:
+}
+
+address 0x3 {
 
 module A {
 
@@ -45,7 +47,7 @@ module A {
     public fun s(): S { S{} }
 
     fun foo() {
-        0x2::B::s();
+        0x3::B::s();
     }
 }
 
@@ -56,7 +58,7 @@ module C {
     public fun s(): S { S{} }
 
     fun foo() {
-        0x2::A::s();
+        0x3::A::s();
     }
 }
 
@@ -67,21 +69,21 @@ module B {
     public fun s(): S { S{} }
 
     fun foo() {
-        0x2::C::s();
+        0x3::C::s();
     }
 }
 
+}
 
-
-address 0x3:
+address 0x4 {
 
 module C {
     struct S{}
 
     public fun s(): S { S{} }
 
-    fun foo(): 0x3::A::S {
-        0x3::A::s()
+    fun foo(): 0x4::A::S {
+        0x4::A::s()
     }
 }
 
@@ -90,8 +92,8 @@ module B {
 
     public fun s(): S { S{} }
 
-    fun foo(): 0x3::C::S {
-        0x3::C::s()
+    fun foo(): 0x4::C::S {
+        0x4::C::s()
     }
 }
 
@@ -101,7 +103,9 @@ module A {
 
     public fun s(): S { S{} }
 
-    fun foo(): 0x3::B::S {
-        0x3::B::s()
+    fun foo(): 0x4::B::S {
+        0x4::B::s()
     }
+}
+
 }

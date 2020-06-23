@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    account::AccountData, assert_prologue_parity, assert_status_eq,
-    compile::compile_module_with_address, executor::FakeExecutor, transaction_status_eq,
+    account::{Account, AccountData},
+    assert_prologue_parity, assert_status_eq,
+    compile::compile_module_with_address,
+    executor::FakeExecutor,
+    transaction_status_eq,
 };
 use libra_types::{
-    account_config::lbr_type_tag,
+    account_config::{self, LBR_NAME},
     on_chain_config::VMPublishingOption,
     transaction::TransactionStatus,
     vm_error::{StatusCode, StatusType, VMStatus},
@@ -41,7 +44,7 @@ fn bad_module_address() {
         10,
         100_000,
         1,
-        lbr_type_tag(),
+        LBR_NAME.to_owned(),
     );
 
     // TODO: This is not verified for now.
@@ -86,7 +89,7 @@ fn duplicate_module() {
         sequence_number,
         100_000,
         1,
-        lbr_type_tag(),
+        LBR_NAME.to_owned(),
     );
 
     let txn2 = account.account().create_signed_txn_impl(
@@ -95,7 +98,7 @@ fn duplicate_module() {
         sequence_number + 1,
         100_000,
         1,
-        lbr_type_tag(),
+        LBR_NAME.to_owned(),
     );
 
     let output1 = executor.execute_transaction(txn1);
@@ -137,13 +140,143 @@ pub fn test_publishing_no_modules_non_whitelist_script() {
         10,
         100_000,
         1,
-        lbr_type_tag(),
+        LBR_NAME.to_owned(),
     );
 
     assert_prologue_parity!(
         executor.verify_transaction(txn.clone()).status(),
         executor.execute_transaction(txn).status(),
-        VMStatus::new(StatusCode::UNKNOWN_MODULE)
+        VMStatus::new(StatusCode::INVALID_MODULE_PUBLISHER)
+    );
+}
+
+#[test]
+pub fn test_publishing_no_modules_non_whitelist_script_proper_sender() {
+    // create a FakeExecutor with a genesis from file
+    let executor = FakeExecutor::from_genesis_with_options(VMPublishingOption::CustomScripts);
+
+    // create a transaction trying to publish a new module.
+    let sender = Account::new_association();
+
+    let program = String::from(
+        "
+        module M {
+        }
+        ",
+    );
+
+    let random_script =
+        compile_module_with_address(&account_config::CORE_CODE_ADDRESS, "file_name", &program);
+    let txn = sender.create_signed_txn_impl(
+        *sender.address(),
+        random_script,
+        1,
+        100_000,
+        0,
+        LBR_NAME.to_owned(),
+    );
+    assert_eq!(executor.verify_transaction(txn.clone()).status(), None);
+    assert_eq!(
+        executor.execute_transaction(txn).status(),
+        &TransactionStatus::Keep(VMStatus::new(StatusCode::EXECUTED))
+    );
+}
+
+#[test]
+pub fn test_publishing_no_modules_proper_sender() {
+    // create a FakeExecutor with a genesis from file
+    let executor = FakeExecutor::whitelist_genesis();
+
+    // create a transaction trying to publish a new module.
+    let sender = Account::new_association();
+
+    let program = String::from(
+        "
+        module M {
+        }
+        ",
+    );
+
+    let random_script =
+        compile_module_with_address(&account_config::CORE_CODE_ADDRESS, "file_name", &program);
+    let txn = sender.create_signed_txn_impl(
+        *sender.address(),
+        random_script,
+        1,
+        100_000,
+        0,
+        LBR_NAME.to_owned(),
+    );
+    assert_eq!(executor.verify_transaction(txn.clone()).status(), None);
+    assert_eq!(
+        executor.execute_transaction(txn).status(),
+        &TransactionStatus::Keep(VMStatus::new(StatusCode::EXECUTED))
+    );
+}
+
+#[test]
+pub fn test_publishing_no_modules_core_code_sender() {
+    // create a FakeExecutor with a genesis from file
+    let executor = FakeExecutor::whitelist_genesis();
+
+    // create a transaction trying to publish a new module.
+    let sender = Account::new_association();
+
+    let program = String::from(
+        "
+        module M {
+        }
+        ",
+    );
+
+    let random_script =
+        compile_module_with_address(&account_config::CORE_CODE_ADDRESS, "file_name", &program);
+    let txn = sender.create_signed_txn_impl(
+        account_config::CORE_CODE_ADDRESS,
+        random_script,
+        0,
+        100_000,
+        0,
+        LBR_NAME.to_owned(),
+    );
+
+    // Doesn't work because the core code address doesn't have a PublishModuleCapability
+    assert_prologue_parity!(
+        executor.verify_transaction(txn.clone()).status(),
+        executor.execute_transaction(txn).status(),
+        VMStatus::new(StatusCode::INVALID_MODULE_PUBLISHER)
+    );
+}
+
+#[test]
+pub fn test_publishing_no_modules_invalid_sender() {
+    // create a FakeExecutor with a genesis from file
+    let mut executor = FakeExecutor::whitelist_genesis();
+
+    // create a transaction trying to publish a new module.
+    let sender = AccountData::new(1_000_000, 10);
+    executor.add_account_data(&sender);
+
+    let program = String::from(
+        "
+        module M {
+        }
+        ",
+    );
+
+    let random_script = compile_module_with_address(sender.address(), "file_name", &program);
+    let txn = sender.account().create_signed_txn_impl(
+        *sender.address(),
+        random_script,
+        10,
+        100_000,
+        0,
+        LBR_NAME.to_owned(),
+    );
+    assert_prologue_parity!(
+        executor.verify_transaction(txn.clone()).status(),
+        executor.execute_transaction(txn).status(),
+        VMStatus::new(StatusCode::INVALID_MODULE_PUBLISHER)
     );
 }
 
@@ -170,7 +303,7 @@ pub fn test_publishing_allow_modules() {
         10,
         100_000,
         1,
-        lbr_type_tag(),
+        LBR_NAME.to_owned(),
     );
     assert_eq!(executor.verify_transaction(txn.clone()).status(), None);
     assert_eq!(

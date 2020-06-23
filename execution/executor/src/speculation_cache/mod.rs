@@ -19,7 +19,7 @@ mod test;
 
 use anyhow::{format_err, Result};
 use consensus_types::block::Block;
-use executor_types::{ExecutedTrees, ProcessedVMOutput};
+use executor_types::{Error, ExecutedTrees, ProcessedVMOutput};
 use libra_crypto::{hash::PRE_GENESIS_BLOCK_ID, HashValue};
 use libra_logger::prelude::*;
 use libra_types::{ledger_info::LedgerInfo, transaction::Transaction};
@@ -27,7 +27,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},
 };
-use storage_proto::StartupInfo;
+use storage_interface::{StartupInfo, TreeState};
 
 /// The struct that stores all speculation result of its counterpart in consensus.
 pub(crate) struct SpeculationBlock {
@@ -127,6 +127,19 @@ impl SpeculationCache {
         cache
     }
 
+    pub fn new_for_db_bootstrapping(tree_state: TreeState) -> Self {
+        // The DB-bootstrapper applies genesis txn on a local DB and create a waypoint,
+        // assuming everything is synced and committed.
+        let executor_trees = ExecutedTrees::from(tree_state);
+        Self {
+            synced_trees: executor_trees.clone(),
+            committed_trees: executor_trees,
+            heads: vec![],
+            block_map: Arc::new(Mutex::new(HashMap::new())),
+            committed_block_id: *PRE_GENESIS_BLOCK_ID,
+        }
+    }
+
     pub fn committed_block_id(&self) -> HashValue {
         self.committed_block_id
     }
@@ -144,10 +157,10 @@ impl SpeculationCache {
         committed_trees: ExecutedTrees,
         committed_ledger_info: &LedgerInfo,
     ) {
-        let new_root_block_id = if committed_ledger_info.next_validator_set().is_some() {
+        let new_root_block_id = if committed_ledger_info.next_epoch_state().is_some() {
             // Update the root block id with reconfig virtual block id, to be consistent
             // with the logic of Consensus.
-            let id = Block::<()>::make_genesis_block_from_ledger_info(committed_ledger_info).id();
+            let id = Block::make_genesis_block_from_ledger_info(committed_ledger_info).id();
             debug!(
                 "Updated with a new root block {} as a virtual block of reconfiguration block {}",
                 id,
@@ -181,7 +194,7 @@ impl SpeculationCache {
             Vec<Transaction>,  /* block transactions */
             ProcessedVMOutput, /* block execution output */
         ),
-    ) -> Result<()> {
+    ) -> Result<(), Error> {
         // 0. Check existence first
         let (block_id, txns, output) = block;
         if self.block_map.lock().unwrap().contains_key(&block_id) {
@@ -212,7 +225,7 @@ impl SpeculationCache {
         Ok(())
     }
 
-    pub fn prune(&mut self, committed_ledger_info: &LedgerInfo) -> Result<()> {
+    pub fn prune(&mut self, committed_ledger_info: &LedgerInfo) -> Result<(), Error> {
         let arc_latest_committed_block =
             self.get_block(&committed_ledger_info.consensus_block_id())?;
         let latest_committed_block = arc_latest_committed_block.lock().unwrap();
@@ -225,20 +238,19 @@ impl SpeculationCache {
     }
 
     // This function is intended to be called internally.
-    pub fn get_block(&self, block_id: &HashValue) -> Result<Arc<Mutex<SpeculationBlock>>> {
-        self.block_map
+    pub fn get_block(&self, block_id: &HashValue) -> Result<Arc<Mutex<SpeculationBlock>>, Error> {
+        Ok(self
+            .block_map
             .lock()
             .unwrap()
             .get(&block_id)
-            .ok_or_else(|| {
-                format_err!("Cannot find speculation result for block id {:x}", block_id)
-            })?
+            .ok_or_else(|| Error::BlockNotFound(*block_id))?
             .upgrade()
             .ok_or_else(|| {
                 format_err!(
                     "block {:x} has been deallocated. Something went wrong.",
                     block_id
                 )
-            })
+            })?)
     }
 }

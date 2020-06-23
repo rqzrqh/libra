@@ -1,5 +1,7 @@
-use 0x0::ScriptWhitelist;
+script {
+use 0x1::LibraVMConfig;
 
-fun main(args: vector<u8>) {
-    ScriptWhitelist::set(args)
+fun modify_publishing_option(account: &signer, args: vector<u8>) {
+    LibraVMConfig::set_publishing_option(account, args)
+}
 }

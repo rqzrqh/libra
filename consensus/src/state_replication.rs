@@ -2,44 +2,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use consensus_types::block::Block;
+use consensus_types::{block::Block, common::Payload};
 use executor_types::StateComputeResult;
 use libra_crypto::HashValue;
-use libra_types::{ledger_info::LedgerInfoWithSignatures, validator_change::ValidatorChangeProof};
+use libra_types::ledger_info::LedgerInfoWithSignatures;
 
 /// Retrieves and updates the status of transactions on demand (e.g., via talking with Mempool)
 #[async_trait::async_trait]
 pub trait TxnManager: Send + Sync {
-    type Payload;
-
     /// Brings new transactions to be applied.
     /// The `exclude_txns` list includes the transactions that are already pending in the
     /// branch of blocks consensus is trying to extend.
-    async fn pull_txns(
-        &mut self,
-        max_size: u64,
-        exclude_txns: Vec<&Self::Payload>,
-    ) -> Result<Self::Payload>;
+    async fn pull_txns(&self, max_size: u64, exclude: Vec<&Payload>) -> Result<Payload>;
 
-    /// Notifies TxnManager about the payload of the committed block including the state compute
-    /// result, which includes the specifics of what transactions succeeded and failed.
-    async fn commit_txns(
-        &mut self,
-        txns: &Self::Payload,
-        compute_result: &StateComputeResult,
-    ) -> Result<()>;
+    /// Notifies TxnManager about the executed result of the block,
+    /// which includes the specifics of what transactions succeeded and failed.
+    async fn notify(&self, block: &Block, compute_result: &StateComputeResult) -> Result<()>;
 
-    /// Bypass the trait object non-clonable limit.
-    fn _clone_box(&self) -> Box<dyn TxnManager<Payload = Self::Payload>>;
-
-    // Helper to trace transactions after block is generated
-    fn trace_transactions(&self, _txns: &Self::Payload, _block_id: HashValue) {}
-}
-
-impl<T> Clone for Box<dyn TxnManager<Payload = T>> {
-    fn clone(&self) -> Box<dyn TxnManager<Payload = T>> {
-        self._clone_box()
-    }
+    /// Helper to trace transactions after block is generated
+    fn trace_transactions(&self, _block: &Block) {}
 }
 
 /// While Consensus is managing proposed blocks, `StateComputer` is managing the results of the
@@ -47,15 +28,13 @@ impl<T> Clone for Box<dyn TxnManager<Payload = T>> {
 /// StateComputer is using proposed block ids for identifying the transactions.
 #[async_trait::async_trait]
 pub trait StateComputer: Send + Sync {
-    type Payload;
-
     /// How to execute a sequence of transactions and obtain the next state. While some of the
     /// transactions succeed, some of them can fail.
     /// In case all the transactions are failed, new_state_id is equal to the previous state id.
     fn compute(
         &self,
         // The block that will be computed.
-        block: &Block<Self::Payload>,
+        block: &Block,
         // The parent block root hash.
         parent_block_id: HashValue,
     ) -> Result<StateComputeResult>;
@@ -72,11 +51,4 @@ pub trait StateComputer: Send + Sync {
     /// In case of failure (`Result::Error`) the LI of storage remains unchanged, and the validator
     /// can assume there were no modifications to the storage made.
     async fn sync_to(&self, target: LedgerInfoWithSignatures) -> Result<()>;
-
-    /// Generate the epoch change proof from start_epoch to the latest epoch.
-    async fn get_epoch_proof(
-        &self,
-        start_epoch: u64,
-        end_epoch: u64,
-    ) -> Result<ValidatorChangeProof>;
 }

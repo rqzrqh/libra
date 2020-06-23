@@ -23,11 +23,13 @@ def create_client():
         ac_host = random.choice(ac_hosts)
         ac_port = os.environ['AC_PORT']
         url = "http://{}:{}".format(ac_host, ac_port)
+        waypoint = open("/opt/libra/etc/waypoint.txt", "r").readline()
 
         print("Connecting to ac on: {}".format(url))
-        cmd = "/opt/libra/bin/cli --url {} -m {}".format(
+        cmd = "/opt/libra/bin/cli --url {} -m {} --waypoint {}".format(
             url,
-            "/opt/libra/etc/mint.key")
+            "/opt/libra/etc/mint.key",
+            waypoint)
 
         application.client = pexpect.spawn(cmd)
         application.client.delaybeforesend = 0.1
@@ -54,12 +56,14 @@ def send_transaction():
         return 'Bad amount', 400
 
     if amount > MAX_MINT:
-        return 'Exceeded max amount of {}'.format(MAX_MINT / (10 ** 6)), 400
+        return 'Exceeded max amount of {}'.format(MAX_MINT), 400
+
+    currency_code = flask.request.args['currency_code']
 
     try:
         create_client()
         application.client.sendline(
-            "a m {} {}".format(auth_key, amount / (10 ** 6)))
+            "a m {} {} {} use_base_units".format(auth_key, amount, currency_code))
         application.client.expect("Mint request submitted", timeout=2)
 
         application.client.sendline("a la")

@@ -1,6 +1,11 @@
-// Script for adding a new validator
-// Will only succeed when run by the Association address
+script {
+    use 0x1::LibraSystem;
+    use 0x1::Roles::{Self, AssociationRootRole};
 
-fun main(new_validator: address) {
-  0x0::LibraSystem::remove_validator(new_validator)
+    // Callable by Validator's operator
+    fun remove_validator(account: &signer, validator_address: address) {
+        let assoc_root_role = Roles::extract_privilege_to_capability<AssociationRootRole>(account);
+        LibraSystem::remove_validator(&assoc_root_role, validator_address);
+        Roles::restore_capability_to_privilege(account, assoc_root_role);
+    }
 }

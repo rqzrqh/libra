@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use consensus_types::common::Round;
+use libra_types::waypoint::Waypoint;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 
@@ -12,9 +13,9 @@ use std::fmt::{Display, Formatter};
 pub struct ConsensusState {
     epoch: u64,
     last_voted_round: Round,
-    // A "preferred block" is the two-chain head with the highest block round. The expectation is
-    // that a new proposal's parent is higher or equal to the preferred_round.
     preferred_round: Round,
+    waypoint: Waypoint,
+    in_validator_set: bool,
 }
 
 impl Display for ConsensusState {
@@ -25,18 +26,32 @@ impl Display for ConsensusState {
              \tepoch = {},
              \tlast_voted_round = {},\n\
              \tpreferred_round = {}\n\
+             \twaypoint = {}\n\
+             \tin_validator_set = {}\n\
              ]",
-            self.epoch, self.last_voted_round, self.preferred_round
+            self.epoch,
+            self.last_voted_round,
+            self.preferred_round,
+            self.waypoint,
+            self.in_validator_set,
         )
     }
 }
 
 impl ConsensusState {
-    pub fn new(epoch: u64, last_voted_round: Round, preferred_round: Round) -> Self {
+    pub fn new(
+        epoch: u64,
+        last_voted_round: Round,
+        preferred_round: Round,
+        waypoint: Waypoint,
+        in_validator_set: bool,
+    ) -> Self {
         Self {
             epoch,
             last_voted_round,
             preferred_round,
+            waypoint,
+            in_validator_set,
         }
     }
 
@@ -50,8 +65,19 @@ impl ConsensusState {
         self.last_voted_round
     }
 
-    /// Returns the preferred block round
+    /// A "preferred block" is the two-chain head with the highest block round. The expectation is
+    /// that a new proposal's parent is higher or equal to the preferred_round.
     pub fn preferred_round(&self) -> Round {
         self.preferred_round
+    }
+
+    /// Last known checkpoint this should map to a LedgerInfo that contains a new ValidatorSet
+    pub fn waypoint(&self) -> Waypoint {
+        self.waypoint
+    }
+
+    /// Indicating whether the validator is validator set
+    pub fn in_validator_set(&self) -> bool {
+        self.in_validator_set
     }
 }

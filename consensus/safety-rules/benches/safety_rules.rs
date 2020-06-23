@@ -1,12 +1,11 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use consensus_types::block::{block_test_utils, Block};
+use consensus_types::block::{block_test_utils, block_test_utils::random_payload, Block};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use libra_config::config::{OnDiskStorageConfig, SafetyRulesBackend};
-use libra_secure_storage::{InMemoryStorage, OnDiskStorage};
+use libra_config::config::{OnDiskStorageConfig, SecureBackend};
+use libra_secure_storage::{InMemoryStorage, OnDiskStorage, Storage};
 use libra_types::validator_signer::ValidatorSigner;
-use rand::Rng;
 use safety_rules::{
     process_client_wrapper::ProcessClientWrapper, test_utils, PersistentSafetyStorage,
     SafetyRulesManager, TSafetyRules,
@@ -15,27 +14,23 @@ use tempfile::NamedTempFile;
 
 /// Execute an in order series of blocks (0 <- 1 <- 2 <- 3 and commit 0 and continue to rotate
 /// left, appending new blocks on the right, committing the left most block
-fn lsr(mut safety_rules: Box<dyn TSafetyRules<Vec<u8>>>, signer: ValidatorSigner, n: u64) {
-    let mut rng = rand::thread_rng();
-    let data: Vec<u8> = (0..2048).map(|_| rng.gen::<u8>()).collect();
+fn lsr(mut safety_rules: Box<dyn TSafetyRules>, signer: ValidatorSigner, n: u64) {
+    let data = random_payload(2048);
 
-    let genesis_block = Block::<Vec<u8>>::make_genesis_block();
+    let genesis_block = Block::make_genesis_block();
     let genesis_qc = block_test_utils::certificate_for_genesis();
     let mut round = genesis_block.round();
 
     round += 1;
     let mut b0 = test_utils::make_proposal_with_qc(round, genesis_qc, &signer);
-    safety_rules.update(b0.block().quorum_cert()).unwrap();
     safety_rules.construct_and_sign_vote(&b0).unwrap();
 
     round += 1;
     let mut b1 = test_utils::make_proposal_with_parent(data.clone(), round, &b0, None, &signer);
-    safety_rules.update(b1.block().quorum_cert()).unwrap();
     safety_rules.construct_and_sign_vote(&b1).unwrap();
 
     round += 1;
     let mut b2 = test_utils::make_proposal_with_parent(data.clone(), round, &b1, None, &signer);
-    safety_rules.update(b2.block().quorum_cert()).unwrap();
     safety_rules.construct_and_sign_vote(&b2).unwrap();
 
     for _i in 0..n {
@@ -43,7 +38,6 @@ fn lsr(mut safety_rules: Box<dyn TSafetyRules<Vec<u8>>>, signer: ValidatorSigner
         let b3 =
             test_utils::make_proposal_with_parent(data.clone(), round, &b2, Some(&b0), &signer);
 
-        safety_rules.update(b3.block().quorum_cert()).unwrap();
         safety_rules.construct_and_sign_vote(&b3).unwrap();
 
         b0 = b1;
@@ -54,53 +48,64 @@ fn lsr(mut safety_rules: Box<dyn TSafetyRules<Vec<u8>>>, signer: ValidatorSigner
 
 fn in_memory(n: u64) {
     let signer = ValidatorSigner::from_int(0);
+    let waypoint = test_utils::validator_signers_to_waypoint(&[&signer]);
     let storage = PersistentSafetyStorage::initialize(
-        InMemoryStorage::new_storage(),
+        Storage::from(InMemoryStorage::new()),
+        signer.author(),
         signer.private_key().clone(),
+        waypoint,
     );
-    let safety_rules_manager = SafetyRulesManager::new_local(signer.author(), storage);
+    let safety_rules_manager = SafetyRulesManager::new_local(storage);
     lsr(safety_rules_manager.client(), signer, n);
 }
 
 fn on_disk(n: u64) {
     let signer = ValidatorSigner::from_int(0);
     let file_path = NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
+    let waypoint = test_utils::validator_signers_to_waypoint(&[&signer]);
     let storage = PersistentSafetyStorage::initialize(
-        OnDiskStorage::new_storage(file_path),
+        Storage::from(OnDiskStorage::new(file_path)),
+        signer.author(),
         signer.private_key().clone(),
+        waypoint,
     );
-    let safety_rules_manager = SafetyRulesManager::new_local(signer.author(), storage);
+    let safety_rules_manager = SafetyRulesManager::new_local(storage);
     lsr(safety_rules_manager.client(), signer, n);
 }
 
 fn serializer(n: u64) {
     let signer = ValidatorSigner::from_int(0);
     let file_path = NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
+    let waypoint = test_utils::validator_signers_to_waypoint(&[&signer]);
     let storage = PersistentSafetyStorage::initialize(
-        OnDiskStorage::new_storage(file_path),
+        Storage::from(OnDiskStorage::new(file_path)),
+        signer.author(),
         signer.private_key().clone(),
+        waypoint,
     );
-    let safety_rules_manager = SafetyRulesManager::new_serializer(signer.author(), storage);
+    let safety_rules_manager = SafetyRulesManager::new_serializer(storage);
     lsr(safety_rules_manager.client(), signer, n);
 }
 
 fn thread(n: u64) {
     let signer = ValidatorSigner::from_int(0);
     let file_path = NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
+    let waypoint = test_utils::validator_signers_to_waypoint(&[&signer]);
     let storage = PersistentSafetyStorage::initialize(
-        OnDiskStorage::new_storage(file_path),
+        Storage::from(OnDiskStorage::new(file_path)),
+        signer.author(),
         signer.private_key().clone(),
+        waypoint,
     );
-    let safety_rules_manager = SafetyRulesManager::new_thread(signer.author(), storage);
+    let safety_rules_manager = SafetyRulesManager::new_thread(storage);
     lsr(safety_rules_manager.client(), signer, n);
 }
 
 fn process(n: u64) {
     let file_path = NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
     let mut config = OnDiskStorageConfig::default();
-    config.default = true;
     config.path = file_path;
-    let backend = SafetyRulesBackend::OnDiskStorage(config);
+    let backend = SecureBackend::OnDiskStorage(config);
     let client_wrapper = ProcessClientWrapper::new(backend);
     let signer = client_wrapper.signer();
 

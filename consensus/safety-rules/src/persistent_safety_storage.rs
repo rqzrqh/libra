@@ -2,9 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use consensus_types::common::Round;
-use libra_crypto::ed25519::Ed25519PrivateKey;
-use libra_secure_storage::{InMemoryStorage, Policy, Storage, Value};
+use consensus_types::common::{Author, Round};
+use libra_crypto::ed25519::{Ed25519PrivateKey, Ed25519PublicKey};
+use libra_global_constants::{
+    CONSENSUS_KEY, EPOCH, LAST_VOTED_ROUND, OPERATOR_ACCOUNT, PREFERRED_ROUND, WAYPOINT,
+};
+use libra_secure_storage::{CryptoStorage, InMemoryStorage, KVStorage, Storage, Value};
+use libra_types::waypoint::Waypoint;
+use std::str::FromStr;
 
 /// SafetyRules needs an abstract storage interface to act as a common utility for storing
 /// persistent data to local disk, cloud, secrets managers, or even memory (for tests)
@@ -12,59 +17,62 @@ use libra_secure_storage::{InMemoryStorage, Policy, Storage, Value};
 /// @TODO add access to private key from persistent store
 /// @TODO add retrieval of private key based upon public key to persistent store
 pub struct PersistentSafetyStorage {
-    internal_store: Box<dyn Storage>,
+    internal_store: Storage,
 }
-
-const CONSENSUS_KEY: &str = "consensus_key";
-const EPOCH: &str = "epoch";
-const LAST_VOTED_ROUND: &str = "last_voted_round";
-const PREFERRED_ROUND: &str = "preferred_round";
 
 impl PersistentSafetyStorage {
     pub fn in_memory(private_key: Ed25519PrivateKey) -> Self {
-        let storage = InMemoryStorage::new_storage();
-        Self::initialize(storage, private_key)
+        let storage = Storage::from(InMemoryStorage::new());
+        Self::initialize(storage, Author::random(), private_key, Waypoint::default())
     }
 
     /// Use this to instantiate a PersistentStorage for a new data store, one that has no
     /// SafetyRules values set.
     pub fn initialize(
-        mut internal_store: Box<dyn Storage>,
+        mut internal_store: Storage,
+        author: Author,
         private_key: Ed25519PrivateKey,
+        waypoint: Waypoint,
     ) -> Self {
-        let perms = Policy::public();
-        internal_store
-            .create_if_not_exists(CONSENSUS_KEY, Value::Ed25519PrivateKey(private_key), &perms)
-            .expect("Unable to initialize backend storage");
-        internal_store
-            .create_if_not_exists(EPOCH, Value::U64(1), &perms)
-            .expect("Unable to initialize backend storage");
-        internal_store
-            .create_if_not_exists(LAST_VOTED_ROUND, Value::U64(0), &perms)
-            .expect("Unable to initialize backend storage");
-        internal_store
-            .create_if_not_exists(PREFERRED_ROUND, Value::U64(0), &perms)
+        Self::initialize_(&mut internal_store, author, private_key, waypoint)
             .expect("Unable to initialize backend storage");
         Self { internal_store }
+    }
+
+    fn initialize_(
+        internal_store: &mut Storage,
+        author: Author,
+        private_key: Ed25519PrivateKey,
+        waypoint: Waypoint,
+    ) -> Result<()> {
+        internal_store.import_private_key(CONSENSUS_KEY, private_key)?;
+        internal_store.set(EPOCH, Value::U64(1))?;
+        internal_store.set(LAST_VOTED_ROUND, Value::U64(0))?;
+        internal_store.set(OPERATOR_ACCOUNT, Value::String(author.to_string()))?;
+        internal_store.set(PREFERRED_ROUND, Value::U64(0))?;
+        internal_store.set(WAYPOINT, Value::String(waypoint.to_string()))?;
+        Ok(())
     }
 
     /// Use this to instantiate a PersistentStorage with an existing data store. This is intended
     /// for constructed environments.
-    pub fn new(internal_store: Box<dyn Storage>) -> Self {
+    pub fn new(internal_store: Storage) -> Self {
         Self { internal_store }
     }
 
-    pub fn consensus_key(&self) -> Result<Ed25519PrivateKey> {
-        Ok(self
-            .internal_store
-            .get(CONSENSUS_KEY)
-            .and_then(|r| r.value.ed25519_private_key())?)
+    pub fn author(&self) -> Result<Author> {
+        let res = self.internal_store.get(OPERATOR_ACCOUNT)?;
+        let res = res.value.string()?;
+        std::str::FromStr::from_str(&res)
     }
 
-    pub fn set_consensus_key(&mut self, consensus_key: Ed25519PrivateKey) -> Result<()> {
+    pub fn consensus_key_for_version(
+        &self,
+        version: Ed25519PublicKey,
+    ) -> Result<Ed25519PrivateKey> {
         self.internal_store
-            .set(CONSENSUS_KEY, Value::Ed25519PrivateKey(consensus_key))?;
-        Ok(())
+            .export_private_key_for_version(CONSENSUS_KEY, version)
+            .map_err(|e| e.into())
     }
 
     pub fn epoch(&self) -> Result<u64> {
@@ -101,6 +109,26 @@ impl PersistentSafetyStorage {
             .set(PREFERRED_ROUND, Value::U64(preferred_round))?;
         Ok(())
     }
+
+    pub fn waypoint(&self) -> Result<Waypoint> {
+        let waypoint = self
+            .internal_store
+            .get(WAYPOINT)
+            .and_then(|r| r.value.string())?;
+        Waypoint::from_str(&waypoint)
+            .map_err(|e| anyhow::anyhow!("Unable to parse waypoint: {}", e))
+    }
+
+    pub fn set_waypoint(&mut self, waypoint: &Waypoint) -> Result<()> {
+        self.internal_store
+            .set(WAYPOINT, Value::String(waypoint.to_string()))?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn internal_store(&mut self) -> &mut Storage {
+        &mut self.internal_store
+    }
 }
 
 #[cfg(test)]
@@ -111,8 +139,7 @@ mod tests {
     #[test]
     fn test() {
         let private_key = ValidatorSigner::from_int(0).private_key().clone();
-        let internal = InMemoryStorage::new_storage();
-        let mut storage = PersistentSafetyStorage::initialize(internal, private_key);
+        let mut storage = PersistentSafetyStorage::in_memory(private_key);
         assert_eq!(storage.epoch().unwrap(), 1);
         assert_eq!(storage.last_voted_round().unwrap(), 0);
         assert_eq!(storage.preferred_round().unwrap(), 0);

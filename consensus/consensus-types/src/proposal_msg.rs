@@ -1,11 +1,7 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    block::Block,
-    common::{Author, Payload, Round},
-    sync_info::SyncInfo,
-};
+use crate::{block::Block, common::Author, sync_info::SyncInfo};
 use anyhow::{ensure, format_err, Context, Result};
 use libra_types::validator_verifier::ValidatorVerifier;
 use serde::{Deserialize, Serialize};
@@ -14,15 +10,14 @@ use std::fmt;
 /// ProposalMsg contains the required information for the proposer election protocol to make its
 /// choice (typically depends on round and proposer info).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProposalMsg<T> {
-    #[serde(bound(deserialize = "Block<T>: Deserialize<'de>"))]
-    proposal: Block<T>,
+pub struct ProposalMsg {
+    proposal: Block,
     sync_info: SyncInfo,
 }
 
-impl<T: Payload> ProposalMsg<T> {
+impl ProposalMsg {
     /// Creates a new proposal.
-    pub fn new(proposal: Block<T>, sync_info: SyncInfo) -> Self {
+    pub fn new(proposal: Block, sync_info: SyncInfo) -> Self {
         Self {
             proposal,
             sync_info,
@@ -92,20 +87,16 @@ impl<T: Payload> ProposalMsg<T> {
         self.verify_well_formed()
     }
 
-    pub fn proposal(&self) -> &Block<T> {
+    pub fn proposal(&self) -> &Block {
         &self.proposal
     }
 
-    pub fn take_proposal(self) -> Block<T> {
+    pub fn take_proposal(self) -> Block {
         self.proposal
     }
 
     pub fn sync_info(&self) -> &SyncInfo {
         &self.sync_info
-    }
-
-    pub fn round(&self) -> Round {
-        self.proposal.round()
     }
 
     pub fn proposer(&self) -> Author {
@@ -115,7 +106,7 @@ impl<T: Payload> ProposalMsg<T> {
     }
 }
 
-impl<T: Payload> fmt::Display for ProposalMsg<T> {
+impl fmt::Display for ProposalMsg {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let author = match self.proposal.author() {
             Some(author) => author.short_str(),

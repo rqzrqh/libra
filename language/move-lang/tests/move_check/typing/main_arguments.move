@@ -1,10 +1,13 @@
+script {
 fun main(
-    a: address,
-    x8: u8,
-    x64: u64,
-    x128: u128,
-    b: bool,
-    ba: vector<u8>,
+    _sender: &signer,
+    _a: address,
+    _x8: u8,
+    _x64: u64,
+    _x128: u128,
+    _b: bool,
+    _ba: vector<u8>,
 ) {
 
+}
 }

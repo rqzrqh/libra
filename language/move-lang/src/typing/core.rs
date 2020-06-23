@@ -14,7 +14,7 @@ use crate::{
     shared::{unique_map::UniqueMap, *},
 };
 use move_ir_types::location::*;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 //**************************************************************************************************
 // Context
@@ -36,13 +36,13 @@ pub enum Constraint {
     SingleTypeConstraint(Loc, String, Type),
 }
 pub type Constraints = Vec<Constraint>;
-type TParamSubst = HashMap<TParamID, Type>;
+pub type TParamSubst = HashMap<TParamID, Type>;
 
 pub struct FunctionInfo {
     pub defined_loc: Loc,
     pub visibility: FunctionVisibility,
     pub signature: FunctionSignature,
-    pub acquires: BTreeSet<StructName>,
+    pub acquires: BTreeMap<StructName, Loc>,
 }
 
 pub struct ModuleInfo {
@@ -346,37 +346,41 @@ pub fn error_format(b: &Type, subst: &Subst) -> String {
     error_format_(b, subst, false)
 }
 
+pub fn error_format_nested(b: &Type, subst: &Subst) -> String {
+    error_format_(b, subst, true)
+}
+
 fn error_format_(sp!(_, b_): &Type, subst: &Subst, nested: bool) -> String {
     use Type_::*;
     let res = match b_ {
         UnresolvedError | Anything => "_".to_string(),
         Unit => "()".to_string(),
         Var(id) => match subst.get(*id) {
-            Some(t) => error_format_(t, subst, true),
+            Some(t) => error_format_nested(t, subst),
             None if nested && subst.is_num_var(*id) => "{integer}".to_string(),
             None if subst.is_num_var(*id) => return "integer".to_string(),
             None => "_".to_string(),
         },
         Apply(_, sp!(_, TypeName_::Multiple(_)), tys) => {
-            let inner = format_comma(tys.iter().map(|s| error_format_(s, subst, true)));
+            let inner = format_comma(tys.iter().map(|s| error_format_nested(s, subst)));
             format!("({})", inner)
         }
         Apply(_, n, tys) => {
             let tys_str = if !tys.is_empty() {
                 format!(
                     "<{}>",
-                    format_comma(tys.iter().map(|t| error_format_(t, subst, true)))
+                    format_comma(tys.iter().map(|t| error_format_nested(t, subst)))
                 )
             } else {
                 "".to_string()
             };
             format!("{}{}", n, tys_str)
         }
-        Param(tp) => tp.debug.value.to_string(),
+        Param(tp) => tp.user_specified_name.value.to_string(),
         Ref(mut_, ty) => format!(
             "&{}{}",
             if *mut_ { "mut " } else { "" },
-            error_format_(ty, subst, true)
+            error_format_nested(ty, subst)
         ),
     };
     if nested {
@@ -395,7 +399,7 @@ pub fn infer_kind(context: &Context, subst: &Subst, ty: Type) -> Option<Kind> {
     use Type_ as T;
     let loc = ty.loc;
     match unfold_type(subst, ty).value {
-        T::Unit | T::Ref(_, _) => Some(sp(loc, Kind_::Unrestricted)),
+        T::Unit | T::Ref(_, _) => Some(sp(loc, Kind_::Copyable)),
         T::Var(_) => panic!("ICE unfold_type failed, which is impossible"),
         T::UnresolvedError | T::Anything => None,
         T::Param(TParam { kind, .. }) | T::Apply(Some(kind), _, _) => Some(kind),
@@ -422,12 +426,12 @@ pub fn infer_kind(context: &Context, subst: &Subst, ty: Type) -> Option<Kind> {
                 .zip(contraints)
                 .filter_map(|(t, constraint_opt)| infer_kind(context, subst, t).or(constraint_opt))
                 .map(|k| match k {
-                    sp!(loc, K::Unrestricted) => sp(loc, K::Affine),
+                    sp!(loc, K::Copyable) => sp(loc, K::Affine),
                     k => k,
                 })
                 .max_by(most_general_kind);
             Some(match max {
-                Some(sp!(_, K::Unrestricted)) => unreachable!(),
+                Some(sp!(_, K::Copyable)) => unreachable!(),
                 None | Some(sp!(_, K::Affine)) => {
                     sp(type_name_declared_loc(context, &n), K::Affine)
                 }
@@ -441,7 +445,7 @@ fn most_general_kind(k1: &Kind, k2: &Kind) -> std::cmp::Ordering {
     use std::cmp::Ordering as O;
     use Kind_ as K;
     match (&k1.value, &k2.value) {
-        (K::Unrestricted, _) | (_, K::Unrestricted) => panic!("ICE structs cannot be unrestricted"),
+        (K::Copyable, _) | (_, K::Copyable) => panic!("ICE structs cannot be copyable"),
 
         (K::Unknown, K::Unknown) => O::Equal,
         (K::Unknown, _) => O::Greater,
@@ -600,7 +604,13 @@ pub fn make_function_type(
     m: &ModuleIdent,
     f: &FunctionName,
     ty_args_opt: Option<Vec<Type>>,
-) -> (Loc, Vec<Type>, Vec<(Var, Type)>, BTreeSet<StructName>, Type) {
+) -> (
+    Loc,
+    Vec<Type>,
+    Vec<(Var, Type)>,
+    BTreeMap<StructName, Loc>,
+    Type,
+) {
     let in_current_module = match &context.current_module {
         Some(current) => m == current,
         None => false,
@@ -642,7 +652,7 @@ pub fn make_function_type(
     let acquires = if in_current_module {
         finfo.acquires.clone()
     } else {
-        BTreeSet::new()
+        BTreeMap::new()
     };
     let defined_loc = finfo.defined_loc;
     match &finfo.visibility {
@@ -717,21 +727,21 @@ fn solve_kind_constraint(context: &mut Context, loc: Loc, b: Type, k: Kind) {
         Some(k) => k,
     };
     match (b_kind.value, &k.value) {
-        (_, K::Unrestricted) => panic!("ICE tparams cannot have unrestricted constraints"),
+        (_, K::Copyable) => panic!("ICE tparams cannot have copyable constraints"),
 
         // _ <: all
-        // unrestricted <: affine
+        // copyable <: affine
         // affine <: affine
         // linear <: linear
         (_, K::Unknown)
-        | (K::Unrestricted, K::Affine)
+        | (K::Copyable, K::Affine)
         | (K::Affine, K::Affine)
         | (K::Resource, K::Resource) => (),
 
-        // unrestricted </: linear
+        // copyable </: linear
         // affine </: linear
         // all </: linear
-        (K::Unrestricted, K::Resource) | (K::Affine, K::Resource) | (K::Unknown, K::Resource) => {
+        (K::Copyable, K::Resource) | (K::Affine, K::Resource) | (K::Unknown, K::Resource) => {
             let ty_str = error_format(&b, &context.subst);
             let cmsg = format!(
                 "The {} type {} does not satisfy the constraint '{}'",
@@ -757,7 +767,7 @@ fn solve_kind_constraint(context: &mut Context, loc: Loc, b: Type, k: Kind) {
         // linear </: affine
         (bk @ K::Unknown, K::Affine) | (bk @ K::Resource, K::Affine) => {
             let resource_msg = match bk {
-                K::Unrestricted | K::Affine => panic!("ICE covered above"),
+                K::Copyable | K::Affine => panic!("ICE covered above"),
                 K::Resource => "resource ",
                 K::Unknown => "",
             };
@@ -794,7 +804,7 @@ fn solve_copyable_constraint(context: &mut Context, loc: Loc, msg: String, s: Ty
         Some(k) => k,
     };
     match kind {
-        sp!(_, Kind_::Unrestricted) | sp!(_, Kind_::Affine) => (),
+        sp!(_, Kind_::Copyable) | sp!(_, Kind_::Affine) => (),
         sp!(rloc, Kind_::Unknown) | sp!(rloc, Kind_::Resource) => {
             let ty_str = error_format(&s, &context.subst);
             context.error(vec![
@@ -822,7 +832,7 @@ fn solve_implicitly_copyable_constraint(
         Some(k) => k,
     };
     match kind {
-        sp!(_, Kind_::Unrestricted) => (),
+        sp!(_, Kind_::Copyable) => (),
         sp!(kloc, Kind_::Affine) => {
             let ty_str = error_format(&ty, &context.subst);
             context.error(vec![
@@ -952,13 +962,13 @@ fn make_tparam_subst(tps: &[TParam], args: Vec<Type>) -> TParamSubst {
     assert!(tps.len() == args.len());
     let mut subst = TParamSubst::new();
     for (tp, arg) in tps.iter().zip(args) {
-        let old_val = subst.insert(tp.id.clone(), arg);
+        let old_val = subst.insert(tp.id, arg);
         assert!(old_val.is_none())
     }
     subst
 }
 
-fn subst_tparams(subst: &TParamSubst, sp!(loc, t_): Type) -> Type {
+pub fn subst_tparams(subst: &TParamSubst, sp!(loc, t_): Type) -> Type {
     use Type_::*;
     match t_ {
         x @ Unit | x @ UnresolvedError | x @ Anything => sp(loc, x),

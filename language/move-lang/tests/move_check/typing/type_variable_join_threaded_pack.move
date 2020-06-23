@@ -1,4 +1,4 @@
-address 0x1:
+address 0x2 {
 
 module Container {
     struct T<V> {}
@@ -7,18 +7,18 @@ module Container {
         T {}
     }
 
-    public fun get<V: copyable>(self: &T<V>): V {
+    public fun get<V: copyable>(_self: &T<V>): V {
         abort 0
     }
 
-    public fun put<V>(self: &mut T<V>, item: V) {
+    public fun put<V>(_self: &mut T<V>, _item: V) {
         abort 0
     }
 }
 
 
 module M {
-    use 0x1::Container;
+    use 0x2::Container;
 
     struct Box<T> { f1: T, f2: T }
 
@@ -29,4 +29,6 @@ module M {
         Container::put(&mut v, 0);
         b
     }
+}
+
 }

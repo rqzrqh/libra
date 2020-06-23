@@ -14,7 +14,7 @@ fn protocol_id_serialization() -> lcs::Result<()> {
 #[test]
 fn error_code() -> lcs::Result<()> {
     let error_code = ErrorCode::TimedOut;
-    assert_eq!(lcs::to_bytes(&error_code)?, vec![0x01]);
+    assert_eq!(lcs::to_bytes(&error_code)?, vec![0x00]);
     Ok(())
 }
 
@@ -24,7 +24,7 @@ fn rpc_request() -> lcs::Result<()> {
         request_id: 25,
         protocol_id: ProtocolId::ConsensusRpc,
         priority: 0,
-        raw_request: Bytes::from_static(&[0, 1, 2, 3]),
+        raw_request: [0, 1, 2, 3].to_vec(),
     };
     assert_eq!(
         lcs::to_bytes(&rpc_request)?,

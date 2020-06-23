@@ -1,16 +1,17 @@
-import 0x0.LibraAccount;
-import 0x0.LBR;
-import 0x0.Libra;
+import 0x1.LibraAccount;
+import 0x1.LBR;
+import 0x1.Libra;
 
-main() {
-    let ten_coins: Libra.T<LBR.T>;
-    let addr: address;
+main(account: &signer) {
+    let ten_coins: Libra.Libra<LBR.LBR>;
+    let with_cap: LibraAccount.WithdrawCapability;
 
-    addr = get_txn_sender();
-    ten_coins = LibraAccount.withdraw_from_sender<LBR.T>(10);
+    with_cap = LibraAccount.extract_withdraw_capability(copy(account));
+    ten_coins = LibraAccount.withdraw_from<LBR.LBR>(&with_cap, 10);
+    LibraAccount.restore_withdraw_capability(move(with_cap));
 
-    LibraAccount.deposit<LBR.T>(copy(addr), move(ten_coins));
-    LibraAccount.deposit<LBR.T>(copy(addr), move(ten_coins));
+    LibraAccount.deposit_to<LBR.LBR>(copy(account), move(ten_coins));
+    LibraAccount.deposit_to<LBR.LBR>(copy(account), move(ten_coins));
 
     return;
 }

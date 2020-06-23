@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 /// PacketLoss introduces a given percentage of PacketLoss for a given instance
-use crate::{effects::Action, instance::Instance};
+use crate::{effects::Effect, instance::Instance};
 use anyhow::Result;
 
 use async_trait::async_trait;
@@ -23,14 +23,20 @@ impl PacketLoss {
 }
 
 #[async_trait]
-impl Action for PacketLoss {
-    async fn apply(&self) -> Result<()> {
+impl Effect for PacketLoss {
+    async fn activate(&mut self) -> Result<()> {
         info!("PacketLoss {:.*}% for {}", 2, self.percent, self.instance);
         let cmd = format!(
-            "sudo tc qdisc delete dev eth0 root; sudo tc qdisc add dev eth0 root netem loss {:.*}%",
+            "tc qdisc add dev eth0 root netem loss {:.*}%",
             2, self.percent
         );
-        self.instance.run_cmd(vec![cmd]).await
+        self.instance.util_cmd(cmd, "ac-packet-loss").await
+    }
+
+    async fn deactivate(&mut self) -> Result<()> {
+        info!("PacketLoss {:.*}% for {}", 2, self.percent, self.instance);
+        let cmd = "tc qdisc delete dev eth0 root; true".to_string();
+        self.instance.util_cmd(cmd, "de-packet-loss").await
     }
 }
 

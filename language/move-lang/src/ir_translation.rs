@@ -20,16 +20,14 @@ macro_rules! replace {
 pub fn fix_syntax_and_write(out_path: &Path, contents: String) {
     // get_txn_sender() ~> 0x0::Transaction::sender()
     let contents = replace!(contents, r"get_txn_sender\(", NoExpand(&txn(TXN::SENDER)));
-    // assert(c, u) ~> 0x0::Transaction::assert(c, u)
-    let contents = replace!(contents, r"assert\(", NoExpand(&txn(TXN::ASSERT)));
     // move(x) ~> move x
     let contents = replace!(contents, r"move\((\w+)\)", "move $1");
     // copy(x) ~> copy x
     let contents = replace!(contents, r"copy\((\w+)\)", "copy $1");
     // resource StructName ~> resource struct StructName
     let contents = replace!(contents, r"resource\s+(\w)", "resource struct $1");
-    // unrestricted ~> copyable
-    let contents = replace!(contents, r":\s*unrestricted", NoExpand(": copyable"));
+    // copyable ~> copyable
+    let contents = replace!(contents, r":\s*copyable", NoExpand(": copyable"));
     // import ~> use
     let contents = replace!(contents, r"import", NoExpand("use"));
     // Self. is unnecessary

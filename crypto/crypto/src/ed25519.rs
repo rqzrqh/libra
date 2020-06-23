@@ -17,22 +17,26 @@
 //! use rand::{rngs::StdRng, SeedableRng};
 //!
 //! let mut hasher = TestOnlyHasher::default();
-//! hasher.write("Test message".as_bytes());
+//! hasher.update("Test message".as_bytes());
 //! let hashed_message = hasher.finish();
 //!
 //! let mut rng: StdRng = SeedableRng::from_seed([0; 32]);
-//! let private_key = Ed25519PrivateKey::generate_for_testing(&mut rng);
+//! let private_key = Ed25519PrivateKey::generate(&mut rng);
 //! let public_key: Ed25519PublicKey = (&private_key).into();
 //! let signature = private_key.sign_message(&hashed_message);
 //! assert!(signature.verify(&hashed_message, &public_key).is_ok());
 //! ```
 //! **Note**: The above example generates a private key using a private function intended only for
 //! testing purposes. Production code should find an alternate means for secure key generation.
-
-use crate::{traits::*, HashValue};
+use crate::{
+    hash::{CryptoHash, CryptoHasher},
+    traits::*,
+    HashValue,
+};
 use anyhow::{anyhow, Result};
 use core::convert::TryFrom;
 use libra_crypto_derive::{DeserializeKey, SerializeKey, SilentDebug, SilentDisplay};
+use serde::Serialize;
 use std::{cmp::Ordering, fmt};
 
 /// The length of the Ed25519PrivateKey
@@ -49,11 +53,19 @@ const L: [u8; 32] = [
 ];
 
 /// An Ed25519 private key
-#[derive(DeserializeKey, SilentDisplay, SilentDebug, SerializeKey)]
+#[derive(DeserializeKey, SerializeKey, SilentDebug, SilentDisplay)]
 pub struct Ed25519PrivateKey(ed25519_dalek::SecretKey);
 
 #[cfg(feature = "assert-private-keys-not-cloneable")]
 static_assertions::assert_not_impl_any!(Ed25519PrivateKey: Clone);
+
+#[cfg(any(test, feature = "cloneable-private-keys"))]
+impl Clone for Ed25519PrivateKey {
+    fn clone(&self) -> Self {
+        let serialized: &[u8] = &(self.to_bytes());
+        Ed25519PrivateKey::try_from(serialized).unwrap()
+    }
+}
 
 /// An Ed25519 public key
 #[derive(DeserializeKey, Clone, SerializeKey)]
@@ -64,6 +76,9 @@ pub struct Ed25519PublicKey(ed25519_dalek::PublicKey);
 pub struct Ed25519Signature(ed25519_dalek::Signature);
 
 impl Ed25519PrivateKey {
+    /// The length of the Ed25519PrivateKey
+    pub const LENGTH: usize = ed25519_dalek::SECRET_KEY_LENGTH;
+
     /// Serialize an Ed25519PrivateKey.
     pub fn to_bytes(&self) -> [u8; ED25519_PRIVATE_KEY_LENGTH] {
         self.0.to_bytes()
@@ -77,6 +92,17 @@ impl Ed25519PrivateKey {
             Ok(dalek_secret_key) => Ok(Ed25519PrivateKey(dalek_secret_key)),
             Err(_) => Err(CryptoMaterialError::DeserializationError),
         }
+    }
+
+    /// Private function aimed at minimizing code duplication between sign
+    /// methods of the SigningKey implementation. This should remain private.
+    fn sign_arbitrary_message(&self, message: &[u8]) -> Ed25519Signature {
+        let secret_key: &ed25519_dalek::SecretKey = &self.0;
+        let public_key: Ed25519PublicKey = self.into();
+        let expanded_secret_key: ed25519_dalek::ExpandedSecretKey =
+            ed25519_dalek::ExpandedSecretKey::from(secret_key);
+        let sig = expanded_secret_key.sign(message.as_ref(), &public_key.0);
+        Ed25519Signature(sig)
     }
 }
 
@@ -95,9 +121,47 @@ impl Ed25519PublicKey {
             Err(_) => Err(CryptoMaterialError::DeserializationError),
         }
     }
+
+    /// Deserialize an Ed25519PublicKey from its representation as an x25519
+    /// public key, along with an indication of sign. This is meant to
+    /// compensate for the poor key storage capabilities of key management
+    /// solutions, and NOT to promote double usage of keys under several
+    /// schemes, which would lead to BAD vulnerabilities.
+    ///
+    /// Arguments:
+    /// - `x25519_bytes`: bit representation of a public key in clamped
+    ///            Montgomery form, a.k.a. the x25519 public key format.
+    /// - `negative`: whether to interpret the given point as a negative point,
+    ///               as the Montgomery form erases the sign byte. By XEdDSA
+    ///               convention, if you expect to ever convert this back to an
+    ///               x25519 public key, you should pass `false` for this
+    ///               argument.
+    #[cfg(test)]
+    pub(crate) fn from_x25519_public_bytes(
+        x25519_bytes: &[u8],
+        negative: bool,
+    ) -> Result<Self, CryptoMaterialError> {
+        if x25519_bytes.len() != 32 {
+            return Err(CryptoMaterialError::DeserializationError);
+        }
+        let key_bits = {
+            let mut bits = [0u8; 32];
+            bits.copy_from_slice(x25519_bytes);
+            bits
+        };
+        let mtg_point = curve25519_dalek::montgomery::MontgomeryPoint(key_bits);
+        let sign = if negative { 1u8 } else { 0u8 };
+        let ed_point = mtg_point
+            .to_edwards(sign)
+            .ok_or(CryptoMaterialError::DeserializationError)?;
+        Ed25519PublicKey::try_from(&ed_point.compress().as_bytes()[..])
+    }
 }
 
 impl Ed25519Signature {
+    /// The length of the Ed25519Signature
+    pub const LENGTH: usize = ed25519_dalek::SIGNATURE_LENGTH;
+
     /// Serialize an Ed25519Signature.
     pub fn to_bytes(&self) -> [u8; ED25519_SIGNATURE_LENGTH] {
         self.0.to_bytes()
@@ -154,20 +218,33 @@ impl SigningKey for Ed25519PrivateKey {
     type VerifyingKeyMaterial = Ed25519PublicKey;
     type SignatureMaterial = Ed25519Signature;
 
+    fn sign<T: CryptoHash + Serialize>(
+        &self,
+        message: &T,
+    ) -> Result<Ed25519Signature, CryptoMaterialError> {
+        let mut bytes = <T::Hasher as CryptoHasher>::seed().to_vec();
+        lcs::serialize_into(&mut bytes, &message)
+            .map_err(|_| CryptoMaterialError::SerializationError)?;
+        Ok(Ed25519PrivateKey::sign_arbitrary_message(
+            &self,
+            bytes.as_ref(),
+        ))
+    }
+
     fn sign_message(&self, message: &HashValue) -> Ed25519Signature {
-        let secret_key: &ed25519_dalek::SecretKey = &self.0;
-        let public_key: Ed25519PublicKey = self.into();
-        let expanded_secret_key: ed25519_dalek::ExpandedSecretKey =
-            ed25519_dalek::ExpandedSecretKey::from(secret_key);
-        let sig = expanded_secret_key.sign(message.as_ref(), &public_key.0);
-        Ed25519Signature(sig)
+        Ed25519PrivateKey::sign_arbitrary_message(&self, message.as_ref())
+    }
+
+    #[cfg(any(test, feature = "fuzzing"))]
+    fn sign_arbitrary_message(&self, message: &[u8]) -> Ed25519Signature {
+        Ed25519PrivateKey::sign_arbitrary_message(self, message)
     }
 }
 
 impl Uniform for Ed25519PrivateKey {
-    fn generate_for_testing<R>(rng: &mut R) -> Self
+    fn generate<R>(rng: &mut R) -> Self
     where
-        R: ::rand::SeedableRng + ::rand::RngCore + ::rand::CryptoRng,
+        R: ::rand::RngCore + ::rand::CryptoRng,
     {
         Ed25519PrivateKey(ed25519_dalek::SecretKey::generate(rng))
     }
@@ -199,11 +276,11 @@ impl TryFrom<&[u8]> for Ed25519PrivateKey {
 
 impl Length for Ed25519PrivateKey {
     fn length(&self) -> usize {
-        ED25519_PRIVATE_KEY_LENGTH
+        Self::LENGTH
     }
 }
 
-impl ValidKey for Ed25519PrivateKey {
+impl ValidCryptoMaterial for Ed25519PrivateKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_bytes().to_vec()
     }
@@ -309,7 +386,7 @@ impl Length for Ed25519PublicKey {
     }
 }
 
-impl ValidKey for Ed25519PublicKey {
+impl ValidCryptoMaterial for Ed25519PublicKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes().to_vec()
     }
@@ -326,6 +403,17 @@ impl Signature for Ed25519Signature {
     /// Checks that `self` is valid for `message` using `public_key`.
     fn verify(&self, message: &HashValue, public_key: &Ed25519PublicKey) -> Result<()> {
         self.verify_arbitrary_msg(message.as_ref(), public_key)
+    }
+
+    fn verify_struct_msg<T: CryptoHash + Serialize>(
+        &self,
+        message: &T,
+        public_key: &Ed25519PublicKey,
+    ) -> Result<()> {
+        let mut bytes = <T::Hasher as CryptoHasher>::seed().to_vec();
+        lcs::serialize_into(&mut bytes, &message)
+            .map_err(|_| CryptoMaterialError::SerializationError)?;
+        Self::verify_arbitrary_msg(self, &bytes, public_key)
     }
 
     /// Checks that `self` is valid for an arbitrary &[u8] `message` using `public_key`.
@@ -345,6 +433,7 @@ impl Signature for Ed25519Signature {
         self.0.to_bytes().to_vec()
     }
 
+    #[cfg(feature = "batch")]
     /// Batch signature verification as described in the original EdDSA article
     /// by Bernstein et al. "High-speed high-security signatures". Current implementation works for
     /// signatures on the same message and it checks for malleability.
@@ -356,7 +445,7 @@ impl Signature for Ed25519Signature {
             Ed25519Signature::check_malleability(&sig.to_bytes())?
         }
         let batch_argument = keys_and_signatures
-            .into_iter()
+            .iter()
             .map(|(key, signature)| (key.0, signature.0));
         let (dalek_public_keys, dalek_signatures): (Vec<_>, Vec<_>) = batch_argument.unzip();
         let message_ref = &message.as_ref()[..];
@@ -376,7 +465,7 @@ impl Length for Ed25519Signature {
     }
 }
 
-impl ValidKey for Ed25519Signature {
+impl ValidCryptoMaterial for Ed25519Signature {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_bytes().to_vec()
     }
@@ -401,7 +490,7 @@ impl TryFrom<&[u8]> for Ed25519Signature {
 // Those are required by the implementation of hash above
 impl PartialEq for Ed25519Signature {
     fn eq(&self, other: &Ed25519Signature) -> bool {
-        self.to_bytes().as_ref() == other.to_bytes().as_ref()
+        self.to_bytes()[..] == other.to_bytes()[..]
     }
 }
 
@@ -432,79 +521,26 @@ fn check_s_lt_l(s: &[u8]) -> bool {
     false
 }
 
-//////////////////////////
-// Compatibility Traits //
-//////////////////////////
+#[cfg(any(test, feature = "fuzzing"))]
+use crate::test_utils::{self, KeyPair};
 
-/// Those transitory traits are meant to help with the progressive
-/// migration of the code base to the crypto module and will
-/// disappear after
-pub mod compat {
-    use crate::ed25519::*;
-    #[cfg(feature = "fuzzing")]
-    use proptest::strategy::LazyJust;
-    #[cfg(feature = "fuzzing")]
-    use proptest::{prelude::*, strategy::Strategy};
+/// Produces a uniformly random ed25519 keypair from a seed
+#[cfg(any(test, feature = "fuzzing"))]
+pub fn keypair_strategy() -> impl Strategy<Value = KeyPair<Ed25519PrivateKey, Ed25519PublicKey>> {
+    test_utils::uniform_keypair_strategy::<Ed25519PrivateKey, Ed25519PublicKey>()
+}
 
-    #[cfg(any(test, feature = "cloneable-private-keys"))]
-    impl Clone for Ed25519PrivateKey {
-        fn clone(&self) -> Self {
-            let serialized: &[u8] = &(self.to_bytes());
-            Ed25519PrivateKey::try_from(serialized).unwrap()
-        }
-    }
+#[cfg(any(test, feature = "fuzzing"))]
+use proptest::prelude::*;
 
-    use crate::Uniform;
-    use rand::{rngs::StdRng, SeedableRng};
+#[cfg(any(test, feature = "fuzzing"))]
+impl proptest::arbitrary::Arbitrary for Ed25519PublicKey {
+    type Parameters = ();
+    type Strategy = BoxedStrategy<Self>;
 
-    /// Generate an arbitrary key pair, with possible Rng input
-    ///
-    /// Warning: if you pass in None, this will not return distinct
-    /// results every time! Should you want to write non-deterministic
-    /// tests, look at libra_config::config_builder::util::get_test_config
-    pub fn generate_keypair<'a, T>(opt_rng: T) -> (Ed25519PrivateKey, Ed25519PublicKey)
-    where
-        T: Into<Option<&'a mut StdRng>> + Sized,
-    {
-        if let Some(rng_mut_ref) = opt_rng.into() {
-            <(Ed25519PrivateKey, Ed25519PublicKey)>::generate_for_testing(rng_mut_ref)
-        } else {
-            let mut rng = StdRng::from_seed(crate::test_utils::TEST_SEED);
-            <(Ed25519PrivateKey, Ed25519PublicKey)>::generate_for_testing(&mut rng)
-        }
-    }
-
-    /// Used to produce keypairs from a seed for testing purposes
-    #[cfg(feature = "fuzzing")]
-    pub fn keypair_strategy() -> impl Strategy<Value = (Ed25519PrivateKey, Ed25519PublicKey)> {
-        // The no_shrink is because keypairs should be fixed -- shrinking would cause a different
-        // keypair to be generated, which appears to not be very useful.
-        any::<[u8; 32]>()
-            .prop_map(|seed| {
-                let mut rng: StdRng = SeedableRng::from_seed(seed);
-                let (private_key, public_key) = generate_keypair(&mut rng);
-                (private_key, public_key)
-            })
-            .no_shrink()
-    }
-
-    /// Generates a well-known keypair `(Ed25519PrivateKey, Ed25519PublicKey)` for special use
-    /// in the genesis block. A genesis block is the first block of a blockchain and it is
-    /// hardcoded as it's a special case in that it does not reference a previous block.
-    pub fn generate_genesis_keypair() -> (Ed25519PrivateKey, Ed25519PublicKey) {
-        let mut buf = [0u8; ED25519_PRIVATE_KEY_LENGTH];
-        buf[ED25519_PRIVATE_KEY_LENGTH - 1] = 1;
-        let private_key = Ed25519PrivateKey::try_from(&buf[..]).unwrap();
-        let public_key = (&private_key).into();
-        (private_key, public_key)
-    }
-
-    #[cfg(feature = "fuzzing")]
-    impl Arbitrary for Ed25519PublicKey {
-        type Parameters = ();
-        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            LazyJust::new(|| generate_keypair(None).1).boxed()
-        }
-        type Strategy = BoxedStrategy<Self>;
+    fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+        crate::test_utils::uniform_keypair_strategy::<Ed25519PrivateKey, Ed25519PublicKey>()
+            .prop_map(|v| v.public_key)
+            .boxed()
     }
 }

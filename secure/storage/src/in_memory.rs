@@ -1,7 +1,7 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{CryptoKVStorage, Error, GetResponse, KVStorage, Policy, Storage, Value};
+use crate::{CryptoKVStorage, Error, GetResponse, KVStorage, Value};
 use libra_secure_time::{RealTimeService, TimeService};
 use std::collections::HashMap;
 
@@ -23,11 +23,6 @@ impl InMemoryStorageInternal<RealTimeService> {
     pub fn new() -> Self {
         Self::new_with_time_service(RealTimeService::new())
     }
-
-    /// Public convenience function to return a new InMemoryStorage based Storage.
-    pub fn new_storage() -> Box<dyn Storage> {
-        Box::new(Self::new())
-    }
 }
 
 impl<T: TimeService> InMemoryStorageInternal<T> {
@@ -40,19 +35,7 @@ impl<T: TimeService> InMemoryStorageInternal<T> {
 }
 
 impl<T: Send + Sync + TimeService> KVStorage for InMemoryStorageInternal<T> {
-    fn available(&self) -> bool {
-        true
-    }
-
-    fn create(&mut self, key: &str, value: Value, _policy: &Policy) -> Result<(), Error> {
-        if self.data.contains_key(key) {
-            return Err(Error::KeyAlreadyExists(key.to_string()));
-        }
-
-        self.data.insert(
-            key.to_string(),
-            GetResponse::new(value, self.time_service.now()),
-        );
+    fn available(&self) -> Result<(), Error> {
         Ok(())
     }
 
@@ -69,8 +52,11 @@ impl<T: Send + Sync + TimeService> KVStorage for InMemoryStorageInternal<T> {
                 let key = lcs::from_bytes(&bytes)?;
                 Value::Ed25519PrivateKey(key)
             }
+            Value::Ed25519PublicKey(value) => Value::Ed25519PublicKey(value.clone()),
             Value::HashValue(value) => Value::HashValue(*value),
+            Value::String(value) => Value::String(value.clone()),
             Value::U64(value) => Value::U64(*value),
+            Value::Transaction(value) => Value::Transaction(value.clone()),
         };
 
         let last_update = response.last_update;
@@ -78,9 +64,6 @@ impl<T: Send + Sync + TimeService> KVStorage for InMemoryStorageInternal<T> {
     }
 
     fn set(&mut self, key: &str, value: Value) -> Result<(), Error> {
-        if !self.data.contains_key(key) {
-            return Err(Error::KeyNotSet(key.to_string()));
-        }
         self.data.insert(
             key.to_string(),
             GetResponse::new(value, self.time_service.now()),
@@ -88,6 +71,7 @@ impl<T: Send + Sync + TimeService> KVStorage for InMemoryStorageInternal<T> {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "testing"))]
     fn reset_and_clear(&mut self) -> Result<(), Error> {
         self.data.clear();
         Ok(())

@@ -2,17 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    expansion::ast::{Fields, SpecId},
+    expansion::ast::{Fields, SpecId, Value},
     naming::ast::{FunctionSignature, StructDefinition, Type, TypeName_, Type_},
     parser::ast::{
-        BinOp, Field, FunctionName, FunctionVisibility, ModuleIdent, StructName, UnaryOp, Value,
-        Var,
+        BinOp, Field, FunctionName, FunctionVisibility, ModuleIdent, StructName, UnaryOp, Var,
     },
-    shared::{ast_debug::*, unique_map::UniqueMap, *},
+    shared::{ast_debug::*, unique_map::UniqueMap},
 };
 use move_ir_types::location::*;
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     fmt,
 };
 
@@ -23,7 +22,18 @@ use std::{
 #[derive(Debug)]
 pub struct Program {
     pub modules: UniqueMap<ModuleIdent, ModuleDefinition>,
-    pub main: Option<(Address, FunctionName, Function)>,
+    pub scripts: BTreeMap<String, Script>,
+}
+
+//**************************************************************************************************
+// Scripts
+//**************************************************************************************************
+
+#[derive(Debug)]
+pub struct Script {
+    pub loc: Loc,
+    pub function_name: FunctionName,
+    pub function: Function,
 }
 
 //**************************************************************************************************
@@ -54,7 +64,7 @@ pub type FunctionBody = Spanned<FunctionBody_>;
 pub struct Function {
     pub visibility: FunctionVisibility,
     pub signature: FunctionSignature,
-    pub acquires: BTreeSet<StructName>,
+    pub acquires: BTreeMap<StructName, Loc>,
     pub body: FunctionBody,
 }
 
@@ -87,30 +97,25 @@ pub struct ModuleCall {
     pub type_arguments: Vec<Type>,
     pub arguments: Box<Exp>,
     pub parameter_types: Vec<Type>,
-    pub acquires: BTreeSet<StructName>,
+    pub acquires: BTreeMap<StructName, Loc>,
 }
 
 #[derive(Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum BuiltinFunction_ {
     MoveToSender(Type),
+    MoveTo(Type),
     MoveFrom(Type),
     BorrowGlobal(bool, Type),
     Exists(Type),
     Freeze(Type),
-    /* GetHeight,
-     * GetMaxGasPrice,
-     * GetMaxGasUnits,
-     * GetPublicKey,
-     * GetSender,
-     * GetSequenceNumber,
-     * EmitEvent, */
+    Assert,
 }
 pub type BuiltinFunction = Spanned<BuiltinFunction_>;
 
 #[derive(Debug, PartialEq)]
 pub enum UnannotatedExp_ {
-    Unit,
+    Unit { trailing: bool },
     Value(Value),
     InferredNum(u128),
     Move { from_user: bool, var: Var },
@@ -198,11 +203,13 @@ impl fmt::Display for BuiltinFunction_ {
         use BuiltinFunction_::*;
         let s = match self {
             MoveToSender(_) => NB::MOVE_TO_SENDER,
+            MoveTo(_) => NB::MOVE_TO,
             MoveFrom(_) => NB::MOVE_FROM,
             BorrowGlobal(false, _) => NB::BORROW_GLOBAL,
             BorrowGlobal(true, _) => NB::BORROW_GLOBAL_MUT,
             Exists(_) => NB::EXISTS,
             Freeze(_) => NB::FREEZE,
+            Assert => NB::ASSERT,
         };
         write!(f, "{}", s)
     }
@@ -214,17 +221,29 @@ impl fmt::Display for BuiltinFunction_ {
 
 impl AstDebug for Program {
     fn ast_debug(&self, w: &mut AstWriter) {
-        let Program { modules, main } = self;
+        let Program { modules, scripts } = self;
         for (m, mdef) in modules {
             w.write(&format!("module {}", m));
             w.block(|w| mdef.ast_debug(w));
             w.new_line();
         }
 
-        if let Some((addr, n, fdef)) = main {
-            w.writeln(&format!("address {}:", addr));
-            (n.clone(), fdef).ast_debug(w);
+        for (n, s) in scripts {
+            w.write(&format!("script {}", n));
+            w.block(|w| s.ast_debug(w));
+            w.new_line()
         }
+    }
+}
+
+impl AstDebug for Script {
+    fn ast_debug(&self, w: &mut AstWriter) {
+        let Script {
+            loc: _loc,
+            function_name,
+            function,
+        } = self;
+        (function_name.clone(), function).ast_debug(w);
     }
 }
 
@@ -272,7 +291,7 @@ impl AstDebug for (FunctionName, &Function) {
         signature.ast_debug(w);
         if !acquires.is_empty() {
             w.write(" acquires ");
-            w.comma(acquires, |w, s| w.write(&format!("{}", s)));
+            w.comma(acquires.keys(), |w, s| w.write(&format!("{}", s)));
             w.write(" ");
         }
         match &body.value {
@@ -314,7 +333,10 @@ impl AstDebug for UnannotatedExp_ {
     fn ast_debug(&self, w: &mut AstWriter) {
         use UnannotatedExp_ as E;
         match self {
-            E::Unit => w.write("()"),
+            E::Unit { trailing } if !trailing => w.write("()"),
+            E::Unit {
+                trailing: _trailing,
+            } => w.write("/*()*/"),
             E::Value(v) => v.ast_debug(w),
             E::InferredNum(u) => w.write(&format!("{}", u)),
             E::Move {
@@ -503,7 +525,7 @@ impl AstDebug for ModuleCall {
             w.write("[");
             if !acquires.is_empty() {
                 w.write("acquires: [");
-                w.comma(acquires, |w, s| w.write(&format!("{}", s)));
+                w.comma(acquires.keys(), |w, s| w.write(&format!("{}", s)));
                 w.write("], ");
             }
             if !parameter_types.is_empty() {
@@ -528,18 +550,22 @@ impl AstDebug for BuiltinFunction_ {
     fn ast_debug(&self, w: &mut AstWriter) {
         use crate::naming::ast::BuiltinFunction_ as NF;
         use BuiltinFunction_ as F;
-        let (n, bt) = match self {
-            F::MoveToSender(bt) => (NF::MOVE_TO_SENDER, bt),
-            F::MoveFrom(bt) => (NF::MOVE_FROM, bt),
-            F::BorrowGlobal(true, bt) => (NF::BORROW_GLOBAL_MUT, bt),
-            F::BorrowGlobal(false, bt) => (NF::BORROW_GLOBAL, bt),
-            F::Exists(bt) => (NF::EXISTS, bt),
-            F::Freeze(bt) => (NF::FREEZE, bt),
+        let (n, bt_opt) = match self {
+            F::MoveToSender(bt) => (NF::MOVE_TO_SENDER, Some(bt)),
+            F::MoveTo(bt) => (NF::MOVE_TO, Some(bt)),
+            F::MoveFrom(bt) => (NF::MOVE_FROM, Some(bt)),
+            F::BorrowGlobal(true, bt) => (NF::BORROW_GLOBAL_MUT, Some(bt)),
+            F::BorrowGlobal(false, bt) => (NF::BORROW_GLOBAL, Some(bt)),
+            F::Exists(bt) => (NF::EXISTS, Some(bt)),
+            F::Freeze(bt) => (NF::FREEZE, Some(bt)),
+            F::Assert => (NF::ASSERT, None),
         };
         w.write(n);
-        w.write("<");
-        bt.ast_debug(w);
-        w.write(">");
+        if let Some(bt) = bt_opt {
+            w.write("<");
+            bt.ast_debug(w);
+            w.write(">");
+        }
     }
 }
 

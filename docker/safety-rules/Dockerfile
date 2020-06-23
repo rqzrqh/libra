@@ -16,7 +16,8 @@ FROM toolchain AS builder
 
 COPY . /libra
 
-RUN cargo build --release -p libra-node -p cli -p config-builder -p safety-rules && cd target/release && rm -r build deps incremental
+ENV RUSTFLAGS "-Ctarget-cpu=skylake -Ctarget-feature=+aes,+sse2,+sse4.1,+ssse3"
+RUN cargo build --release -p libra-node -p cli -p config-builder -p libra-key-manager -p safety-rules -p db-bootstrapper -p backup-cli && cd target/release && rm -r build deps incremental
 RUN strip /libra/target/release/config-builder
 
 ### Production Image ###
@@ -25,12 +26,16 @@ FROM debian:buster AS prod
 RUN addgroup --system --gid 6180 libra && adduser --system --ingroup libra --no-create-home --uid 6180 libra
 
 RUN mkdir -p /opt/libra/bin /opt/libra/etc /opt/libra/data/common
-COPY docker/safety-rules/docker-run-dynamic.sh /
-COPY --from=builder /libra/target/release/safety-rules /opt/libra/bin
+
+COPY docker/safety-rules/key-manager.sh /
+COPY docker/safety-rules/safety-rules.sh /
+
 COPY --from=builder /libra/target/release/config-builder /opt/libra/bin
+COPY --from=builder /libra/target/release/libra-key-manager /opt/libra/bin
+COPY --from=builder /libra/target/release/safety-rules /opt/libra/bin
 
 ENV RUST_BACKTRACE 1
-CMD /docker-run-dynamic.sh
+CMD /safety-rules.sh
 
 ARG BUILD_DATE
 ARG GIT_REV

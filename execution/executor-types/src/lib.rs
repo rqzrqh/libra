@@ -3,6 +3,10 @@
 
 #![forbid(unsafe_code)]
 
+mod error;
+pub use error::Error;
+
+use anyhow::Result;
 use libra_crypto::{
     hash::{EventAccumulatorHasher, TransactionAccumulatorHasher, SPARSE_MERKLE_PLACEHOLDER_HASH},
     HashValue,
@@ -11,13 +15,64 @@ use libra_types::{
     account_address::AccountAddress,
     account_state_blob::AccountStateBlob,
     contract_event::ContractEvent,
+    epoch_state::EpochState,
+    ledger_info::LedgerInfoWithSignatures,
     proof::{accumulator::InMemoryAccumulator, SparseMerkleProof},
-    transaction::{TransactionStatus, Version},
-    validator_set::ValidatorSet,
+    transaction::{Transaction, TransactionListWithProof, TransactionStatus, Version},
 };
 use scratchpad::{ProofRead, SparseMerkleTree};
+use serde::{Deserialize, Serialize};
 use std::{cmp::max, collections::HashMap, sync::Arc};
-use storage_proto::TreeState;
+use storage_interface::TreeState;
+
+pub trait ChunkExecutor: Send {
+    /// Verifies the transactions based on the provided proofs and ledger info. If the transactions
+    /// are valid, executes them and commits immediately if execution results match the proofs.
+    /// Returns a vector of reconfiguration events in the chunk
+    fn execute_and_commit_chunk(
+        &mut self,
+        txn_list_with_proof: TransactionListWithProof,
+        // Target LI that has been verified independently: the proofs are relative to this version.
+        verified_target_li: LedgerInfoWithSignatures,
+        // An optional end of epoch LedgerInfo. We do not allow chunks that end epoch without
+        // carrying any epoch change LI.
+        epoch_change_li: Option<LedgerInfoWithSignatures>,
+    ) -> Result<Vec<ContractEvent>>;
+}
+
+pub trait BlockExecutor: Send {
+    /// Get the latest committed block id
+    fn committed_block_id(&mut self) -> Result<HashValue, Error>;
+
+    /// Reset the internal state including cache with newly fetched latest committed block from storage.
+    fn reset(&mut self) -> Result<(), Error>;
+
+    /// Executes a block.
+    fn execute_block(
+        &mut self,
+        block: (HashValue, Vec<Transaction>),
+        parent_block_id: HashValue,
+    ) -> Result<StateComputeResult, Error>;
+
+    /// Saves eligible blocks to persistent storage.
+    /// If we have multiple blocks and not all of them have signatures, we may send them to storage
+    /// in a few batches. For example, if we have
+    /// ```text
+    /// A <- B <- C <- D <- E
+    /// ```
+    /// and only `C` and `E` have signatures, we will send `A`, `B` and `C` in the first batch,
+    /// then `D` and `E` later in the another batch.
+    /// Commits a block and all its ancestors in a batch manner.
+    ///
+    /// Returns `Ok(Result<Vec<Transaction>, Vec<ContractEvents>)` if successful,
+    /// where Vec<Transaction> is a vector of transactions that were kept from the submitted blocks, and
+    /// Vec<ContractEvents> is a vector of reconfiguration events in the submitted blocks
+    fn commit_blocks(
+        &mut self,
+        block_ids: Vec<HashValue>,
+        ledger_info_with_sigs: LedgerInfoWithSignatures,
+    ) -> Result<(Vec<Transaction>, Vec<ContractEvent>), Error>;
+}
 
 /// A structure that summarizes the result of the execution needed for consensus to agree on.
 /// The execution is responsible for generating the ID of the new state, which is returned in the
@@ -27,7 +82,7 @@ use storage_proto::TreeState;
 /// of success / failure of the transactions.
 /// Note that the specific details of compute_status are opaque to StateMachineReplication,
 /// which is going to simply pass the results between StateComputer and TxnManager.
-#[derive(Debug, Default, PartialEq, Eq, Clone)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct StateComputeResult {
     /// transaction accumulator root hash is identified as `state_id` in Consensus.
     root_hash: HashValue,
@@ -37,9 +92,8 @@ pub struct StateComputeResult {
     /// The number of leaves of the transaction accumulator after executing a proposed block.
     /// This state must be persisted to ensure that on restart that the version is calculated correctly.
     num_leaves: u64,
-    /// If set, this is the validator set that should be changed to if this block is committed.
-    /// TODO [Reconfiguration] the validators are currently ignored, no reconfiguration yet.
-    validators: Option<ValidatorSet>,
+    /// If set, this is the new epoch info that should be changed to if this block is committed.
+    epoch_state: Option<EpochState>,
     /// The compute status (success/failure) of the given payload. The specific details are opaque
     /// for StateMachineReplication, which is merely passing it between StateComputer and
     /// TxnManager.
@@ -53,7 +107,7 @@ impl StateComputeResult {
         root_hash: HashValue,
         frozen_subtree_roots: Vec<HashValue>,
         num_leaves: u64,
-        validators: Option<ValidatorSet>,
+        epoch_state: Option<EpochState>,
         compute_status: Vec<TransactionStatus>,
         transaction_info_hashes: Vec<HashValue>,
     ) -> Self {
@@ -61,7 +115,7 @@ impl StateComputeResult {
             root_hash,
             frozen_subtree_roots,
             num_leaves,
-            validators,
+            epoch_state,
             compute_status,
             transaction_info_hashes,
         }
@@ -81,8 +135,8 @@ impl StateComputeResult {
         &self.compute_status
     }
 
-    pub fn validators(&self) -> &Option<ValidatorSet> {
-        &self.validators
+    pub fn epoch_state(&self) -> &Option<EpochState> {
+        &self.epoch_state
     }
 
     pub fn transaction_info_hashes(&self) -> &Vec<HashValue> {
@@ -98,7 +152,7 @@ impl StateComputeResult {
     }
 
     pub fn has_reconfiguration(&self) -> bool {
-        self.validators.is_some()
+        self.epoch_state.is_some()
     }
 }
 
@@ -129,9 +183,6 @@ pub struct TransactionData {
     /// The amount of gas used.
     gas_used: u64,
 
-    /// The number of newly created accounts.
-    num_account_created: usize,
-
     /// The transaction info hash if the VM status output was keep, None otherwise
     txn_info_hash: Option<HashValue>,
 }
@@ -144,7 +195,6 @@ impl TransactionData {
         state_tree: Arc<SparseMerkleTree>,
         event_tree: Arc<InMemoryAccumulator<EventAccumulatorHasher>>,
         gas_used: u64,
-        num_account_created: usize,
         txn_info_hash: Option<HashValue>,
     ) -> Self {
         TransactionData {
@@ -154,7 +204,6 @@ impl TransactionData {
             state_tree,
             event_tree,
             gas_used,
-            num_account_created,
             txn_info_hash,
         }
     }
@@ -183,10 +232,6 @@ impl TransactionData {
         self.gas_used
     }
 
-    pub fn num_account_created(&self) -> usize {
-        self.num_account_created
-    }
-
     pub fn prune_state_tree(&self) {
         self.state_tree.prune()
     }
@@ -207,21 +252,20 @@ pub struct ProcessedVMOutput {
     /// transactions in this set.
     executed_trees: ExecutedTrees,
 
-    /// If set, this is the validator set that should be changed to if this block is committed.
-    /// TODO [Reconfiguration] the validators are currently ignored, no reconfiguration yet.
-    validators: Option<ValidatorSet>,
+    /// If set, this is the new epoch info that should be changed to if this block is committed.
+    epoch_state: Option<EpochState>,
 }
 
 impl ProcessedVMOutput {
     pub fn new(
         transaction_data: Vec<TransactionData>,
         executed_trees: ExecutedTrees,
-        validators: Option<ValidatorSet>,
+        epoch_state: Option<EpochState>,
     ) -> Self {
         ProcessedVMOutput {
             transaction_data,
             executed_trees,
-            validators,
+            epoch_state,
         }
     }
 
@@ -241,8 +285,8 @@ impl ProcessedVMOutput {
         self.executed_trees().version()
     }
 
-    pub fn validators(&self) -> &Option<ValidatorSet> {
-        &self.validators
+    pub fn epoch_state(&self) -> &Option<EpochState> {
+        &self.epoch_state
     }
 
     pub fn state_compute_result(&self) -> StateComputeResult {
@@ -254,7 +298,7 @@ impl ProcessedVMOutput {
             // next epoch that is part of a block execution.
             root_hash: self.accu_root(),
             num_leaves: txn_accu.num_leaves(),
-            validators: self.validators.clone(),
+            epoch_state: self.epoch_state.clone(),
             frozen_subtree_roots: txn_accu.frozen_subtree_roots().clone(),
             compute_status: self
                 .transaction_data()
@@ -291,7 +335,7 @@ impl From<TreeState> for ExecutedTrees {
         ExecutedTrees::new(
             tree_state.account_state_root_hash,
             tree_state.ledger_frozen_subtree_hashes,
-            tree_state.version + 1,
+            tree_state.num_transactions,
         )
     }
 }

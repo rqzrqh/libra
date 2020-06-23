@@ -1,5 +1,5 @@
 
-address 0x1:
+address 0x2 {
 
 module X {
     public fun foo(): u64 { 0 }
@@ -13,7 +13,7 @@ module X {
 
 
 module M {
-    use 0x1::X;
+    use 0x2::X;
 
     fun foo(): u64 { 0 }
     fun bar(x: u64): (address, u64) {
@@ -42,5 +42,7 @@ module M {
         baz<u64, u64>(1);
         baz(1, 2, 3);
     }
+
+}
 
 }

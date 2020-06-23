@@ -53,6 +53,7 @@ impl PriorityIndex {
             expiration_time: txn.expiration_time,
             address: txn.get_sender(),
             sequence_number: txn.get_sequence_number(),
+            is_governance_txn: txn.is_governance_txn,
         }
     }
 
@@ -72,6 +73,7 @@ pub struct OrderedQueueKey {
     pub expiration_time: Duration,
     pub address: AccountAddress,
     pub sequence_number: u64,
+    pub is_governance_txn: bool,
 }
 
 impl PartialOrd for OrderedQueueKey {
@@ -82,6 +84,10 @@ impl PartialOrd for OrderedQueueKey {
 
 impl Ord for OrderedQueueKey {
     fn cmp(&self, other: &OrderedQueueKey) -> Ordering {
+        match self.is_governance_txn.cmp(&other.is_governance_txn) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
         match self.gas_ranking_score.cmp(&other.gas_ranking_score) {
             Ordering::Equal => {}
             ordering => return ordering,
@@ -133,7 +139,7 @@ impl TTLIndex {
     pub(crate) fn gc(&mut self, now: Duration) -> Vec<TTLOrderingKey> {
         let ttl_key = TTLOrderingKey {
             expiration_time: now,
-            address: AccountAddress::default(),
+            address: AccountAddress::ZERO,
             sequence_number: 0,
         };
 
@@ -195,37 +201,26 @@ impl TimelineIndex {
         }
     }
 
+    /// get transaction at `timeline_id`
+    pub(crate) fn get_timeline_entry(&mut self, timeline_id: u64) -> Option<(AccountAddress, u64)> {
+        self.timeline.get(&timeline_id).cloned()
+    }
+
     /// read all transactions from timeline since <timeline_id>
     pub(crate) fn read_timeline(
         &mut self,
         timeline_id: u64,
         count: usize,
-    ) -> Vec<(AccountAddress, u64)> {
+    ) -> Vec<(u64, (AccountAddress, u64))> {
         let mut batch = vec![];
-        for (_, &(address, sequence_number)) in self
+        for (timeline_id, &(address, sequence_number)) in self
             .timeline
             .range((Bound::Excluded(timeline_id), Bound::Unbounded))
         {
-            batch.push((address, sequence_number));
+            batch.push((*timeline_id, (address, sequence_number)));
             if batch.len() == count {
                 break;
             }
-        }
-        batch
-    }
-
-    /// read all transactions from timeline for timeline id in range (`start_timeline_id`, `end_timeline_id`]
-    pub(crate) fn range(
-        &mut self,
-        start_timeline_id: u64,
-        end_timeline_id: u64,
-    ) -> Vec<(AccountAddress, u64)> {
-        let mut batch = vec![];
-        for (_, &(address, sequence_number)) in self.timeline.range((
-            Bound::Excluded(start_timeline_id),
-            Bound::Included(end_timeline_id),
-        )) {
-            batch.push((address, sequence_number));
         }
         batch
     }

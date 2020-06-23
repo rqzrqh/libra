@@ -86,7 +86,8 @@ impl NetworkClient {
             let mut stream = TcpStream::connect(self.server);
 
             let sleeptime = time::Duration::from_millis(100);
-            while stream.is_err() {
+            while let Err(e) = stream {
+                debug!("Failed to connect to upstream {} {:?}", self.server, e);
                 thread::sleep(sleeptime);
                 stream = TcpStream::connect(self.server);
             }
@@ -194,7 +195,7 @@ impl NetworkStream {
             if read == 0 {
                 return Err(Error::RemoteStreamClosed);
             }
-            self.buffer.extend(self.temp_buffer[0..read].to_vec());
+            self.buffer.extend(self.temp_buffer[..read].to_vec());
             let result = self.read_buffer();
             if !result.is_empty() {
                 trace!("Found a message in the stream");
@@ -236,7 +237,7 @@ impl NetworkStream {
         }
 
         let mut u32_bytes = [0; 4];
-        u32_bytes.copy_from_slice(&self.buffer[0..4]);
+        u32_bytes.copy_from_slice(&self.buffer[..4]);
         let data_size = u32::from_le_bytes(u32_bytes) as usize;
 
         let remaining_data = &self.buffer[4..];

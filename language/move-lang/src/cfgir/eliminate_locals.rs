@@ -5,16 +5,20 @@ use super::cfg::BlockCFG;
 use crate::parser::ast::Var;
 use std::collections::BTreeSet;
 
-pub fn optimize(cfg: &mut BlockCFG) {
-    super::remove_no_ops::optimize(cfg);
+/// returns true if anything changed
+pub fn optimize(cfg: &mut BlockCFG) -> bool {
+    let mut changed = super::remove_no_ops::optimize(cfg);
     loop {
         let ssa_temps = {
             let s = count(cfg);
             if s.is_empty() {
-                return;
+                break changed;
             }
             s
         };
+
+        // `eliminate` always removes if `ssa_temps` is not empty
+        changed = true;
         eliminate(cfg, ssa_temps);
         super::remove_no_ops::optimize(cfg);
     }
@@ -133,7 +137,7 @@ mod count {
     fn exp(context: &mut Context, parent_e: &Exp) {
         use UnannotatedExp_ as E;
         match &parent_e.exp.value {
-            E::Unit | E::Value(_) | E::UnresolvedError => (),
+            E::Unit { .. } | E::Value(_) | E::UnresolvedError => (),
             E::Spec(_, used_locals) => {
                 used_locals.keys().for_each(|var| context.used(var, false));
             }
@@ -205,7 +209,7 @@ mod count {
             | E::Move { .. }
             | E::Borrow(_, _, _) => false,
 
-            E::Unit | E::Value(_) => true,
+            E::Unit { .. } | E::Value(_) => true,
 
             E::Cast(e, _) => can_subst_exp_single(e),
             E::UnaryExp(op, e) => can_subst_exp_unary(op) && can_subst_exp_single(e),
@@ -242,12 +246,7 @@ mod count {
             name.value(),
         );
         let call_is_pure = match a_m_f {
-            (&Address::LIBRA_CORE, TXN::MOD, TXN::ASSERT) => panic!("ICE should have been inlined"),
-            (&Address::LIBRA_CORE, TXN::MOD, TXN::MAX_GAS)
-            | (&Address::LIBRA_CORE, TXN::MOD, TXN::SENDER)
-            | (&Address::LIBRA_CORE, TXN::MOD, TXN::SEQUENCE_NUM)
-            | (&Address::LIBRA_CORE, TXN::MOD, TXN::PUBLIC_KEY)
-            | (&Address::LIBRA_CORE, TXN::MOD, TXN::GAS_PRICE) => true,
+            (&Address::LIBRA_CORE, TXN::MOD, TXN::SENDER) => true,
             _ => false,
         };
         call_is_pure && can_subst_exp_single(arguments)
@@ -370,7 +369,11 @@ mod eliminate {
                 }
             }
 
-            E::Unit | E::Value(_) | E::Spec(_, _) | E::UnresolvedError | E::BorrowLocal(_, _) => (),
+            E::Unit { .. }
+            | E::Value(_)
+            | E::Spec(_, _)
+            | E::UnresolvedError
+            | E::BorrowLocal(_, _) => (),
 
             E::ModuleCall(mcall) => exp(context, &mut mcall.arguments),
             E::Builtin(_, e)
@@ -459,6 +462,9 @@ mod eliminate {
     }
 
     fn unit(loc: Loc) -> Exp {
-        H::exp(sp(loc, Type_::Unit), sp(loc, UnannotatedExp_::Unit))
+        H::exp(
+            sp(loc, Type_::Unit),
+            sp(loc, UnannotatedExp_::Unit { trailing: false }),
+        )
     }
 }

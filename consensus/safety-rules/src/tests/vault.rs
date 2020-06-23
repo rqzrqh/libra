@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{tests::suite, PersistentSafetyStorage, SafetyRulesManager, TSafetyRules};
-use consensus_types::common::{Payload, Round};
-use libra_secure_storage::VaultStorage;
+use libra_secure_storage::{KVStorage, Storage, VaultStorage};
 use libra_types::validator_signer::ValidatorSigner;
 
 /// A test for verifying VaultStorage properly supports the SafetyRule backend.  This test
@@ -12,18 +11,24 @@ use libra_types::validator_signer::ValidatorSigner;
 #[ignore]
 #[test]
 fn test() {
-    suite::run_test_suite(safety_rules::<Round>, safety_rules::<Vec<u8>>);
+    suite::run_test_suite(safety_rules);
 }
 
-fn safety_rules<T: Payload>() -> (Box<dyn TSafetyRules<T>>, ValidatorSigner) {
+fn safety_rules() -> (Box<dyn TSafetyRules>, ValidatorSigner) {
     let signer = ValidatorSigner::from_int(0);
     let host = "http://localhost:8200".to_string();
     let token = "root_token".to_string();
-    let mut storage = VaultStorage::new_storage(host, token, None);
+    let mut storage = Storage::from(VaultStorage::new(host, token, None, None));
     storage.reset_and_clear().unwrap();
 
-    let storage = PersistentSafetyStorage::initialize(storage, signer.private_key().clone());
-    let safety_rules_manager = SafetyRulesManager::new_local(signer.author(), storage);
+    let waypoint = crate::test_utils::validator_signers_to_waypoint(&[&signer]);
+    let storage = PersistentSafetyStorage::initialize(
+        storage,
+        signer.author(),
+        signer.private_key().clone(),
+        waypoint,
+    );
+    let safety_rules_manager = SafetyRulesManager::new_local(storage);
     let safety_rules = safety_rules_manager.client();
     (safety_rules, signer)
 }

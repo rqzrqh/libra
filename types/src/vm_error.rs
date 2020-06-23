@@ -3,7 +3,7 @@
 
 #![allow(clippy::unit_arg)]
 
-use anyhow::{Error, Result};
+use anyhow::Result;
 #[cfg(any(test, feature = "fuzzing"))]
 use proptest::prelude::*;
 #[cfg(any(test, feature = "fuzzing"))]
@@ -126,15 +126,6 @@ impl VMStatus {
         self
     }
 
-    /// Mutates the VMStatus sub status field to be the new `sub_status` passed in.
-    pub fn set_sub_status(&mut self, sub_status: u64) {
-        self.sub_status = Some(sub_status);
-    }
-
-    /// Mutates the VMStatus message field to be the new `message` passed in.
-    pub fn set_message(&mut self, message: String) {
-        self.message = Some(message);
-    }
     /// Append the message `message` to the message field of the VM status, and insert a seperator
     /// if the original message is non-empty.
     pub fn append_message_with_separator(mut self, separator: char, message: String) -> Self {
@@ -198,55 +189,6 @@ impl VMStatus {
     }
 }
 
-//***********************************
-// Decoding/Encoding to Protobuffers
-//***********************************
-impl TryFrom<crate::proto::types::VmStatus> for VMStatus {
-    type Error = Error;
-
-    fn try_from(proto: crate::proto::types::VmStatus) -> Result<Self> {
-        let mut status = VMStatus::new(
-            StatusCode::try_from(proto.major_status).unwrap_or(StatusCode::UNKNOWN_STATUS),
-        );
-
-        if proto.has_sub_status {
-            status.set_sub_status(proto.sub_status);
-        }
-
-        if proto.has_message {
-            status.set_message(proto.message);
-        }
-
-        Ok(status)
-    }
-}
-
-impl From<VMStatus> for crate::proto::types::VmStatus {
-    fn from(status: VMStatus) -> Self {
-        let mut proto_status = Self::default();
-
-        proto_status.has_sub_status = false;
-        proto_status.has_message = false;
-
-        // Set major status
-        proto_status.major_status = status.major_status.into();
-
-        // Set minor status if there is one
-        if let Some(sub_status) = status.sub_status {
-            proto_status.has_sub_status = true;
-            proto_status.sub_status = sub_status;
-        }
-
-        // Set info string
-        if let Some(string) = status.message {
-            proto_status.has_message = true;
-            proto_status.message = string;
-        }
-
-        proto_status
-    }
-}
-
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 #[repr(u64)]
@@ -295,6 +237,19 @@ pub enum StatusCode {
     // Gas unit price submitted with the transaction is above the maximum
     // gas price set in the VM.
     GAS_UNIT_PRICE_ABOVE_MAX_BOUND = 16,
+    // Gas specifier submitted is either malformed (not a valid identifier),
+    // or does not refer to an accepted gas specifier
+    INVALID_GAS_SPECIFIER = 17,
+    // The sending account is frozen
+    SENDING_ACCOUNT_FROZEN = 18,
+    // Unable to deserialize the account blob
+    UNABLE_TO_DESERIALIZE_ACCOUNT = 19,
+    // The currency info was unable to be found
+    CURRENCY_INFO_DOES_NOT_EXIST = 20,
+    // The account sender doesn't have permissions to publish modules
+    INVALID_MODULE_PUBLISHER = 21,
+    // The sending account has no role
+    NO_ACCOUNT_ROLE = 22,
 
     // When a code module/script is published it is verified. These are the
     // possible errors that can arise from the verification process.
@@ -328,7 +283,7 @@ pub enum StatusCode {
     ABORT_TYPE_MISMATCH_ERROR = 1026,
     STLOC_TYPE_MISMATCH_ERROR = 1027,
     STLOC_UNSAFE_TO_DESTROY_ERROR = 1028,
-    RET_UNSAFE_TO_DESTROY_ERROR = 1029,
+    UNSAFE_RET_LOCAL_OR_RESOURCE_STILL_BORROWED = 1029,
     RET_TYPE_MISMATCH_ERROR = 1030,
     RET_BORROWED_MUTABLE_REFERENCE_ERROR = 1031,
     FREEZEREF_TYPE_MISMATCH_ERROR = 1032,
@@ -378,13 +333,24 @@ pub enum StatusCode {
     INVALID_ACQUIRES_RESOURCE_ANNOTATION_ERROR = 1073,
     GLOBAL_REFERENCE_ERROR = 1074,
     CONTRAINT_KIND_MISMATCH = 1075,
-    NUMBER_OF_TYPE_ACTUALS_MISMATCH = 1076,
+    NUMBER_OF_TYPE_ARGUMENTS_MISMATCH = 1076,
     LOOP_IN_INSTANTIATION_GRAPH = 1077,
     UNUSED_LOCALS_SIGNATURE = 1078,
     UNUSED_TYPE_SIGNATURE = 1079,
     /// Reported when a struct has zero fields
     ZERO_SIZED_STRUCT = 1080,
     LINKER_ERROR = 1081,
+    INVALID_CONSTANT_TYPE = 1082,
+    MALFORMED_CONSTANT_DATA = 1083,
+    EMPTY_CODE_UNIT = 1084,
+    INVALID_LOOP_SPLIT = 1085,
+    INVALID_LOOP_BREAK = 1086,
+    INVALID_LOOP_CONTINUE = 1087,
+    UNSAFE_RET_UNUSED_RESOURCES = 1088,
+    TOO_MANY_LOCALS = 1089,
+    MOVETO_TYPE_MISMATCH_ERROR = 1090,
+    MOVETO_NO_RESOURCE_ERROR = 1091,
+    GENERIC_MEMBER_OPCODE_MISMATCH = 1092,
 
     // These are errors that the VM might raise if a violation of internal
     // invariants takes place.
@@ -403,6 +369,7 @@ pub enum StatusCode {
     UNREACHABLE = 2011,
     VM_STARTUP_FAILURE = 2012,
     NATIVE_FUNCTION_INTERNAL_INCONSISTENCY = 2013,
+    INVALID_CODE_CACHE = 2014,
 
     // Errors that can arise from binary decoding (deserialization)
     // Deserializtion Errors: 3000-3999
@@ -418,6 +385,16 @@ pub enum StatusCode {
     UNEXPECTED_SIGNATURE_TYPE = 3009,
     DUPLICATE_TABLE = 3010,
     VERIFIER_INVARIANT_VIOLATION = 3011,
+    UNKNOWN_NOMINAL_RESOURCE = 3012,
+    UNKNOWN_KIND = 3013,
+    UNKNOWN_NATIVE_STRUCT_FLAG = 3014,
+    BAD_ULEB_U16 = 3015,
+    BAD_ULEB_U32 = 3016,
+    BAD_U16 = 3017,
+    BAD_U32 = 3018,
+    BAD_U64 = 3019,
+    BAD_U128 = 3020,
+    BAD_ULEB_U8 = 3021,
 
     // Errors that can arise at runtime
     // Runtime Errors: 4000-4999
@@ -452,7 +429,6 @@ pub enum StatusCode {
     CALL_STACK_OVERFLOW = 4021,
     NATIVE_FUNCTION_ERROR = 4022,
     GAS_SCHEDULE_ERROR = 4023,
-    CREATE_NULL_ACCOUNT = 4024,
 
     // A reserved status to represent an unknown vm status.
     UNKNOWN_STATUS = std::u64::MAX,
@@ -544,7 +520,7 @@ impl TryFrom<u64> for StatusCode {
             1026 => Ok(StatusCode::ABORT_TYPE_MISMATCH_ERROR),
             1027 => Ok(StatusCode::STLOC_TYPE_MISMATCH_ERROR),
             1028 => Ok(StatusCode::STLOC_UNSAFE_TO_DESTROY_ERROR),
-            1029 => Ok(StatusCode::RET_UNSAFE_TO_DESTROY_ERROR),
+            1029 => Ok(StatusCode::UNSAFE_RET_LOCAL_OR_RESOURCE_STILL_BORROWED),
             1030 => Ok(StatusCode::RET_TYPE_MISMATCH_ERROR),
             1031 => Ok(StatusCode::RET_BORROWED_MUTABLE_REFERENCE_ERROR),
             1032 => Ok(StatusCode::FREEZEREF_TYPE_MISMATCH_ERROR),
@@ -591,7 +567,7 @@ impl TryFrom<u64> for StatusCode {
             1073 => Ok(StatusCode::INVALID_ACQUIRES_RESOURCE_ANNOTATION_ERROR),
             1074 => Ok(StatusCode::GLOBAL_REFERENCE_ERROR),
             1075 => Ok(StatusCode::CONTRAINT_KIND_MISMATCH),
-            1076 => Ok(StatusCode::NUMBER_OF_TYPE_ACTUALS_MISMATCH),
+            1076 => Ok(StatusCode::NUMBER_OF_TYPE_ARGUMENTS_MISMATCH),
             1077 => Ok(StatusCode::LOOP_IN_INSTANTIATION_GRAPH),
             1078 => Ok(StatusCode::UNUSED_LOCALS_SIGNATURE),
             1079 => Ok(StatusCode::UNUSED_TYPE_SIGNATURE),
@@ -647,7 +623,6 @@ impl TryFrom<u64> for StatusCode {
             4021 => Ok(StatusCode::CALL_STACK_OVERFLOW),
             4022 => Ok(StatusCode::NATIVE_FUNCTION_ERROR),
             4023 => Ok(StatusCode::GAS_SCHEDULE_ERROR),
-            4024 => Ok(StatusCode::CREATE_NULL_ACCOUNT),
             std::u64::MAX => Ok(StatusCode::UNKNOWN_STATUS),
             _ => Err("invalid StatusCode"),
         }
@@ -668,6 +643,7 @@ pub mod sub_status {
     pub const AED_DIVISION_BY_ZERO: u64 = 3;
 
     pub const VSF_GAS_SCHEDULE_NOT_FOUND: u64 = 0;
+    pub const VSF_LIBRA_VERSION_NOT_FOUND: u64 = 1;
 
     // Dynamic Reference status sub-codes
     pub const DRE_UNKNOWN_DYNAMIC_REFERENCE_ERROR: u64 = 0;
@@ -678,6 +654,8 @@ pub mod sub_status {
 
     // Native Function Error sub-codes
     pub const NFE_VECTOR_ERROR_BASE: u64 = 0;
+    // Failure in LCS deserialization
+    pub const NFE_LCS_SERIALIZATION_FAILURE: u64 = 0x1C5;
 
     pub const GSE_UNABLE_TO_LOAD_MODULE: u64 = 0;
     pub const GSE_UNABLE_TO_LOAD_RESOURCE: u64 = 1;

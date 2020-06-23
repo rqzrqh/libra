@@ -56,21 +56,22 @@
 //! every Consensus commit request. We use a separate system TTL to ensure that a transaction won't
 //! remain stuck in Mempool forever, even if Consensus doesn't make progress
 
-#[macro_use]
-extern crate prometheus;
-
 /// This module provides mocks of shared mempool for tests.
-#[cfg(feature = "fuzzing")]
-pub mod mocks;
+#[cfg(any(test, feature = "fuzzing"))]
+mod tests;
 pub use shared_mempool::{
-    bootstrap, generate_reconfig_subscription, CommitNotification, CommitResponse,
-    CommittedTransaction, ConsensusRequest, ConsensusResponse, MempoolClientSender,
-    SubmissionStatus, TransactionExclusion,
+    bootstrap, network,
+    types::{
+        gen_mempool_reconfig_subscription, CommitNotification, CommitResponse,
+        CommittedTransaction, ConsensusRequest, ConsensusResponse, MempoolClientSender,
+        SubmissionStatus, TransactionExclusion,
+    },
 };
+#[cfg(feature = "fuzzing")]
+pub use tests::mocks;
 
 mod core_mempool;
 mod counters;
-pub mod network;
 mod shared_mempool;
 
 // module op counters

@@ -1,7 +1,7 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{transaction::Version, validator_set::ValidatorSet};
+use crate::{epoch_state::EpochState, on_chain_config::ValidatorSet, transaction::Version};
 use libra_crypto::hash::HashValue;
 #[cfg(any(test, feature = "fuzzing"))]
 use libra_crypto::hash::ACCUMULATOR_PLACEHOLDER_HASH;
@@ -38,8 +38,8 @@ pub struct BlockInfo {
     version: Version,
     /// The timestamp this block was proposed by a proposer.
     timestamp_usecs: u64,
-    /// An optional field containing the set of validators for the start of the next epoch
-    next_validator_set: Option<ValidatorSet>,
+    /// An optional field containing the next epoch info
+    next_epoch_state: Option<EpochState>,
 }
 
 impl BlockInfo {
@@ -50,7 +50,7 @@ impl BlockInfo {
         executed_state_id: HashValue,
         version: Version,
         timestamp_usecs: u64,
-        next_validator_set: Option<ValidatorSet>,
+        next_epoch_state: Option<EpochState>,
     ) -> Self {
         Self {
             epoch,
@@ -59,7 +59,7 @@ impl BlockInfo {
             executed_state_id,
             version,
             timestamp_usecs,
-            next_validator_set,
+            next_epoch_state,
         }
     }
 
@@ -71,7 +71,7 @@ impl BlockInfo {
             executed_state_id: HashValue::zero(),
             version: 0,
             timestamp_usecs: 0,
-            next_validator_set: None,
+            next_epoch_state: None,
         }
     }
 
@@ -84,7 +84,7 @@ impl BlockInfo {
             executed_state_id: HashValue::zero(),
             version: 0,
             timestamp_usecs: 0,
-            next_validator_set: None,
+            next_epoch_state: None,
         }
     }
 
@@ -106,15 +106,24 @@ impl BlockInfo {
             executed_state_id: genesis_state_root_hash,
             version: GENESIS_VERSION,
             timestamp_usecs: GENESIS_TIMESTAMP_USECS,
-            next_validator_set: Some(validator_set),
+            next_epoch_state: Some(EpochState {
+                epoch: 1,
+                verifier: (&validator_set).into(),
+            }),
         }
     }
 
     /// Create a mock genesis `BlockInfo` with an empty state tree and empty
     /// validator set.
     #[cfg(any(test, feature = "fuzzing"))]
-    pub fn mock_genesis() -> Self {
-        Self::genesis(*ACCUMULATOR_PLACEHOLDER_HASH, ValidatorSet::empty())
+    pub fn mock_genesis(validator_set: Option<ValidatorSet>) -> Self {
+        let validator_set = validator_set.unwrap_or_else(ValidatorSet::empty);
+        Self::genesis(*ACCUMULATOR_PLACEHOLDER_HASH, validator_set)
+    }
+
+    /// The epoch after this block committed
+    pub fn next_block_epoch(&self) -> u64 {
+        self.next_epoch_state().map_or(self.epoch(), |e| e.epoch)
     }
 
     pub fn epoch(&self) -> u64 {
@@ -126,15 +135,15 @@ impl BlockInfo {
     }
 
     pub fn has_reconfiguration(&self) -> bool {
-        self.next_validator_set.is_some()
+        self.next_epoch_state.is_some()
     }
 
     pub fn id(&self) -> HashValue {
         self.id
     }
 
-    pub fn next_validator_set(&self) -> Option<&ValidatorSet> {
-        self.next_validator_set.as_ref()
+    pub fn next_epoch_state(&self) -> Option<&EpochState> {
+        self.next_epoch_state.as_ref()
     }
 
     pub fn round(&self) -> Round {
@@ -154,14 +163,14 @@ impl Display for BlockInfo {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         write!(
             f,
-            "BlockInfo: [epoch: {}, round: {}, id: {}, executed_state_id: {}, version: {}, timestamp (us): {}, next_validator_set: {}]",
+            "BlockInfo: [epoch: {}, round: {}, id: {}, executed_state_id: {}, version: {}, timestamp (us): {}, next_epoch_state: {}]",
             self.epoch(),
             self.round(),
             self.id(),
             self.executed_state_id(),
             self.version(),
             self.timestamp_usecs(),
-            self.next_validator_set.as_ref().map_or("None".to_string(), |validator_set| format!("{}", validator_set)),
+            self.next_epoch_state.as_ref().map_or("None".to_string(), |epoch_state| format!("{}", epoch_state)),
         )
     }
 }

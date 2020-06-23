@@ -4,150 +4,115 @@
 #![forbid(unsafe_code)]
 
 use anyhow::{bail, format_err, Result};
-use libra_logger::error;
-use reqwest::{self, Url};
+use libra_logger::info;
+use rusoto_autoscaling::{
+    AutoScalingGroupNamesType, Autoscaling, AutoscalingClient, SetDesiredCapacityType,
+};
 use rusoto_core::Region;
-use rusoto_ec2::{DescribeInstancesRequest, Ec2, Ec2Client};
-use rusoto_ecr::EcrClient;
-use rusoto_ecs::EcsClient;
-use rusoto_s3::{PutObjectRequest, S3Client, S3};
-use std::{fs::File, io::Read, thread, time::Duration};
+use rusoto_sts::WebIdentityProvider;
 
-#[derive(Clone)]
-pub struct Aws {
-    workspace: String,
-    ec2: Ec2Client,
-    ecr: EcrClient,
-    ecs: EcsClient,
-}
-
-impl Aws {
-    pub fn new(k8s: bool) -> Self {
-        let ec2 = Ec2Client::new(Region::UsWest2);
-        let workspace = if k8s {
-            "k8s".to_string()
-        } else {
-            discover_workspace(&ec2)
-        };
-        Self {
-            workspace,
-            ec2,
-            ecr: EcrClient::new(Region::UsWest2),
-            ecs: EcsClient::new(Region::UsWest2),
-        }
-    }
-
-    pub fn ec2(&self) -> &Ec2Client {
-        &self.ec2
-    }
-
-    pub fn ecr(&self) -> &EcrClient {
-        &self.ecr
-    }
-
-    pub fn ecs(&self) -> &EcsClient {
-        &self.ecs
-    }
-
-    pub fn workspace(&self) -> &String {
-        &self.workspace
-    }
-
-    pub fn region(&self) -> &str {
-        Region::UsWest2.name()
-    }
-}
-
-impl Default for Aws {
-    fn default() -> Self {
-        Self::new(false)
-    }
-}
-
-fn discover_workspace(ec2: &Ec2Client) -> String {
-    let instance_id = current_instance_id();
-    let mut attempt = 0;
-    loop {
-        let result = match ec2
-            .describe_instances(DescribeInstancesRequest {
-                filters: None,
-                max_results: None,
-                dry_run: None,
-                instance_ids: Some(vec![instance_id.clone()]),
-                next_token: None,
-            })
-            .sync()
-        {
-            Ok(result) => result,
-            Err(e) => {
-                attempt += 1;
-                if attempt > 10 {
-                    panic!("Failed to discover workspace");
-                }
-                error!(
-                    "Transient failure when discovering workspace(attempt {}): {}",
-                    attempt, e
-                );
-                thread::sleep(Duration::from_secs(1));
-                continue;
-            }
-        };
-        let reservation = result
-            .reservations
-            .expect("discover_workspace: no reservations")
-            .remove(0)
-            .instances
-            .expect("discover_workspace: no instances")
-            .remove(0);
-        let tags = reservation.tags.expect("discover_workspace: no tags");
-        for tag in tags.iter() {
-            if tag.key == Some("Workspace".to_string()) {
-                return tag
-                    .value
-                    .as_ref()
-                    .expect("discover_workspace: no tag value")
-                    .to_string();
-            }
-        }
-        panic!(
-            "discover_workspace: no workspace tag. Instance id: {}, tags: {:?}",
-            instance_id, tags
-        );
-    }
-}
-
-fn current_instance_id() -> String {
-    let client = reqwest::blocking::Client::new();
-    let url = Url::parse("http://169.254.169.254/1.0/meta-data/instance-id");
-    let url = url.expect("Failed to parse metadata url");
-    let response = client.get(url).send();
-    let response = response.expect("Metadata request failed");
-    response.text().expect("Failed to parse metadata response")
-}
-
-pub fn upload_to_s3(
-    local_filename: &str,
-    bucket: &str,
-    dest_filename: &str,
-    content_type: Option<String>,
+/// set_asg_size sets the size of the given autoscaling group
+#[allow(clippy::collapsible_if)]
+pub async fn set_asg_size(
+    min_desired_capacity: i64,
+    buffer_percent: f64,
+    asg_name: &str,
+    wait_for_completion: bool,
+    scaling_down: bool,
 ) -> Result<()> {
-    let mut f = File::open(local_filename).unwrap();
-    let mut contents: Vec<u8> = Vec::new();
-    match f.read_to_end(&mut contents) {
-        Err(e) => bail!("Error opening file to send to S3: {}", e),
-        Ok(_) => {
-            let req = PutObjectRequest {
-                bucket: bucket.to_owned(),
-                key: dest_filename.to_owned(),
-                body: Some(contents.into()),
-                content_type,
-                ..Default::default()
-            };
-            S3Client::new(Region::UsWest2)
-                .put_object(req)
-                .sync()
-                .map_err(|e| format_err!("Failed to upload to S3: {:?}", e))
-                .map(|_| ())
-        }
+    let buffer = if scaling_down {
+        0
+    } else {
+        ((min_desired_capacity as f64 * buffer_percent) / 100_f64).ceil() as i64
+    };
+    info!(
+        "Scaling to min_desired_capacity : {}, buffer: {}, asg_name: {}",
+        min_desired_capacity, buffer, asg_name
+    );
+    let set_desired_capacity_type = SetDesiredCapacityType {
+        auto_scaling_group_name: asg_name.to_string(),
+        desired_capacity: min_desired_capacity + buffer,
+        honor_cooldown: Some(false),
+    };
+    let credentials_provider = WebIdentityProvider::from_k8s_env();
+
+    let dispatcher = rusoto_core::HttpClient::new().expect("failed to create request dispatcher");
+    let asc = AutoscalingClient::new_with(dispatcher, credentials_provider, Region::UsWest2);
+    asc.set_desired_capacity(set_desired_capacity_type)
+        .await
+        .map_err(|e| format_err!("set_desired_capacity failed: {:?}", e))?;
+    if !wait_for_completion {
+        return Ok(());
     }
+    libra_retrier::retry_async(libra_retrier::fixed_retry_strategy(10_000, 60), || {
+        let asc_clone = asc.clone();
+        Box::pin(async move {
+            let mut total = 0;
+            let mut current_token = None;
+            loop {
+                let current_token_clone = current_token.clone();
+                let auto_scaling_group_names_type = AutoScalingGroupNamesType {
+                    auto_scaling_group_names: Some(vec![asg_name.to_string()]),
+                    // https://docs.aws.amazon.com/autoscaling/ec2/APIReference/API_DescribeAutoScalingGroups.html
+                    // max value is 100
+                    max_records: Some(100),
+                    next_token: current_token_clone,
+                };
+                let asgs = asc_clone
+                    .describe_auto_scaling_groups(auto_scaling_group_names_type)
+                    .await?;
+                if asgs.auto_scaling_groups.is_empty() {
+                    bail!("asgs.auto_scaling_groups.is_empty()");
+                }
+                let asg = &asgs.auto_scaling_groups[0];
+                if scaling_down {
+                    total += asg
+                        .instances
+                        .clone()
+                        .ok_or_else(|| format_err!("instances not found for auto_scaling_group"))?
+                        .len() as i64;
+                } else {
+                    total += asg
+                        .instances
+                        .clone()
+                        .ok_or_else(|| format_err!("instances not found for auto_scaling_group"))?
+                        .iter()
+                        .filter(|instance| instance.lifecycle_state == "InService")
+                        .count() as i64;
+                }
+                if asgs.next_token.is_none() {
+                    break;
+                }
+                current_token = asgs.next_token;
+            }
+            info!(
+                "Waiting for scaling to complete. Current size: {}, Min Desired Size: {}",
+                total, min_desired_capacity
+            );
+            if scaling_down {
+                if total > min_desired_capacity {
+                    bail!(
+                    "Waiting for scale-down to complete. Current size: {}, Min Desired Size: {}",
+                    total,
+                    min_desired_capacity
+                );
+                } else {
+                    info!("Scale down completed");
+                    Ok(())
+                }
+            } else {
+                if total < min_desired_capacity {
+                    bail!(
+                        "Waiting for scale-up to complete. Current size: {}, Min Desired Size: {}",
+                        total,
+                        min_desired_capacity
+                    );
+                } else {
+                    info!("Scale up completed");
+                    Ok(())
+                }
+            }
+        })
+    })
+    .await
 }

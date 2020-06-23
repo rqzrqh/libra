@@ -8,13 +8,11 @@ use bytecode_verifier::{
     verifier::{verify_module_dependencies, VerifiedScript},
     VerifiedModule,
 };
+use compiled_stdlib::{stdlib_modules, StdLibOptions};
 use compiler::{util, Compiler};
 use ir_to_bytecode::parser::{parse_module, parse_script};
 use libra_types::{
-    access_path::AccessPath,
-    account_address::AccountAddress,
-    transaction::{Module, Script},
-    vm_error::VMStatus,
+    access_path::AccessPath, account_address::AccountAddress, account_config, vm_error::VMStatus,
 };
 use std::{
     convert::TryFrom,
@@ -22,7 +20,6 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-use stdlib::{stdlib_modules, StdLibOptions};
 use structopt::StructOpt;
 use vm::file_format::CompiledModule;
 
@@ -55,20 +52,17 @@ struct Args {
     pub output_source_maps: bool,
 }
 
-fn print_errors_and_exit(verification_errors: &[VMStatus]) -> ! {
-    println!("Verification failed. Errors below:");
-    for e in verification_errors {
-        println!("{:?}", e);
-    }
+fn print_error_and_exit(verification_error: &VMStatus) -> ! {
+    println!("Verification failed:");
+    println!("{:?}", verification_error);
     std::process::exit(1);
 }
 
 fn do_verify_module(module: CompiledModule, dependencies: &[VerifiedModule]) -> VerifiedModule {
     let verified_module =
-        VerifiedModule::new(module).unwrap_or_else(|(_, errors)| print_errors_and_exit(&errors));
-    let errors = verify_module_dependencies(&verified_module, dependencies);
-    if !errors.is_empty() {
-        print_errors_and_exit(&errors);
+        VerifiedModule::new(module).unwrap_or_else(|(_, err)| print_error_and_exit(&err));
+    if let Err(err) = verify_module_dependencies(&verified_module, dependencies) {
+        print_error_and_exit(&err);
     }
     verified_module
 }
@@ -88,7 +82,7 @@ fn main() {
     let address = args
         .address
         .map(|a| AccountAddress::try_from(a).unwrap())
-        .unwrap_or_else(AccountAddress::default);
+        .unwrap_or(account_config::CORE_CODE_ADDRESS);
     let source_path = Path::new(&args.source_path);
     let mvir_extension = "mvir";
     let mv_extension = "mv";
@@ -143,7 +137,7 @@ fn main() {
         } else if args.no_stdlib {
             vec![]
         } else {
-            stdlib_modules(StdLibOptions::Staged).to_vec()
+            stdlib_modules(StdLibOptions::Compiled).to_vec()
         }
     };
 
@@ -168,8 +162,8 @@ fn main() {
         };
 
         if args.output_source_maps {
-            let source_map_bytes = serde_json::to_vec(&source_map)
-                .expect("Unable to serialize source maps for script");
+            let source_map_bytes =
+                lcs::to_bytes(&source_map).expect("Unable to serialize source maps for script");
             write_output(
                 &source_path.with_extension(source_map_extension),
                 &source_map_bytes,
@@ -180,9 +174,7 @@ fn main() {
         compiled_script
             .serialize(&mut script)
             .expect("Unable to serialize script");
-        let payload = Script::new(script, vec![]);
-        let payload_bytes = serde_json::to_vec(&payload).expect("Unable to serialize script");
-        write_output(&source_path.with_extension(mv_extension), &payload_bytes);
+        write_output(&source_path.with_extension(mv_extension), &script);
     } else {
         let (compiled_module, source_map) =
             util::do_compile_module(&args.source_path, address, &deps);
@@ -194,8 +186,8 @@ fn main() {
         };
 
         if args.output_source_maps {
-            let source_map_bytes = serde_json::to_vec(&source_map)
-                .expect("Unable to serialize source maps for module");
+            let source_map_bytes =
+                lcs::to_bytes(&source_map).expect("Unable to serialize source maps for module");
             write_output(
                 &source_path.with_extension(source_map_extension),
                 &source_map_bytes,
@@ -206,8 +198,6 @@ fn main() {
         compiled_module
             .serialize(&mut module)
             .expect("Unable to serialize module");
-        let payload = Module::new(module);
-        let payload_bytes = serde_json::to_vec(&payload).expect("Unable to serialize module");
-        write_output(&source_path.with_extension(mv_extension), &payload_bytes);
+        write_output(&source_path.with_extension(mv_extension), &module);
     }
 }

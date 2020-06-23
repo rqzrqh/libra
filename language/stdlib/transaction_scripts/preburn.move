@@ -1,9 +1,12 @@
-use 0x0::LBR;
-use 0x0::Libra;
-use 0x0::LibraAccount;
+script {
+use 0x1::Libra;
+use 0x1::LibraAccount;
 
-// Preburn `amount` coins from the sender's account.
-// This will only succeed if the sender already has a published `Preburn` resource.
-fun main(amount: u64) {
-    Libra::preburn_to_sender<LBR::T>(LibraAccount::withdraw_from_sender<LBR::T>(amount))
+/// Preburn `amount` `Token`s from `account`.
+/// This will only succeed if `account` already has a published `Preburn<Token>` resource.
+fun preburn<Token>(account: &signer, amount: u64) {
+    let withdraw_cap = LibraAccount::extract_withdraw_capability(account);
+    Libra::preburn_to<Token>(account, LibraAccount::withdraw_from(&withdraw_cap, amount));
+    LibraAccount::restore_withdraw_capability(withdraw_cap);
+}
 }

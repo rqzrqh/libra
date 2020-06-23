@@ -1,64 +1,40 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    code_cache::{module_cache::VMModuleCache, script_cache::ScriptCache},
-    interpreter::Interpreter,
-    interpreter_context::InterpreterContext,
-    loaded_data::{
-        function::{FunctionRef, FunctionReference},
-        loaded_module::LoadedModule,
-    },
-};
+use crate::{interpreter::Interpreter, loader::Loader};
 use bytecode_verifier::VerifiedModule;
 use libra_logger::prelude::*;
-use libra_types::{
-    language_storage::ModuleId,
-    vm_error::{StatusCode, VMStatus},
+use libra_types::vm_error::{StatusCode, VMStatus};
+use move_core_types::{
+    account_address::AccountAddress,
+    identifier::IdentStr,
+    language_storage::{ModuleId, TypeTag},
 };
-use move_core_types::identifier::{IdentStr, Identifier};
-use move_vm_cache::Arena;
-use move_vm_types::{
-    loaded_data::types::{StructType, Type},
-    values::Value,
-};
+use move_vm_types::{data_store::DataStore, gas_schedule::CostStrategy, values::Value};
 use vm::{
     access::ModuleAccess,
     errors::{verification_error, vm_error, Location, VMResult},
-    file_format::{FunctionHandleIndex, FunctionSignature, SignatureToken, StructDefinitionIndex},
-    gas_schedule::CostTable,
-    transaction_metadata::TransactionMetadata,
+    file_format::{Signature, SignatureToken},
     CompiledModule, IndexKind,
 };
 
 /// An instantiation of the MoveVM.
-/// `code_cache` is the top level module cache that holds loaded published modules.
-/// `script_cache` is the cache that stores all the scripts that have previously been invoked.
-/// `publishing_option` is the publishing option that is set. This can be one of either:
-/// * Locked, with a whitelist of scripts that the VM is allowed to execute. For scripts that aren't
-///   in the whitelist, the VM will just reject it in `verify_transaction`.
-/// * Custom scripts, which will allow arbitrary valid scripts, but no module publishing
-/// * Open script and module publishing
-pub(crate) struct VMRuntime<'alloc> {
-    code_cache: VMModuleCache<'alloc>,
-    script_cache: ScriptCache<'alloc>,
+pub(crate) struct VMRuntime {
+    loader: Loader,
 }
 
-impl<'alloc> VMRuntime<'alloc> {
-    /// Create a new VM instance with an Arena allocator to store the modules and a `config` that
-    /// contains the whitelist that this VM is allowed to execute.
-    pub fn new(allocator: &'alloc Arena<LoadedModule>) -> Self {
+impl VMRuntime {
+    pub(crate) fn new() -> Self {
         VMRuntime {
-            code_cache: VMModuleCache::new(allocator),
-            script_cache: ScriptCache::new(allocator),
+            loader: Loader::new(),
         }
     }
 
     pub(crate) fn publish_module(
         &self,
         module: Vec<u8>,
-        context: &mut dyn InterpreterContext,
-        txn_data: &TransactionMetadata,
+        sender: &AccountAddress,
+        data_store: &mut dyn DataStore,
     ) -> VMResult<()> {
         let compiled_module = match CompiledModule::deserialize(&module) {
             Ok(module) => module,
@@ -71,10 +47,10 @@ impl<'alloc> VMRuntime<'alloc> {
         // Make sure the module's self address matches the transaction sender. The self address is
         // where the module will actually be published. If we did not check this, the sender could
         // publish a module under anyone's account.
-        if compiled_module.address() != &txn_data.sender {
+        if compiled_module.address() != sender {
             return Err(verification_error(
-                IndexKind::AddressPool,
-                CompiledModule::IMPLEMENTED_MODULE_INDEX as usize,
+                IndexKind::AddressIdentifier,
+                compiled_module.self_handle_idx().0 as usize,
                 StatusCode::MODULE_ADDRESS_DOES_NOT_MATCH_SENDER,
             ));
         }
@@ -82,143 +58,116 @@ impl<'alloc> VMRuntime<'alloc> {
         // Make sure that there is not already a module with this name published
         // under the transaction sender's account.
         let module_id = compiled_module.self_id();
-        if context.exists_module(&module_id) {
+        if data_store.exists_module(&module_id) {
             return Err(vm_error(
                 Location::default(),
                 StatusCode::DUPLICATE_MODULE_NAME,
             ));
         };
 
-        match VerifiedModule::new(compiled_module) {
-            Ok(ver_module) => ver_module,
-            Err((_, mut errors)) => {
-                let err = if errors.is_empty() {
-                    VMStatus::new(StatusCode::VERIFIER_INVARIANT_VIOLATION)
-                } else {
-                    errors.remove(0)
-                };
-
-                return Err(err);
-            }
-        };
-
-        context.publish_module(module_id, module)
+        let verified_module = VerifiedModule::new(compiled_module).map_err(|(_, e)| e)?;
+        Loader::check_natives(&verified_module)?;
+        data_store.publish_module(module_id, module)
     }
 
-    pub fn execute_script(
+    pub(crate) fn execute_script(
         &self,
-        context: &mut dyn InterpreterContext,
-        txn_data: &TransactionMetadata,
-        gas_schedule: &CostTable,
         script: Vec<u8>,
-        args: Vec<Value>,
+        ty_args: Vec<TypeTag>,
+        mut args: Vec<Value>,
+        sender: AccountAddress,
+        data_store: &mut dyn DataStore,
+        cost_strategy: &mut CostStrategy,
     ) -> VMResult<()> {
-        let main = self.script_cache.cache_script(&script, context)?;
-
-        if !verify_actuals(main.signature(), &args) {
-            return Err(VMStatus::new(StatusCode::TYPE_MISMATCH)
-                .with_message("Actual Type Mismatch".to_string()));
+        fn is_signer_reference(s: &SignatureToken) -> bool {
+            use SignatureToken as S;
+            match s {
+                S::Reference(inner) => matches!(&**inner, S::Signer),
+                _ => false,
+            }
         }
 
-        Interpreter::entrypoint(context, self, txn_data, gas_schedule, main, args)
-    }
+        let mut type_params = vec![];
+        for ty in &ty_args {
+            type_params.push(self.loader.load_type(ty, data_store)?);
+        }
+        let main = self.loader.load_script(&script, data_store)?;
 
-    pub fn execute_function(
-        &self,
-        context: &mut dyn InterpreterContext,
-        txn_data: &TransactionMetadata,
-        gas_schedule: &CostTable,
-        module: &ModuleId,
-        function_name: &IdentStr,
-        args: Vec<Value>,
-    ) -> VMResult<()> {
-        Interpreter::execute_function(
-            context,
-            self,
-            txn_data,
-            gas_schedule,
-            module,
-            function_name,
+        self.loader
+            .verify_ty_args(main.type_parameters(), &type_params)?;
+        let first_param_opt = main.parameters().0.get(0);
+        if first_param_opt.map_or(false, |sig| is_signer_reference(sig)) {
+            args.insert(0, Value::transaction_argument_signer_reference(sender))
+        }
+        verify_args(main.parameters(), &args)?;
+
+        Interpreter::entrypoint(
+            main,
+            type_params,
             args,
+            data_store,
+            cost_strategy,
+            &self.loader,
         )
     }
 
-    pub fn cache_module(&self, module: VerifiedModule) {
-        self.code_cache.cache_module(module);
+    pub(crate) fn execute_function(
+        &self,
+        module: &ModuleId,
+        function_name: &IdentStr,
+        ty_args: Vec<TypeTag>,
+        args: Vec<Value>,
+        data_store: &mut dyn DataStore,
+        cost_strategy: &mut CostStrategy,
+    ) -> VMResult<()> {
+        let mut type_params = vec![];
+        for ty in &ty_args {
+            type_params.push(self.loader.load_type(ty, data_store)?);
+        }
+        let func = self
+            .loader
+            .load_function(function_name, module, data_store)?;
+
+        self.loader
+            .verify_ty_args(func.type_parameters(), &type_params)?;
+        // REVIEW: argument verification should happen in the interpreter
+        //verify_args(func.parameters(), &args)?;
+
+        Interpreter::entrypoint(
+            func,
+            type_params,
+            args,
+            data_store,
+            cost_strategy,
+            &self.loader,
+        )
     }
 
-    pub fn resolve_struct_def_by_name(
+    pub(crate) fn cache_module(
         &self,
-        module_id: &ModuleId,
-        name: &Identifier,
-        ty_args: &[Type],
-        context: &mut dyn InterpreterContext,
-    ) -> VMResult<StructType> {
-        let module = self.code_cache.get_loaded_module(module_id, context)?;
-        let struct_idx = module.get_struct_def_index(name)?;
-        self.code_cache
-            .resolve_struct_def(module, *struct_idx, ty_args, context)
-    }
-
-    pub fn resolve_struct_def(
-        &self,
-        module: &LoadedModule,
-        idx: StructDefinitionIndex,
-        ty_args: &[Type],
-        data_view: &dyn InterpreterContext,
-    ) -> VMResult<StructType> {
-        self.code_cache
-            .resolve_struct_def(module, idx, ty_args, data_view)
-    }
-
-    pub fn resolve_function_ref(
-        &self,
-        caller_module: &LoadedModule,
-        idx: FunctionHandleIndex,
-        data_view: &dyn InterpreterContext,
-    ) -> VMResult<FunctionRef<'alloc>> {
-        self.code_cache
-            .resolve_function_ref(caller_module, idx, data_view)
-    }
-
-    pub fn resolve_signature_token(
-        &self,
-        module: &LoadedModule,
-        tok: &SignatureToken,
-        ty_args: &[Type],
-        data_view: &dyn InterpreterContext,
-    ) -> VMResult<Type> {
-        self.code_cache
-            .resolve_signature_token(module, tok, ty_args, data_view)
-    }
-
-    pub fn get_loaded_module(
-        &self,
-        id: &ModuleId,
-        data_view: &dyn InterpreterContext,
-    ) -> VMResult<&'alloc LoadedModule> {
-        self.code_cache.get_loaded_module(id, data_view)
+        module: VerifiedModule,
+        data_store: &mut dyn DataStore,
+    ) -> VMResult<()> {
+        self.loader.cache_module(module, data_store)
     }
 }
 
 /// Verify if the transaction arguments match the type signature of the main function.
-fn verify_actuals(signature: &FunctionSignature, args: &[Value]) -> bool {
-    if signature.arg_types.len() != args.len() {
-        warn!(
-            "[VM] different argument length: actuals {}, formals {}",
-            args.len(),
-            signature.arg_types.len()
+fn verify_args(signature: &Signature, args: &[Value]) -> VMResult<()> {
+    if signature.len() != args.len() {
+        return Err(
+            VMStatus::new(StatusCode::TYPE_MISMATCH).with_message(format!(
+                "argument length mismatch: expected {} got {}",
+                signature.len(),
+                args.len()
+            )),
         );
-        return false;
     }
-    for (ty, arg) in signature.arg_types.iter().zip(args.iter()) {
-        if !arg.is_valid_script_arg(ty) {
-            warn!(
-                "[VM] different argument type: formal {:?}, actual {:?}",
-                ty, arg
-            );
-            return false;
+    for (tok, val) in signature.0.iter().zip(args) {
+        if !val.is_valid_script_arg(tok) {
+            return Err(VMStatus::new(StatusCode::TYPE_MISMATCH)
+                .with_message("argument type mismatch".to_string()));
         }
     }
-    true
+    Ok(())
 }

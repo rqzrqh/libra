@@ -1,11 +1,8 @@
-// dep: tests/sources/stdlib/modules/transaction.move
-// dep: tests/sources/stdlib/modules/libra_time.move
-
-address 0x0:
+address 0x1 {
 
 module LibraTransactionTimeout {
-  use 0x0::Transaction;
-  use 0x0::LibraTimestamp;
+  use 0x1::Transaction;
+  use 0x1::LibraTimestamp;
 
   resource struct TTL {
     // Only transactions with timestamp in between block time and block time + duration would be accepted.
@@ -15,17 +12,27 @@ module LibraTransactionTimeout {
   public fun initialize() {
 
     // Only callable by the Association address
-    Transaction::assert(Transaction::sender() == 0xA550C18, 1);
+    assert(Transaction::sender() == 0xA550C18, 1);
     // Currently set to 1day.
     move_to_sender<TTL>(TTL {duration_microseconds: 86400000000});
+  }
+  spec fun initialize {
+    aborts_if sender() != 0xA550C18;
+    aborts_if exists<TTL>(sender());
+    ensures global<TTL>(sender()).duration_microseconds == 86400000000;
   }
 
   public fun set_timeout(new_duration: u64) acquires TTL {
     // Only callable by the Association address
-    Transaction::assert(Transaction::sender() == 0xA550C18, 1);
+    assert(Transaction::sender() == 0xA550C18, 1);
 
     let timeout = borrow_global_mut<TTL>(0xA550C18);
     timeout.duration_microseconds = new_duration;
+  }
+  spec fun set_timeout {
+    aborts_if sender() != 0xA550C18;
+    aborts_if !exists<TTL>(0xA550C18);
+    ensures global<TTL>(sender()).duration_microseconds == new_duration;
   }
 
   public fun is_valid_transaction_timestamp(timestamp: u64): bool acquires TTL {
@@ -45,4 +52,13 @@ module LibraTransactionTimeout {
     //       See details in issue #2346.
     current_block_time < txn_time_microseconds
   }
+  spec fun is_valid_transaction_timestamp {
+    aborts_if timestamp <= 9223372036854 && !exists<LibraTimestamp::CurrentTimeMicroseconds>(0xA550C18);
+    aborts_if timestamp <= 9223372036854 && !exists<TTL>(0xA550C18);
+    aborts_if timestamp <= 9223372036854 && global<LibraTimestamp::CurrentTimeMicroseconds>(0xA550C18).microseconds + global<TTL>(0xA550C18).duration_microseconds > max_u64();
+    aborts_if timestamp <= 9223372036854 && timestamp * 1000000 > max_u64();
+    ensures timestamp > 9223372036854 ==> result == false;
+    ensures timestamp <= 9223372036854 ==> result == (global<LibraTimestamp::CurrentTimeMicroseconds>(0xA550C18).microseconds < timestamp * 1000000);
+  }
+}
 }

@@ -1,8 +1,10 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{errors::*, parser::syntax::make_loc};
-use std::fmt;
+use crate::{errors::*, parser::syntax::make_loc, FileCommentMap, MatchedFileCommentMap};
+use codespan::{ByteIndex, Span};
+use move_ir_types::location::Loc;
+use std::{collections::BTreeMap, fmt};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tok {
@@ -13,7 +15,7 @@ pub enum Tok {
     U64Value,
     U128Value,
     ByteStringValue,
-    NameValue,
+    IdentifierValue,
     Exclaim,
     ExclaimEqual,
     Percent,
@@ -74,6 +76,7 @@ pub enum Tok {
     PipePipe,
     RBrace,
     Fun,
+    Script,
 }
 
 impl fmt::Display for Tok {
@@ -87,7 +90,7 @@ impl fmt::Display for Tok {
             U64Value => "[U64]",
             U128Value => "[U128]",
             ByteStringValue => "[ByteString]",
-            NameValue => "[Name]",
+            IdentifierValue => "[Identifier]",
             Exclaim => "!",
             ExclaimEqual => "!=",
             Percent => "%",
@@ -148,6 +151,7 @@ impl fmt::Display for Tok {
             PipePipe => "||",
             RBrace => "}",
             Fun => "fun",
+            Script => "script",
         };
         fmt::Display::fmt(s, formatter)
     }
@@ -156,6 +160,8 @@ impl fmt::Display for Tok {
 pub struct Lexer<'input> {
     text: &'input str,
     file: &'static str,
+    doc_comments: FileCommentMap,
+    matched_doc_comments: MatchedFileCommentMap,
     prev_end: usize,
     cur_start: usize,
     cur_end: usize,
@@ -163,10 +169,16 @@ pub struct Lexer<'input> {
 }
 
 impl<'input> Lexer<'input> {
-    pub fn new(s: &'input str, f: &'static str) -> Lexer<'input> {
+    pub fn new(
+        text: &'input str,
+        file: &'static str,
+        doc_comments: BTreeMap<Span, String>,
+    ) -> Lexer<'input> {
         Lexer {
-            text: s,
-            file: f,
+            text,
+            file,
+            doc_comments,
+            matched_doc_comments: BTreeMap::new(),
             prev_end: 0,
             cur_start: 0,
             cur_end: 0,
@@ -203,10 +215,64 @@ impl<'input> Lexer<'input> {
         Ok(tok)
     }
 
-    // Return the starting offset for the next token after the current one.
-    pub fn lookahead_start_loc(&self) -> usize {
+    // Look ahead to the next two tokens after the current one and return them without advancing
+    // the state of the lexer.
+    pub fn lookahead2(&self) -> Result<(Tok, Tok), Error> {
         let text = self.text[self.cur_end..].trim_start();
-        self.text.len() - text.len()
+        let offset = self.text.len() - text.len();
+        let (first, length) = find_token(self.file, text, offset)?;
+        let text2 = self.text[offset + length..].trim_start();
+        let offset2 = self.text.len() - text2.len();
+        let (second, _) = find_token(self.file, text2, offset2)?;
+        Ok((first, second))
+    }
+
+    // Matches the doc comments after the last token (or the beginning of the file) to the position
+    // of the current token. This moves the comments out of `doc_comments` and
+    // into `matched_doc_comments`. At the end of parsing, if `doc_comments` is not empty, errors
+    // for stale doc comments will be produced.
+    //
+    // Calling this function during parsing effectively marks a valid point for documentation
+    // comments. The documentation comments are not stored in the AST, but can be retrieved by
+    // using the start position of an item as an index into `matched_doc_comments`.
+    pub fn match_doc_comments(&mut self) {
+        let start = self.previous_end_loc() as u32;
+        let end = self.cur_start as u32;
+        let mut matched = vec![];
+        let merged = self
+            .doc_comments
+            .range(Span::new(start, start)..Span::new(end, end))
+            .map(|(span, s)| {
+                matched.push(*span);
+                s.clone()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+        for span in matched {
+            self.doc_comments.remove(&span);
+        }
+        self.matched_doc_comments.insert(ByteIndex(end), merged);
+    }
+
+    // At the end of parsing, checks whether there are any unmatched documentation comments,
+    // producing errors if so. Otherwise returns a map from file position to associated
+    // documentation.
+    pub fn check_and_get_doc_comments(&mut self) -> Result<MatchedFileCommentMap, Errors> {
+        let errors = self
+            .doc_comments
+            .iter()
+            .map(|(span, _)| {
+                vec![(
+                    Loc::new(self.file, *span),
+                    "documentation comment cannot be matched to a language item".to_string(),
+                )]
+            })
+            .collect::<Errors>();
+        if errors.is_empty() {
+            Ok(std::mem::take(&mut self.matched_doc_comments))
+        } else {
+            Err(errors)
+        }
     }
 
     pub fn advance(&mut self) -> Result<(), Error> {
@@ -251,18 +317,17 @@ fn find_token(file: &'static str, text: &str, start_offset: usize) -> Result<(To
             }
         }
         'A'..='Z' | 'a'..='z' | '_' => {
-            if text.starts_with("x\"") {
-                // Search the current source line for a closing quote.
-                let line = text.lines().next().unwrap();
-                let len = line[2..].find('"').unwrap_or_else(|| line.len() - 2);
-                if line.len() == 2 || !&text[(2 + len)..].starts_with('"') {
-                    let loc = make_loc(file, start_offset, start_offset + 2 + len);
-                    return Err(vec![(
-                        loc,
-                        "Missing closing quote (\") after byte string".to_string(),
-                    )]);
+            if text.starts_with("x\"") || text.starts_with("b\"") {
+                let line = &text.lines().next().unwrap()[2..];
+                match get_string_len(line) {
+                    Some(last_quote) => (Tok::ByteStringValue, 2 + last_quote + 1),
+                    None => {
+                        return Err(vec![(
+                            make_loc(file, start_offset, start_offset + line.len() + 2),
+                            "Missing closing quote (\") after byte string".to_string(),
+                        )])
+                    }
                 }
-                (Tok::ByteStringValue, 2 + len + 1)
             } else {
                 let len = get_name_len(&text);
                 (get_name_token(&text[..len]), len)
@@ -397,6 +462,24 @@ fn get_hex_digits_len(text: &str) -> usize {
     .unwrap_or_else(|| text.len())
 }
 
+// Return the length of the quoted string, or None if there is no closing quote.
+fn get_string_len(text: &str) -> Option<usize> {
+    let mut pos = 0;
+    let mut iter = text.chars();
+    while let Some(chr) = iter.next() {
+        if chr == '\\' {
+            // Skip over the escaped character (e.g., a quote or another backslash)
+            if iter.next().is_some() {
+                pos += 1;
+            }
+        } else if chr == '"' {
+            return Some(pos);
+        }
+        pos += 1;
+    }
+    None
+}
+
 fn get_name_token(name: &str) -> Tok {
     match name {
         "abort" => Tok::Abort,
@@ -420,11 +503,12 @@ fn get_name_token(name: &str) -> Tok {
         "public" => Tok::Public,
         "resource" => Tok::Resource,
         "return" => Tok::Return,
+        "script" => Tok::Script,
         "spec" => Tok::Spec,
         "struct" => Tok::Struct,
         "true" => Tok::True,
         "use" => Tok::Use,
         "while" => Tok::While,
-        _ => Tok::NameValue,
+        _ => Tok::IdentifierValue,
     }
 }

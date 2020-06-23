@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    hlir::ast::{Command, FunctionSignature, Label, SingleType, StructDefinition},
+    hlir::ast::{Command, Command_, FunctionSignature, Label, SingleType, StructDefinition},
     parser::ast::{FunctionName, FunctionVisibility, ModuleIdent, StructName, Var},
-    shared::{ast_debug::*, unique_map::UniqueMap, *},
+    shared::{ast_debug::*, unique_map::UniqueMap},
 };
 use move_ir_types::location::*;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 // HLIR + Unstructured Control Flow + CFG
 
@@ -18,7 +18,18 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[derive(Debug)]
 pub struct Program {
     pub modules: UniqueMap<ModuleIdent, ModuleDefinition>,
-    pub main: Option<(Address, FunctionName, Function)>,
+    pub scripts: BTreeMap<String, Script>,
+}
+
+//**************************************************************************************************
+// Scripts
+//**************************************************************************************************
+
+#[derive(Debug)]
+pub struct Script {
+    pub loc: Loc,
+    pub function_name: FunctionName,
+    pub function: Function,
 }
 
 //**************************************************************************************************
@@ -53,7 +64,7 @@ pub type FunctionBody = Spanned<FunctionBody_>;
 pub struct Function {
     pub visibility: FunctionVisibility,
     pub signature: FunctionSignature,
-    pub acquires: BTreeSet<StructName>,
+    pub acquires: BTreeMap<StructName, Loc>,
     pub body: FunctionBody,
 }
 
@@ -66,22 +77,74 @@ pub type BasicBlocks = BTreeMap<Label, BasicBlock>;
 pub type BasicBlock = VecDeque<Command>;
 
 //**************************************************************************************************
+// Label util
+//**************************************************************************************************
+
+pub fn remap_labels(
+    remapping: &BTreeMap<Label, Label>,
+    start: Label,
+    blocks: BasicBlocks,
+) -> (Label, BasicBlocks) {
+    let blocks = blocks
+        .into_iter()
+        .map(|(lbl, mut block)| {
+            remap_labels_block(remapping, &mut block);
+            (remapping[&lbl], block)
+        })
+        .collect();
+    (remapping[&start], blocks)
+}
+
+fn remap_labels_block(remapping: &BTreeMap<Label, Label>, block: &mut BasicBlock) {
+    for cmd in block {
+        remap_labels_cmd(remapping, cmd)
+    }
+}
+
+fn remap_labels_cmd(remapping: &BTreeMap<Label, Label>, sp!(_, cmd_): &mut Command) {
+    use Command_::*;
+    match cmd_ {
+        Break | Continue => panic!("ICE break/continue not translated to jumps"),
+        Mutate(_, _) | Assign(_, _) | IgnoreAndPop { .. } | Abort(_) | Return(_) => (),
+        Jump(lbl) => *lbl = remapping[lbl],
+        JumpIf {
+            if_true, if_false, ..
+        } => {
+            *if_true = remapping[if_true];
+            *if_false = remapping[if_false];
+        }
+    }
+}
+
+//**************************************************************************************************
 // Debug
 //**************************************************************************************************
 
 impl AstDebug for Program {
     fn ast_debug(&self, w: &mut AstWriter) {
-        let Program { modules, main } = self;
+        let Program { modules, scripts } = self;
         for (m, mdef) in modules {
             w.write(&format!("module {}", m));
             w.block(|w| mdef.ast_debug(w));
             w.new_line();
         }
 
-        if let Some((addr, n, fdef)) = main {
-            w.writeln(&format!("address {}:", addr));
-            (n.clone(), fdef).ast_debug(w);
+        for (n, s) in scripts {
+            w.write(&format!("script {}", n));
+            w.block(|w| s.ast_debug(w));
+            w.new_line()
         }
+    }
+}
+
+impl AstDebug for Script {
+    fn ast_debug(&self, w: &mut AstWriter) {
+        let Script {
+            loc: _loc,
+            function_name,
+            function,
+        } = self;
+        (function_name.clone(), function).ast_debug(w);
     }
 }
 
@@ -129,7 +192,7 @@ impl AstDebug for (FunctionName, &Function) {
         signature.ast_debug(w);
         if !acquires.is_empty() {
             w.write(" acquires ");
-            w.comma(acquires, |w, s| w.write(&format!("{}", s)));
+            w.comma(acquires.keys(), |w, s| w.write(&format!("{}", s)));
             w.write(" ");
         }
         match &body.value {

@@ -118,14 +118,14 @@
 pub use log;
 
 pub mod prelude {
-    pub use crate::{crit, debug, error, info, trace, warn};
+    pub use crate::{crit, debug, error, info, send_struct_log, trace, warn};
 }
 
 mod struct_log;
 
 pub use struct_log::{
     init_file_struct_log, init_println_struct_log, init_struct_log_from_env, set_struct_logger,
-    struct_logger_enabled, struct_logger_set, StructLogSink, StructuredLogEntry,
+    struct_logger_enabled, struct_logger_set, LoggingField, StructLogSink, StructuredLogEntry,
 };
 
 mod text_log;
@@ -305,13 +305,13 @@ macro_rules! format_struct_args {
 #[macro_export]
 macro_rules! format_struct_arg {
     ($entry:ident, $acc:tt, $arg_name:ident=$arg:expr) => {
-        $entry.data(stringify!($arg_name), format!("{:?}", $arg));
+        $entry.data_mutref(stringify!($arg_name), format!("{:?}", $arg));
     };
     ($entry:ident, $acc:tt, $arg:ident) => {
-        $entry.data(stringify!($arg), format!("{:?}", $arg));
+        $entry.data_mutref(stringify!($arg), format!("{:?}", $arg));
     };
     ($entry:ident, $acc:tt, $arg:expr) => {
-        $entry.data($crate::format_index!($acc), format!("{:?}", $arg));
+        $entry.data_mutref($crate::format_index!($acc), format!("{:?}", $arg));
     };
 }
 

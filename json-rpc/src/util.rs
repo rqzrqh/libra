@@ -3,16 +3,20 @@
 
 /// Helper macros. Used to simplify adding new RpcHandler to Registry
 /// `registry` - name of local registry variable
-/// `method` - name of new rpc method
+/// `name`  - name for the rpc method
+/// `method` - method name of new rpc method
 /// `num_args` - number of method arguments
 macro_rules! register_rpc_method {
-    ($registry:expr, $method: expr, $num_args: expr) => {
+    ($registry:expr, $name: expr, $method: expr, $num_args: expr) => {
         $registry.insert(
-            stringify!($method).to_string(),
-            Box::new(move |service, parameters| {
+            $name.to_string(),
+            Box::new(move |service, request| {
                 Box::pin(async move {
-                    ensure!(parameters.len() == $num_args, "Invalid number of arguments");
-                    Ok(serde_json::to_value($method(service, parameters).await?)?)
+                    ensure!(
+                        request.params.len() == $num_args,
+                        "Invalid number of arguments"
+                    );
+                    Ok(serde_json::to_value($method(service, request).await?)?)
                 })
             }),
         );

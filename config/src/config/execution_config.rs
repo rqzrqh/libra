@@ -1,13 +1,13 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::config::RootPath;
-use anyhow::Result;
+use crate::config::{Error, RootPath};
 use libra_types::transaction::Transaction;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
     io::{Read, Write},
+    net::SocketAddr,
     path::PathBuf,
 };
 
@@ -19,6 +19,7 @@ pub struct ExecutionConfig {
     #[serde(skip)]
     pub genesis: Option<Transaction>,
     pub genesis_file_location: PathBuf,
+    pub service: ExecutionCorrectnessService,
 }
 
 impl std::fmt::Debug for ExecutionConfig {
@@ -33,7 +34,8 @@ impl std::fmt::Debug for ExecutionConfig {
             f,
             ", genesis_file_location: {:?} }}",
             self.genesis_file_location
-        )
+        )?;
+        self.service.fmt(f)
     }
 }
 
@@ -42,35 +44,63 @@ impl Default for ExecutionConfig {
         ExecutionConfig {
             genesis: None,
             genesis_file_location: PathBuf::new(),
+            service: ExecutionCorrectnessService::Thread,
         }
     }
 }
 
 impl ExecutionConfig {
-    pub fn load(&mut self, root_dir: &RootPath) -> Result<()> {
+    pub fn load(&mut self, root_dir: &RootPath) -> Result<(), Error> {
         if !self.genesis_file_location.as_os_str().is_empty() {
             let path = root_dir.full_path(&self.genesis_file_location);
-            let mut file = File::open(&path)?;
+            let mut file = File::open(&path).map_err(|e| Error::IO("genesis".into(), e))?;
             let mut buffer = vec![];
-            file.read_to_end(&mut buffer)?;
-            // TODO: update to use `Transaction::WriteSet` variant when ready.
-            self.genesis = Some(lcs::from_bytes(&buffer)?);
+            file.read_to_end(&mut buffer)
+                .map_err(|e| Error::IO("genesis".into(), e))?;
+            let data = lcs::from_bytes(&buffer).map_err(|e| Error::LCS("genesis", e))?;
+            self.genesis = Some(data);
         }
 
         Ok(())
     }
 
-    pub fn save(&mut self, root_dir: &RootPath) -> Result<()> {
+    pub fn save(&mut self, root_dir: &RootPath) -> Result<(), Error> {
         if let Some(genesis) = &self.genesis {
             if self.genesis_file_location.as_os_str().is_empty() {
                 self.genesis_file_location = PathBuf::from(GENESIS_DEFAULT);
             }
             let path = root_dir.full_path(&self.genesis_file_location);
-            let mut file = File::create(&path)?;
-            file.write_all(&lcs::to_bytes(&genesis)?)?;
+            let mut file = File::create(&path).map_err(|e| Error::IO("genesis".into(), e))?;
+            let data = lcs::to_bytes(&genesis).map_err(|e| Error::LCS("genesis", e))?;
+            file.write_all(&data)
+                .map_err(|e| Error::IO("genesis".into(), e))?;
         }
         Ok(())
     }
+}
+
+/// Defines how execution correctness should be run
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ExecutionCorrectnessService {
+    /// This runs execution correctness in the same thread as event processor.
+    Local,
+    /// This is the production, separate service approach
+    Process(RemoteExecutionService),
+    /// This runs safety rules in the same thread as event processor but data is passed through the
+    /// light weight RPC (serializer)
+    Serializer,
+    /// This instructs Consensus that this is an test model, where Consensus should take the
+    /// existing config, create a new process, and pass to it the config
+    SpawnedProcess(RemoteExecutionService),
+    /// This creates a separate thread to run execution correctness, it is similar to a fork / exec style
+    Thread,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteExecutionService {
+    pub server_address: SocketAddr,
 }
 
 #[cfg(test)]
@@ -94,7 +124,7 @@ mod test {
 
     #[test]
     fn test_some_and_load_genesis() {
-        let fake_genesis = Transaction::WriteSet(ChangeSet::new(
+        let fake_genesis = Transaction::WaypointWriteSet(ChangeSet::new(
             WriteSetMut::new(vec![]).freeze().unwrap(),
             vec![],
         ));

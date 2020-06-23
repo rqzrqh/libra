@@ -1,17 +1,18 @@
-import 0x0.LibraAccount;
-import 0x0.LBR;
-import 0x0.Libra;
+import 0x1.LibraAccount;
+import 0x1.LBR;
+import 0x1.Libra;
+import 0x1.Signer;
 
-main() {
+main(account: &signer) {
     let addr: address;
     let old_balance: u64;
 
-    addr = get_txn_sender();
-    old_balance = LibraAccount.balance<LBR.T>(copy(addr));
+    addr = Signer.address_of(copy(account));
+    old_balance = LibraAccount.balance<LBR.LBR>(copy(addr));
 
-    LibraAccount.deposit<LBR.T>(copy(addr), Libra.zero<LBR.T>());
+    LibraAccount.deposit_to<LBR.LBR>(move(account), Libra.zero<LBR.LBR>());
 
-    assert(LibraAccount.balance<LBR.T>(copy(addr)) == move(old_balance), 42);
+    assert(LibraAccount.balance<LBR.LBR>(copy(addr)) == move(old_balance), 42);
 
     return;
 }

@@ -2,40 +2,56 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    account::{Account, AccountData},
-    common_transactions::{add_validator_txn, register_validator_txn, rotate_consensus_pubkey_txn},
+    account::Account,
+    common_transactions::{
+        add_validator_txn, create_validator_account_txn, reconfigure_txn, set_validator_config_txn,
+    },
     executor::FakeExecutor,
 };
 use libra_types::{
+    account_config,
+    on_chain_config::new_epoch_event_key,
     transaction::TransactionStatus,
-    validator_set::ValidatorSet,
     vm_error::{StatusCode, VMStatus},
 };
+use transaction_builder::*;
 
 #[test]
 fn validator_add() {
     let mut executor = FakeExecutor::from_genesis_file();
-    let genesis_account = Account::new_association();
-    let new_validator = AccountData::new(1_000_000, 0);
+    let blessed_account = Account::new_blessed_tc();
+    let assoc_root_account = Account::new_association();
+    let validator_account = Account::new();
 
-    // create a FakeExecutor with a genesis from file
-    executor.add_account_data(&new_validator);
+    let txn = create_validator_account_txn(&assoc_root_account, &validator_account, 1);
+    executor.execute_and_apply(txn);
+
+    let mint_amount = 10_000_000;
+    executor.execute_and_apply(blessed_account.signed_script_txn(
+        encode_mint_script(
+            account_config::lbr_type_tag(),
+            &validator_account.address(),
+            vec![],
+            mint_amount,
+        ),
+        0,
+    ));
     executor.new_block();
 
-    let txn = register_validator_txn(
-        new_validator.account(),
+    let txn = set_validator_config_txn(
+        &validator_account,
+        vec![255; 32],
+        vec![254; 32],
         vec![],
-        vec![],
-        vec![],
-        vec![],
-        vec![],
+        vec![253; 32],
         vec![],
         0,
     );
     executor.execute_and_apply(txn);
-    let txn = add_validator_txn(&genesis_account, new_validator.account(), 1);
 
-    let output = executor.execute_transaction(txn);
+    let txn = add_validator_txn(&assoc_root_account, &validator_account, 2);
+    let output = executor.execute_and_apply(txn);
+
     assert_eq!(
         output.status(),
         &TransactionStatus::Keep(VMStatus::new(StatusCode::EXECUTED))
@@ -43,33 +59,45 @@ fn validator_add() {
     assert!(output
         .events()
         .iter()
-        .any(|e| e.key() == &ValidatorSet::change_event_key()));
+        .any(|e| e.key() == &new_epoch_event_key()));
 }
 
 #[test]
 fn validator_rotate_key() {
     let mut executor = FakeExecutor::from_genesis_file();
-    let genesis_account = Account::new_association();
-    let new_validator = AccountData::new(1_000_000, 0);
+    let blessed_account = Account::new_blessed_tc();
+    let assoc_root_account = Account::new_association();
+    let validator_account = Account::new();
+
+    let txn = create_validator_account_txn(&assoc_root_account, &validator_account, 1);
+    executor.execute_and_apply(txn);
+
+    let mint_amount = 10_000_000;
+    executor.execute_and_apply(blessed_account.signed_script_txn(
+        encode_mint_script(
+            account_config::lbr_type_tag(),
+            &validator_account.address(),
+            vec![],
+            mint_amount,
+        ),
+        0,
+    ));
     executor.new_block();
 
-    // create a FakeExecutor with a genesis from file
-    executor.add_account_data(&new_validator);
-
-    let txn = register_validator_txn(
-        new_validator.account(),
+    let txn = set_validator_config_txn(
+        &validator_account,
+        vec![255; 32],
+        vec![254; 32],
         vec![],
-        vec![],
-        vec![],
-        vec![],
-        vec![],
+        vec![253; 32],
         vec![],
         0,
     );
     executor.execute_and_apply(txn);
-    let txn = add_validator_txn(&genesis_account, new_validator.account(), 1);
 
-    let output = executor.execute_transaction(txn);
+    let txn = add_validator_txn(&assoc_root_account, &validator_account, 2);
+    let output = executor.execute_and_apply(txn);
+
     assert_eq!(
         output.status(),
         &TransactionStatus::Keep(VMStatus::new(StatusCode::EXECUTED))
@@ -77,13 +105,31 @@ fn validator_rotate_key() {
     assert!(output
         .events()
         .iter()
-        .any(|e| e.key() == &ValidatorSet::change_event_key()));
+        .any(|e| e.key() == &new_epoch_event_key()));
 
     executor.apply_write_set(output.write_set());
     executor.new_block();
 
-    let txn = rotate_consensus_pubkey_txn(new_validator.account(), vec![1], 1);
+    let txn = set_validator_config_txn(
+        &validator_account,
+        vec![251; 32],
+        vec![254; 32],
+        vec![],
+        vec![253; 32],
+        vec![],
+        1,
+    );
     let output = executor.execute_transaction(txn);
+    executor.apply_write_set(output.write_set());
+
+    assert_eq!(
+        output.status(),
+        &TransactionStatus::Keep(VMStatus::new(StatusCode::EXECUTED))
+    );
+
+    let txn = reconfigure_txn(&assoc_root_account, 3);
+    let output = executor.execute_transaction(txn);
+
     assert_eq!(
         output.status(),
         &TransactionStatus::Keep(VMStatus::new(StatusCode::EXECUTED))
@@ -92,5 +138,5 @@ fn validator_rotate_key() {
     assert!(output
         .events()
         .iter()
-        .any(|e| e.key() == &ValidatorSet::change_event_key()));
+        .any(|e| e.key() == &new_epoch_event_key()));
 }

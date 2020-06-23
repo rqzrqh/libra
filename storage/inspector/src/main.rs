@@ -5,11 +5,14 @@
 
 use anyhow::Result;
 use libra_logger::info;
-use libradb::{LibraDB, LibraDBTrait};
+use libradb::LibraDB;
 use std::path::PathBuf;
+use storage_interface::DbReader;
 use transaction_builder::get_transaction_name;
 
-use libra_types::{account_address::AccountAddress, account_config::AccountResource};
+use libra_types::{
+    account_address::AccountAddress, account_config::AccountResource, account_state::AccountState,
+};
 use std::convert::TryFrom;
 use structopt::StructOpt;
 
@@ -33,6 +36,8 @@ enum Command {
         #[structopt(parse(try_from_str))]
         address: AccountAddress,
     },
+    #[structopt(name = "list-accounts")]
+    ListAccounts,
 }
 
 /// Print out latest information stored in the DB.
@@ -52,12 +57,7 @@ fn print_head(db: &LibraDB) -> Result<()> {
 
     info!("Signatures: {:?}", si.latest_ledger_info.signatures());
 
-    info!(
-        "Current Validator Set: {}",
-        si.latest_validator_set
-            .as_ref()
-            .expect("Unable to determine validator set, DB incorrect")
-    );
+    info!("Current EpochState: {}", si.get_epoch_state());
 
     let backup = db.get_backup_handler();
     let iter = backup.get_account_iter(version)?;
@@ -119,6 +119,36 @@ fn list_txns(db: &LibraDB) {
     }
 }
 
+fn list_accounts(db: &LibraDB) {
+    let version = db
+        .get_latest_version()
+        .expect("Unable to get latest version");
+    let backup = db.get_backup_handler();
+    let iter = backup
+        .get_account_iter(version)
+        .expect("Unagle to get account iter");
+    let mut num_account = 0;
+    for res in iter {
+        match res {
+            Ok((_, blob)) => {
+                let accs = AccountState::try_from(&blob).expect("Failed to read AccountState");
+                let addr = accs
+                    .get_account_address()
+                    .expect("Could not get address from state");
+                match addr {
+                    Some(x) => {
+                        num_account += 1;
+                        println!("Address: {:?}", x);
+                    }
+                    None => println!("Skipping: No address for AccountState: {:?}", accs),
+                }
+            }
+            Err(x) => println!("Got err iterating through AccountStateBlobs {:?}", x),
+        }
+    }
+    info!("Total Accounts: {}", num_account);
+}
+
 fn main() {
     ::libra_logger::Logger::new().init();
 
@@ -134,7 +164,8 @@ fn main() {
     let log_dir = tempfile::tempdir().expect("Unable to get temp dir");
     info!("Opening DB at: {:?}, log at {:?}", p, log_dir.path());
 
-    let db = LibraDB::open(p, true, Some(log_dir.path())).expect("Unable to open LibraDB");
+    let db =
+        LibraDB::open(p, true /* readonly */, None /* pruner */).expect("Unable to open LibraDB");
     info!("DB opened successfully.");
 
     if let Some(cmd) = opt.cmd {
@@ -147,6 +178,9 @@ fn main() {
             }
             Command::PrintAccount { address } => {
                 print_account(&db, address);
+            }
+            Command::ListAccounts => {
+                list_accounts(&db);
             }
         }
     } else {

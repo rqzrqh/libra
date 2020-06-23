@@ -1,9 +1,8 @@
-// dep: tests/sources/stdlib/modules/transaction.move
-address 0x0:
+address 0x1 {
 
 // TODO: add optional timeout for reclaiming by original publisher once we have implemented time
 module Offer {
-  use 0x0::Transaction;
+    use 0x1::Transaction;
   // A wrapper around value `offered` that can be claimed by the address stored in `for`.
   resource struct T<Offered> { offered: Offered, for: address }
 
@@ -21,7 +20,7 @@ module Offer {
     let T<Offered> { offered, for } = move_from<T<Offered>>(offer_address);
     let sender = Transaction::sender();
     // fail with INSUFFICIENT_PRIVILEGES
-    Transaction::assert(sender == for || sender == offer_address, 11);
+    assert(sender == for || sender == offer_address, 11);
     offered
   }
 
@@ -35,4 +34,5 @@ module Offer {
   public fun address_of<Offered>(offer_address: address): address acquires T {
     borrow_global<T<Offered>>(offer_address).for
   }
+}
 }

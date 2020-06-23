@@ -10,7 +10,8 @@ use rand::{rngs::OsRng, RngCore};
 use serde::{de, ser, Deserialize, Serialize};
 use std::{convert::TryFrom, fmt};
 
-/// A struct that represents a globally unique id for an Event stream that a user can listen to.e
+/// A struct that represents a globally unique id for an Event stream that a user can listen to.
+/// By design, the lower part of EventKey is the same as account address.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "fuzzing", derive(Arbitrary))]
 pub struct EventKey([u8; EventKey::LENGTH]);
@@ -34,10 +35,18 @@ impl EventKey {
         self.0.to_vec()
     }
 
+    /// Get the account address part in this event key
+    pub fn get_creator_address(&self) -> AccountAddress {
+        let mut arr_bytes = [0u8; AccountAddress::LENGTH];
+        arr_bytes.copy_from_slice(&self.0[EventKey::LENGTH - AccountAddress::LENGTH..]);
+
+        AccountAddress::new(arr_bytes)
+    }
+
     #[cfg(feature = "fuzzing")]
     /// Create a random event key for testing
     pub fn random() -> Self {
-        let mut rng = OsRng::new().expect("can't access OsRng");
+        let mut rng = OsRng;
         let salt = rng.next_u64();
         EventKey::new_from_address(&AccountAddress::random(), salt)
     }
@@ -73,7 +82,7 @@ impl ser::Serialize for EventKey {
         // In order to preserve the Serde data model and help analysis tools,
         // make sure to wrap our value in a container with the same name
         // as the original type.
-        serializer.serialize_newtype_struct("EventKey", &self.0[..])
+        serializer.serialize_newtype_struct("EventKey", serde_bytes::Bytes::new(&self.0))
     }
 }
 

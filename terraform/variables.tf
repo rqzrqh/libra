@@ -199,9 +199,10 @@ variable "safety_rules_image_tag" {
   default     = "latest"
 }
 
-variable "restore_vol_id" {
-  default     = ""
-  description = "volume id to restore validator data from"
+variable "restore_vol_ids" {
+  type        = list(string)
+  default     = []
+  description = "volume ids to restore validator data from"
 }
 
 variable "permissions_boundary_policy" {
@@ -215,6 +216,12 @@ variable "override_image_tags" {
   description = "List of Docker image tags to be used in record and replay test, overrides image_tag"
 }
 
+variable "override_safety_rules_image_tags" {
+  type        = list(string)
+  default     = []
+  description = "Similar to override_image_tags but for safety rules, overrides safety_rules_image_tag"
+}
+
 variable "vault_type" {
   description = "EC2 instance type of Vault instances"
   default     = "c5.large"
@@ -223,4 +230,28 @@ variable "vault_type" {
 variable "safety_rules_use_vault" {
   description = "Configure safety-rules to use Vault as the backend"
   default     = false
+}
+
+variable "persist_libra_data" {
+  type        = bool
+  default     = true
+  description = "Whether to persist libra data on validator and fullnode between restarts"
+}
+
+variable "override_validator_ips" {
+  type        = list(string)
+  default     = []
+  description = "List of private IPs for validators"
+}
+
+variable "override_fullnode_ips" {
+  type        = list(string)
+  default     = []
+  description = "List of private IPs for fullnodes"
+}
+
+variable "override_faucet_ip" {
+  type        = string
+  default     = ""
+  description = "Private IP for faucet"
 }

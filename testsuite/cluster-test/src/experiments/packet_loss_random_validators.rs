@@ -8,8 +8,8 @@
 /// in the cluster after the given duration
 use crate::{
     cluster::Cluster,
-    effects::{Action, PacketLoss, RemoveNetworkEffects},
-    experiments::{Context, Experiment},
+    effects::{self, packet_loss::PacketLoss},
+    experiments::{Context, Experiment, ExperimentParam},
     instance::Instance,
 };
 
@@ -22,7 +22,6 @@ pub struct PacketLossRandomValidators {
     percent: f32,
     duration: Duration,
 }
-use crate::experiments::ExperimentParam;
 use tokio::time;
 
 #[derive(StructOpt, Debug)]
@@ -67,17 +66,15 @@ impl ExperimentParam for PacketLossRandomValidatorsParams {
 #[async_trait]
 impl Experiment for PacketLossRandomValidators {
     async fn run(&mut self, _context: &mut Context<'_>) -> anyhow::Result<()> {
-        let mut instances = vec![];
-        for instance in self.instances.iter() {
-            let packet_loss = PacketLoss::new(instance.clone(), self.percent);
-            packet_loss.apply().await?;
-            instances.push(packet_loss)
-        }
+        let mut effects: Vec<_> = self
+            .instances
+            .clone()
+            .into_iter()
+            .map(|instance| PacketLoss::new(instance, self.percent))
+            .collect();
+        effects::activate_all(&mut effects).await?;
         time::delay_for(self.duration).await;
-        for instance in self.instances.iter() {
-            let remove_network_effects = RemoveNetworkEffects::new(instance.clone());
-            remove_network_effects.apply().await?;
-        }
+        effects::deactivate_all(&mut effects).await?;
         Ok(())
     }
 

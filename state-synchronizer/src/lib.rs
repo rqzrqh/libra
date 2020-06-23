@@ -7,15 +7,10 @@
 //! Used for node restarts, network partitions, full node syncs
 #![recursion_limit = "1024"]
 
-#[macro_use]
-extern crate prometheus;
-
 use executor_types::ExecutedTrees;
 use libra_types::{
-    account_address::AccountAddress, epoch_info::EpochInfo, ledger_info::LedgerInfoWithSignatures,
-    validator_verifier::ValidatorVerifier,
+    account_address::AccountAddress, epoch_state::EpochState, ledger_info::LedgerInfoWithSignatures,
 };
-use std::sync::Arc;
 pub use synchronizer::{StateSyncClient, StateSynchronizer};
 
 mod chunk_request;
@@ -42,26 +37,20 @@ pub struct SynchronizerState {
     pub synced_trees: ExecutedTrees,
     // Corresponds to the current epoch if the highest local LI is in the middle of the epoch,
     // or the next epoch if the highest local LI is the final LI in the current epoch.
-    pub trusted_epoch: EpochInfo,
+    pub trusted_epoch: EpochState,
 }
 
 impl SynchronizerState {
     pub fn new(
         highest_local_li: LedgerInfoWithSignatures,
         synced_trees: ExecutedTrees,
-        current_verifier: ValidatorVerifier,
+        current_epoch_state: EpochState,
     ) -> Self {
-        let current_epoch = highest_local_li.ledger_info().epoch();
-        let trusted_epoch = match highest_local_li.ledger_info().next_validator_set() {
-            Some(validator_set) => EpochInfo {
-                epoch: current_epoch + 1,
-                verifier: Arc::new(validator_set.into()),
-            },
-            None => EpochInfo {
-                epoch: current_epoch,
-                verifier: Arc::new(current_verifier),
-            },
-        };
+        let trusted_epoch = highest_local_li
+            .ledger_info()
+            .next_epoch_state()
+            .cloned()
+            .unwrap_or(current_epoch_state);
         SynchronizerState {
             highest_local_li,
             synced_trees,
@@ -76,10 +65,6 @@ impl SynchronizerState {
 
     pub fn epoch(&self) -> u64 {
         self.trusted_epoch.epoch
-    }
-
-    pub fn verifier(&self) -> &ValidatorVerifier {
-        &self.trusted_epoch.verifier
     }
 }
 

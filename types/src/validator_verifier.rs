@@ -1,13 +1,16 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{account_address::AccountAddress, validator_set::ValidatorSet};
+use crate::{account_address::AccountAddress, on_chain_config::ValidatorSet};
 use anyhow::{ensure, Result};
 use libra_crypto::{
     ed25519::{Ed25519PublicKey, Ed25519Signature},
     HashValue, VerifyingKey,
 };
 use mirai_annotations::*;
+#[cfg(any(test, feature = "fuzzing"))]
+use proptest_derive::Arbitrary;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt};
 use thiserror::Error;
 
@@ -41,7 +44,8 @@ pub enum VerifyError {
 }
 
 /// Helper struct to manage validator information for validation
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
 pub struct ValidatorConsensusInfo {
     public_key: Ed25519PublicKey,
     voting_power: u64,
@@ -54,20 +58,13 @@ impl ValidatorConsensusInfo {
             voting_power,
         }
     }
-
-    pub fn public_key(&self) -> &Ed25519PublicKey {
-        &self.public_key
-    }
-
-    pub fn voting_power(&self) -> u64 {
-        self.voting_power
-    }
 }
 
 /// Supports validation of signatures for known authors with individual voting powers. This struct
 /// can be used for all signature verification operations including block and network signature
 /// verification, respectively.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
 pub struct ValidatorVerifier {
     /// An ordered map of each validator's on-chain account address to its pubkeys
     /// and voting power.
@@ -279,16 +276,19 @@ impl fmt::Display for ValidatorVerifier {
 
 impl From<&ValidatorSet> for ValidatorVerifier {
     fn from(validator_set: &ValidatorSet) -> Self {
-        ValidatorVerifier::new(validator_set.iter().fold(BTreeMap::new(), |mut map, key| {
-            map.insert(
-                key.account_address().clone(),
-                ValidatorConsensusInfo::new(
-                    key.consensus_public_key().clone(),
-                    key.consensus_voting_power(),
-                ),
-            );
-            map
-        }))
+        ValidatorVerifier::new(validator_set.payload().iter().fold(
+            BTreeMap::new(),
+            |mut map, validator| {
+                map.insert(
+                    *validator.account_address(),
+                    ValidatorConsensusInfo::new(
+                        validator.consensus_public_key().clone(),
+                        validator.consensus_voting_power(),
+                    ),
+                );
+                map
+            },
+        ))
     }
 }
 
@@ -299,7 +299,7 @@ impl From<&ValidatorVerifier> for ValidatorSet {
             verifier
                 .get_ordered_account_addresses_iter()
                 .map(|addr| {
-                    crate::validator_info::ValidatorInfo::new_with_random_network_keys(
+                    crate::validator_info::ValidatorInfo::new_with_test_network_keys(
                         addr,
                         verifier.get_public_key(&addr).unwrap(),
                         verifier.get_voting_power(&addr).unwrap(),

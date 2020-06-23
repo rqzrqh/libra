@@ -1,0 +1,160 @@
+Move prover returns: exiting with boogie verification errors
+error: function does not abort under this condition
+
+    ┌── tests/sources/functional/aborts_if.move:35:9 ───
+    │
+ 35 │         aborts_if _x <= _y;
+    │         ^^^^^^^^^^^^^^^^^^^
+    │
+    =     at tests/sources/functional/aborts_if.move:32:5: abort2_incorrect (entry)
+    =     at tests/sources/functional/aborts_if.move:32:5: abort2_incorrect (exit)
+    =         _x = <redacted>,
+    =         _y = <redacted>
+
+error: function does not abort under this condition
+
+    ┌── tests/sources/functional/aborts_if.move:51:9 ───
+    │
+ 51 │         aborts_if x <= y;
+    │         ^^^^^^^^^^^^^^^^^
+    │
+    =     at tests/sources/functional/aborts_if.move:47:5: abort4_incorrect (entry)
+    =     at tests/sources/functional/aborts_if.move:48:9: abort4_incorrect
+    =         x = <redacted>,
+    =         y = <redacted>
+    =     at tests/sources/functional/aborts_if.move:47:5: abort4_incorrect (exit)
+
+error: abort not covered by any of the `aborts_if` clauses
+
+    ┌── tests/sources/functional/aborts_if.move:55:5 ───
+    │
+ 55 │ ╭     fun abort5_incorrect(x: u64, y: u64) {
+ 56 │ │         if (x <= y) abort 1
+ 57 │ │     }
+    │ ╰─────^
+    ·
+ 56 │         if (x <= y) abort 1
+    │         ------------------- abort happened here
+    │
+    =     at tests/sources/functional/aborts_if.move:55:5: abort5_incorrect (entry)
+    =     at tests/sources/functional/aborts_if.move:56:9: abort5_incorrect (ABORTED)
+    =         x = <redacted>,
+    =         y = <redacted>
+
+error: function does not abort under this condition
+
+    ┌── tests/sources/functional/aborts_if.move:67:9 ───
+    │
+ 67 │         aborts_if x <= y;
+    │         ^^^^^^^^^^^^^^^^^
+    │
+    =     at tests/sources/functional/aborts_if.move:63:5: abort6_incorrect (entry)
+    =     at tests/sources/functional/aborts_if.move:64:9: abort6_incorrect
+    =         x = <redacted>,
+    =         y = <redacted>
+    =     at tests/sources/functional/aborts_if.move:63:5: abort6_incorrect (exit)
+
+error: function does not abort under this condition
+
+     ┌── tests/sources/functional/aborts_if.move:150:9 ───
+     │
+ 150 │         aborts_if x == 4;
+     │         ^^^^^^^^^^^^^^^^^
+     │
+     =     at tests/sources/functional/aborts_if.move:144:5: abort_at_2_or_3_spec_incorrect (entry)
+     =     at tests/sources/functional/aborts_if.move:145:38: abort_at_2_or_3_spec_incorrect
+     =         x = <redacted>,
+     =         $t1 = <redacted>
+     =     at tests/sources/functional/aborts_if.move:144:5: abort_at_2_or_3_spec_incorrect (exit)
+
+error: abort not covered by any of the `aborts_if` clauses
+
+     ┌── tests/sources/functional/aborts_if.move:153:5 ───
+     │
+ 153 │ ╭     fun abort_at_2_or_3_strict_incorrect(x: u64) {
+ 154 │ │         if (x == 2 || x == 3) abort 1;
+ 155 │ │     }
+     │ ╰─────^
+     ·
+ 154 │         if (x == 2 || x == 3) abort 1;
+     │                                      - abort happened here
+     │
+     =     at tests/sources/functional/aborts_if.move:153:5: abort_at_2_or_3_strict_incorrect (entry)
+     =     at tests/sources/functional/aborts_if.move:154:38: abort_at_2_or_3_strict_incorrect (ABORTED)
+     =         x = <redacted>,
+     =         $t1 = <redacted>
+
+error: abort not covered by any of the `aborts_if` clauses
+
+     ┌── tests/sources/functional/aborts_if.move:135:5 ───
+     │
+ 135 │ ╭     fun abort_at_2_or_3_total_incorrect(x: u64) {
+ 136 │ │         if (x == 2 || x == 3) abort 1;
+ 137 │ │     }
+     │ ╰─────^
+     ·
+ 136 │         if (x == 2 || x == 3) abort 1;
+     │                                      - abort happened here
+     │
+     =     at tests/sources/functional/aborts_if.move:135:5: abort_at_2_or_3_total_incorrect (entry)
+     =     at tests/sources/functional/aborts_if.move:136:38: abort_at_2_or_3_total_incorrect (ABORTED)
+     =         x = <redacted>,
+     =         $t1 = <redacted>
+
+error: function does not abort under this condition
+
+    ┌── tests/sources/functional/aborts_if.move:90:9 ───
+    │
+ 90 │         aborts_if x == y;
+    │         ^^^^^^^^^^^^^^^^^
+    │
+    =     at tests/sources/functional/aborts_if.move:85:5: multi_abort2_incorrect (entry)
+    =     at tests/sources/functional/aborts_if.move:86:9: multi_abort2_incorrect
+    =         x = <redacted>,
+    =         y = <redacted>
+    =     at tests/sources/functional/aborts_if.move:85:5: multi_abort2_incorrect (exit)
+
+error: abort not covered by any of the `aborts_if` clauses
+
+    ┌── tests/sources/functional/aborts_if.move:94:5 ───
+    │
+ 94 │ ╭     fun multi_abort3_incorrect(_x: u64, _y: u64) {
+ 95 │ │         abort 1
+ 96 │ │     }
+    │ ╰─────^
+    ·
+ 95 │         abort 1
+    │         ------- abort happened here
+    │
+    =     at tests/sources/functional/aborts_if.move:94:5: multi_abort3_incorrect (entry)
+    =     at tests/sources/functional/aborts_if.move:95:9: multi_abort3_incorrect (ABORTED)
+    =         _x = <redacted>,
+    =         _y = <redacted>
+
+error: function does not abort under this condition
+
+     ┌── tests/sources/functional/aborts_if.move:118:9 ───
+     │
+ 118 │         aborts_if true;
+     │         ^^^^^^^^^^^^^^^
+     │
+     =     at tests/sources/functional/aborts_if.move:112:5: multi_abort5_incorrect (entry)
+     =     at tests/sources/functional/aborts_if.move:115:10: multi_abort5_incorrect
+     =         x = <redacted>
+     =     at tests/sources/functional/aborts_if.move:113:9: multi_abort5_incorrect
+     =     at tests/sources/functional/aborts_if.move:112:5: multi_abort5_incorrect (exit)
+
+error: abort not covered by any of the `aborts_if` clauses
+
+     ┌── tests/sources/functional/aborts_if.move:176:9 ───
+     │
+ 176 │         succeeds_if x == 2;
+     │         ^^^^^^^^^^^^^^^^^^^
+     ·
+ 173 │         if (x == 2 || x == 3) abort 1;
+     │                                      - abort happened here
+     │
+     =     at tests/sources/functional/aborts_if.move:172:5: succeed_incorrect (entry)
+     =     at tests/sources/functional/aborts_if.move:173:38: succeed_incorrect (ABORTED)
+     =         x = <redacted>,
+     =         $t1 = <redacted>

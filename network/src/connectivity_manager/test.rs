@@ -4,13 +4,15 @@
 use super::*;
 use crate::{
     peer::DisconnectReason,
-    peer_manager::{conn_status_channel, ConnectionRequest},
+    peer_manager::{conn_notifs_channel, ConnectionRequest},
 };
 use channel::{libra_channel, message_queues::QueueStyle};
 use core::str::FromStr;
 use futures::SinkExt;
-use libra_crypto::{ed25519::compat, test_utils::TEST_SEED, x25519};
+use libra_config::{config::RoleType, network_id::NetworkId};
+use libra_crypto::{test_utils::TEST_SEED, x25519, Uniform};
 use libra_logger::info;
+use libra_network_address::NetworkAddress;
 use rand::{rngs::StdRng, SeedableRng};
 use std::{io, num::NonZeroUsize};
 use tokio::runtime::Runtime;
@@ -19,17 +21,18 @@ use tokio_retry::strategy::FixedInterval;
 fn setup_conn_mgr(
     rt: &mut Runtime,
     eligible_peers: Vec<PeerId>,
-    seed_peers: HashMap<PeerId, Vec<Multiaddr>>,
+    seed_peers: HashMap<PeerId, Vec<NetworkAddress>>,
 ) -> (
     libra_channel::Receiver<PeerId, ConnectionRequest>,
-    conn_status_channel::Sender,
+    conn_notifs_channel::Sender,
     channel::Sender<ConnectivityRequest>,
     channel::Sender<()>,
 ) {
-    let self_peer_id = PeerId::random();
+    let network_context =
+        NetworkContext::new(NetworkId::Validator, RoleType::Validator, PeerId::random());
     let (connection_reqs_tx, connection_reqs_rx) =
         libra_channel::new(QueueStyle::FIFO, NonZeroUsize::new(1).unwrap(), None);
-    let (connection_notifs_tx, connection_notifs_rx) = conn_status_channel::new();
+    let (connection_notifs_tx, connection_notifs_rx) = conn_notifs_channel::new();
     let (conn_mgr_reqs_tx, conn_mgr_reqs_rx) = channel::new_test(0);
     let (ticker_tx, ticker_rx) = channel::new_test(0);
     let mut rng = StdRng::from_seed(TEST_SEED);
@@ -37,19 +40,14 @@ fn setup_conn_mgr(
     let eligible_peers = eligible_peers
         .into_iter()
         .map(|peer_id| {
-            let (_, signing_public_key) = compat::generate_keypair(&mut rng);
-            let (_, identity_public_key) = x25519::compat::generate_keypair(&mut rng);
-            let pubkeys = NetworkPublicKeys {
-                identity_public_key,
-                signing_public_key,
-            };
-            (peer_id, pubkeys)
+            let identity_public_key = x25519::PrivateKey::generate(&mut rng).public_key();
+            (peer_id, identity_public_key)
         })
         .collect::<HashMap<_, _>>();
 
     let conn_mgr = {
         ConnectivityManager::new(
-            self_peer_id,
+            network_context,
             Arc::new(RwLock::new(eligible_peers)),
             seed_peers,
             ticker_rx,
@@ -69,18 +67,11 @@ fn setup_conn_mgr(
     )
 }
 
-fn gen_peer() -> (PeerId, NetworkPublicKeys) {
+fn gen_peer() -> (PeerId, x25519::PublicKey) {
     let peer_id = PeerId::random();
     let mut rng = StdRng::from_seed(TEST_SEED);
-    let (_, signing_public_key) = compat::generate_keypair(&mut rng);
-    let (_, identity_public_key) = x25519::compat::generate_keypair(&mut rng);
-    (
-        peer_id,
-        NetworkPublicKeys {
-            identity_public_key,
-            signing_public_key,
-        },
-    )
+    let identity_public_key = x25519::PrivateKey::generate(&mut rng).public_key();
+    (peer_id, identity_public_key)
 }
 
 async fn get_dial_queue_size(conn_mgr_reqs_tx: &mut channel::Sender<ConnectivityRequest>) -> usize {
@@ -93,9 +84,9 @@ async fn get_dial_queue_size(conn_mgr_reqs_tx: &mut channel::Sender<Connectivity
 }
 
 async fn send_notification_await_delivery(
-    connection_notifs_tx: &mut conn_status_channel::Sender,
+    connection_notifs_tx: &mut conn_notifs_channel::Sender,
     peer_id: PeerId,
-    notif: peer_manager::ConnectionStatusNotification,
+    notif: peer_manager::ConnectionNotification,
 ) {
     let (delivered_tx, delivered_rx) = oneshot::channel();
     connection_notifs_tx
@@ -106,9 +97,9 @@ async fn send_notification_await_delivery(
 
 async fn expect_disconnect_request(
     connection_reqs_rx: &mut libra_channel::Receiver<PeerId, ConnectionRequest>,
-    connection_notifs_tx: &mut conn_status_channel::Sender,
+    connection_notifs_tx: &mut conn_notifs_channel::Sender,
     peer_id: PeerId,
-    address: Multiaddr,
+    address: NetworkAddress,
     result: Result<(), PeerManagerError>,
 ) {
     let success = result.is_ok();
@@ -125,7 +116,7 @@ async fn expect_disconnect_request(
         send_notification_await_delivery(
             connection_notifs_tx,
             peer_id,
-            peer_manager::ConnectionStatusNotification::LostPeer(
+            peer_manager::ConnectionNotification::LostPeer(
                 peer_id,
                 address,
                 DisconnectReason::Requested,
@@ -137,10 +128,10 @@ async fn expect_disconnect_request(
 
 async fn expect_dial_request(
     connection_reqs_rx: &mut libra_channel::Receiver<PeerId, ConnectionRequest>,
-    connection_notifs_tx: &mut conn_status_channel::Sender,
+    connection_notifs_tx: &mut conn_notifs_channel::Sender,
     conn_mgr_reqs_tx: &mut channel::Sender<ConnectivityRequest>,
     peer_id: PeerId,
-    address: Multiaddr,
+    address: NetworkAddress,
     result: Result<(), PeerManagerError>,
 ) {
     let success = result.is_ok();
@@ -162,7 +153,7 @@ async fn expect_dial_request(
         send_notification_await_delivery(
             connection_notifs_tx,
             peer_id,
-            peer_manager::ConnectionStatusNotification::NewPeer(peer_id, address),
+            peer_manager::ConnectionNotification::NewPeer(peer_id, address),
         )
         .await;
     }
@@ -184,7 +175,11 @@ fn connect_to_seeds_on_startup() {
     ::libra_logger::Logger::new().environment_only(true).init();
     let mut rt = Runtime::new().unwrap();
     let seed_peer_id = PeerId::random();
-    let seed_addr = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9090").unwrap();
+    let seed_addr = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9090").unwrap();
+    let seed_addr = seed_addr.append_prod_protos(
+        x25519::PrivateKey::generate_for_testing().public_key(),
+        libra_config::config::HANDSHAKE_VERSION,
+    );
     let seed_peers = vec![(seed_peer_id, vec![seed_addr.clone()])]
         .into_iter()
         .collect::<HashMap<_, _>>();
@@ -213,8 +208,11 @@ fn connect_to_seeds_on_startup() {
         info!("Sending same address of seed peer");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                seed_peer_id,
-                vec![seed_addr.clone()],
+                DiscoverySource::Gossip,
+                [(seed_peer_id, vec![seed_addr.clone()])]
+                    .iter()
+                    .cloned()
+                    .collect(),
             ))
             .await
             .unwrap();
@@ -223,13 +221,16 @@ fn connect_to_seeds_on_startup() {
         info!("Sending tick to trigger connectivity check");
         ticker_tx.send(()).await.unwrap();
 
-        let new_seed_addr = Multiaddr::from_str("/ip4/127.0.1.1/tcp/8080").unwrap();
+        let new_seed_addr = NetworkAddress::from_str("/ip4/127.0.1.1/tcp/8080").unwrap();
         // Send new address of seed peer.
         info!("Sending new address of seed peer");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                seed_peer_id,
-                vec![new_seed_addr.clone()],
+                DiscoverySource::Gossip,
+                [(seed_peer_id, vec![new_seed_addr.clone()])]
+                    .iter()
+                    .cloned()
+                    .collect(),
             ))
             .await
             .unwrap();
@@ -243,7 +244,7 @@ fn connect_to_seeds_on_startup() {
         send_notification_await_delivery(
             &mut connection_notifs_tx,
             seed_peer_id,
-            peer_manager::ConnectionStatusNotification::LostPeer(
+            peer_manager::ConnectionNotification::LostPeer(
                 seed_peer_id,
                 seed_addr.clone(),
                 DisconnectReason::ConnectionLost,
@@ -300,14 +301,17 @@ fn addr_change() {
 
     // Fake peer manager and discovery.
     let f_peer_mgr = async move {
-        let other_address = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9090").unwrap();
+        let other_address = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9090").unwrap();
 
         // Send address of other peer.
         info!("Sending address of other peer");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                other_peer_id,
-                vec![other_address.clone()],
+                DiscoverySource::Gossip,
+                [(other_peer_id, vec![other_address.clone()])]
+                    .iter()
+                    .cloned()
+                    .collect(),
             ))
             .await
             .unwrap();
@@ -335,8 +339,11 @@ fn addr_change() {
         info!("Sending same address of other peer");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                other_peer_id,
-                vec![other_address.clone()],
+                DiscoverySource::Gossip,
+                [(other_peer_id, vec![other_address.clone()])]
+                    .iter()
+                    .cloned()
+                    .collect(),
             ))
             .await
             .unwrap();
@@ -345,13 +352,16 @@ fn addr_change() {
         info!("Sending tick to trigger connectivity check");
         ticker_tx.send(()).await.unwrap();
 
-        let other_address_new = Multiaddr::from_str("/ip4/127.0.1.1/tcp/8080").unwrap();
+        let other_address_new = NetworkAddress::from_str("/ip4/127.0.1.1/tcp/8080").unwrap();
         // Send new address of other peer.
         info!("Sending new address of other peer");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                other_peer_id,
-                vec![other_address_new.clone()],
+                DiscoverySource::Gossip,
+                [(other_peer_id, vec![other_address_new.clone()])]
+                    .iter()
+                    .cloned()
+                    .collect(),
             ))
             .await
             .unwrap();
@@ -365,7 +375,7 @@ fn addr_change() {
         send_notification_await_delivery(
             &mut connection_notifs_tx,
             other_peer_id,
-            peer_manager::ConnectionStatusNotification::LostPeer(
+            peer_manager::ConnectionNotification::LostPeer(
                 other_peer_id,
                 other_address,
                 DisconnectReason::ConnectionLost,
@@ -405,14 +415,17 @@ fn lost_connection() {
 
     // Fake peer manager and discovery.
     let f_peer_mgr = async move {
-        let other_address = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9090").unwrap();
+        let other_address = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9090").unwrap();
 
         // Send address of other peer.
         info!("Sending address of other peer");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                other_peer_id,
-                vec![other_address.clone()],
+                DiscoverySource::Gossip,
+                [(other_peer_id, vec![other_address.clone()])]
+                    .iter()
+                    .cloned()
+                    .collect(),
             ))
             .await
             .unwrap();
@@ -438,7 +451,7 @@ fn lost_connection() {
         send_notification_await_delivery(
             &mut connection_notifs_tx,
             other_peer_id,
-            peer_manager::ConnectionStatusNotification::LostPeer(
+            peer_manager::ConnectionNotification::LostPeer(
                 other_peer_id,
                 other_address.clone(),
                 DisconnectReason::ConnectionLost,
@@ -478,14 +491,17 @@ fn disconnect() {
         setup_conn_mgr(&mut rt, eligible_peers, seed_peers);
 
     let events_f = async move {
-        let other_address = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9090").unwrap();
+        let other_address = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9090").unwrap();
 
         // Send address of other peer.
         info!("Sending address of other peer");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                other_peer_id,
-                vec![other_address.clone()],
+                DiscoverySource::Gossip,
+                [(other_peer_id, vec![other_address.clone()])]
+                    .iter()
+                    .cloned()
+                    .collect(),
             ))
             .await
             .unwrap();
@@ -544,14 +560,17 @@ fn retry_on_failure() {
         setup_conn_mgr(&mut rt, eligible_peers, seed_peers);
 
     let events_f = async move {
-        let other_address = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9090").unwrap();
+        let other_address = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9090").unwrap();
 
         // Send address of other peer.
         info!("Sending address of other peer");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                other_peer_id,
-                vec![other_address.clone()],
+                DiscoverySource::Gossip,
+                [(other_peer_id, vec![other_address.clone()])]
+                    .iter()
+                    .cloned()
+                    .collect(),
             ))
             .await
             .unwrap();
@@ -647,14 +666,17 @@ fn no_op_requests() {
         setup_conn_mgr(&mut rt, eligible_peers, seed_peers);
 
     let events_f = async move {
-        let other_address = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9090").unwrap();
+        let other_address = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9090").unwrap();
 
         // Send address of other peer.
         info!("Sending address of other peer");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                other_peer_id,
-                vec![other_address.clone()],
+                DiscoverySource::Gossip,
+                [(other_peer_id, vec![other_address.clone()])]
+                    .iter()
+                    .cloned()
+                    .collect(),
             ))
             .await
             .unwrap();
@@ -680,10 +702,7 @@ fn no_op_requests() {
         send_notification_await_delivery(
             &mut connection_notifs_tx,
             other_peer_id,
-            peer_manager::ConnectionStatusNotification::NewPeer(
-                other_peer_id,
-                other_address.clone(),
-            ),
+            peer_manager::ConnectionNotification::NewPeer(other_peer_id, other_address.clone()),
         )
         .await;
 
@@ -717,7 +736,7 @@ fn no_op_requests() {
         send_notification_await_delivery(
             &mut connection_notifs_tx,
             other_peer_id,
-            peer_manager::ConnectionStatusNotification::LostPeer(
+            peer_manager::ConnectionNotification::LostPeer(
                 other_peer_id,
                 other_address.clone(),
                 DisconnectReason::ConnectionLost,
@@ -745,9 +764,9 @@ fn backoff_on_failure() {
 
     let events_f = async move {
         let (peer_a, peer_a_keys) = gen_peer();
-        let peer_a_address = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9090").unwrap();
+        let peer_a_address = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9090").unwrap();
         let (peer_b, peer_b_keys) = gen_peer();
-        let peer_b_address = Multiaddr::from_str("/ip4/127.0.0.1/tcp/8080").unwrap();
+        let peer_b_address = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/8080").unwrap();
 
         info!("Sending list of eligible peers");
         conn_mgr_reqs_tx
@@ -764,8 +783,11 @@ fn backoff_on_failure() {
         info!("Sending address of peer a");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                peer_a,
-                vec![peer_a_address.clone()],
+                DiscoverySource::Gossip,
+                [(peer_a, vec![peer_a_address.clone()])]
+                    .iter()
+                    .cloned()
+                    .collect(),
             ))
             .await
             .unwrap();
@@ -773,8 +795,11 @@ fn backoff_on_failure() {
         info!("Sending address of peer b");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                peer_b,
-                vec![peer_b_address.clone()],
+                DiscoverySource::Gossip,
+                [(peer_b, vec![peer_b_address.clone()])]
+                    .iter()
+                    .cloned()
+                    .collect(),
             ))
             .await
             .unwrap();
@@ -784,7 +809,7 @@ fn backoff_on_failure() {
         send_notification_await_delivery(
             &mut connection_notifs_tx,
             peer_b,
-            peer_manager::ConnectionStatusNotification::NewPeer(peer_b, peer_b_address.clone()),
+            peer_manager::ConnectionNotification::NewPeer(peer_b, peer_b_address.clone()),
         )
         .await;
 
@@ -834,15 +859,21 @@ fn multiple_addrs_basic() {
     let f_peer_mgr = async move {
         // For this test, the peer advertises multiple listen addresses. Assume
         // that the first addr fails to connect while the second addr succeeds.
-        let other_addr_1 = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9091").unwrap();
-        let other_addr_2 = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9092").unwrap();
+        let other_addr_1 = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9091").unwrap();
+        let other_addr_2 = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9092").unwrap();
 
         // Send addresses of other peer.
         info!("Sending address of other peer");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                other_peer_id,
-                vec![other_addr_1.clone(), other_addr_2.clone()],
+                DiscoverySource::Gossip,
+                [(
+                    other_peer_id,
+                    vec![other_addr_1.clone(), other_addr_2.clone()],
+                )]
+                .iter()
+                .cloned()
+                .collect(),
             ))
             .await
             .unwrap();
@@ -901,15 +932,21 @@ fn multiple_addrs_wrapping() {
 
     // Fake peer manager and discovery.
     let f_peer_mgr = async move {
-        let other_addr_1 = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9091").unwrap();
-        let other_addr_2 = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9092").unwrap();
+        let other_addr_1 = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9091").unwrap();
+        let other_addr_2 = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9092").unwrap();
 
         // Send addresses of other peer.
         info!("Sending address of other peer");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                other_peer_id,
-                vec![other_addr_1.clone(), other_addr_2.clone()],
+                DiscoverySource::Gossip,
+                [(
+                    other_peer_id,
+                    vec![other_addr_1.clone(), other_addr_2.clone()],
+                )]
+                .iter()
+                .cloned()
+                .collect(),
             ))
             .await
             .unwrap();
@@ -984,20 +1021,26 @@ fn multiple_addrs_shrinking() {
 
     // Fake peer manager and discovery.
     let f_peer_mgr = async move {
-        let other_addr_1 = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9091").unwrap();
-        let other_addr_2 = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9092").unwrap();
-        let other_addr_3 = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9092").unwrap();
+        let other_addr_1 = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9091").unwrap();
+        let other_addr_2 = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9092").unwrap();
+        let other_addr_3 = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9092").unwrap();
 
         // Send addresses of other peer.
         info!("Sending address of other peer");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                other_peer_id,
-                vec![
-                    other_addr_1.clone(),
-                    other_addr_2.clone(),
-                    other_addr_3.clone(),
-                ],
+                DiscoverySource::Gossip,
+                [(
+                    other_peer_id,
+                    vec![
+                        other_addr_1.clone(),
+                        other_addr_2.clone(),
+                        other_addr_3.clone(),
+                    ],
+                )]
+                .iter()
+                .cloned()
+                .collect(),
             ))
             .await
             .unwrap();
@@ -1020,15 +1063,21 @@ fn multiple_addrs_shrinking() {
         )
         .await;
 
-        let other_addr_4 = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9094").unwrap();
-        let other_addr_5 = Multiaddr::from_str("/ip4/127.0.0.1/tcp/9095").unwrap();
+        let other_addr_4 = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9094").unwrap();
+        let other_addr_5 = NetworkAddress::from_str("/ip4/127.0.0.1/tcp/9095").unwrap();
 
         // The peer issues a new, smaller set of listen addrs.
         info!("Sending address of other peer");
         conn_mgr_reqs_tx
             .send(ConnectivityRequest::UpdateAddresses(
-                other_peer_id,
-                vec![other_addr_4.clone(), other_addr_5.clone()],
+                DiscoverySource::Gossip,
+                [(
+                    other_peer_id,
+                    vec![other_addr_4.clone(), other_addr_5.clone()],
+                )]
+                .iter()
+                .cloned()
+                .collect(),
             ))
             .await
             .unwrap();

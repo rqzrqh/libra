@@ -12,15 +12,15 @@
 //! [`NetworkProvider`] actor. Inbound RPC requests are forwarded to the appropriate
 //! handler, determined using the protocol negotiated on the RPC substream.
 use crate::{
-    counters,
+    constants, counters,
     peer::{Peer, PeerHandle, PeerNotification},
-    peer_manager::ConnectionNotification,
+    peer_manager::TransportNotification,
     protocols::{
         direct_send::{DirectSend, DirectSendNotification, DirectSendRequest, Message},
-        identity::Identity,
-        rpc::{InboundRpcRequest, OutboundRpcRequest, Rpc, RpcNotification, RpcRequest},
+        rpc::{InboundRpcRequest, OutboundRpcRequest, Rpc, RpcNotification},
     },
-    validator_network, ProtocolId,
+    transport::Connection,
+    ProtocolId,
 };
 use channel::{self, libra_channel, message_queues::QueueStyle};
 use futures::{
@@ -30,11 +30,7 @@ use futures::{
 };
 use libra_logger::prelude::*;
 use libra_types::PeerId;
-use netcore::{multiplexing::StreamMultiplexer, transport::ConnectionOrigin};
-use parity_multiaddr::Multiaddr;
-use std::{
-    collections::HashSet, fmt::Debug, marker::PhantomData, num::NonZeroUsize, time::Duration,
-};
+use std::{fmt::Debug, marker::PhantomData, num::NonZeroUsize, time::Duration};
 use tokio::runtime::Handle;
 
 /// Requests [`NetworkProvider`] receives from the network interface.
@@ -57,28 +53,19 @@ pub enum NetworkNotification {
     RecvMessage(Message),
 }
 
-pub struct NetworkProvider<TMuxer>
-where
-    TMuxer: StreamMultiplexer,
-{
+pub struct NetworkProvider<TSocket> {
     /// Pin the muxer type corresponding to this NetworkProvider instance
-    phantom_muxer: PhantomData<TMuxer>,
+    phantom_socket: PhantomData<TSocket>,
 }
 
-impl<TMuxer, TSubstream> NetworkProvider<TMuxer>
+impl<TSocket> NetworkProvider<TSocket>
 where
-    TMuxer: StreamMultiplexer<Substream = TSubstream> + 'static,
-    TSubstream: AsyncRead + AsyncWrite + Send + Debug + Unpin + 'static,
+    TSocket: AsyncRead + AsyncWrite + Send + 'static,
 {
     pub fn start(
         executor: Handle,
-        identity: Identity,
-        address: Multiaddr,
-        origin: ConnectionOrigin,
-        connection: TMuxer,
-        connection_notifs_tx: channel::Sender<ConnectionNotification<TMuxer>>,
-        rpc_protocols: HashSet<ProtocolId>,
-        direct_send_protocols: HashSet<ProtocolId>,
+        connection: Connection<TSocket>,
+        connection_notifs_tx: channel::Sender<TransportNotification<TSocket>>,
         max_concurrent_reqs: usize,
         max_concurrent_notifs: usize,
         channel_size: usize,
@@ -86,7 +73,7 @@ where
         libra_channel::Sender<ProtocolId, NetworkRequest>,
         libra_channel::Receiver<ProtocolId, NetworkNotification>,
     ) {
-        let peer_id = identity.peer_id();
+        let peer_id = connection.metadata.peer_id();
 
         // Setup and start Peer actor.
         let (peer_reqs_tx, peer_reqs_rx) = channel::new(
@@ -115,19 +102,15 @@ where
                 &peer_id.short_str(),
             ),
         );
+        let peer_handle = PeerHandle::new(peer_id, peer_reqs_tx);
         let peer = Peer::new(
-            identity,
-            address.clone(),
-            origin,
+            executor.clone(),
             connection,
             peer_reqs_rx,
             peer_notifs_tx,
-            rpc_protocols, // RPC protocols.
             peer_rpc_notifs_tx,
-            direct_send_protocols, // Direct Send protocols.
             peer_ds_notifs_tx,
         );
-        let peer_handle = PeerHandle::new(peer_id, address, peer_reqs_tx);
         executor.spawn(peer.start());
 
         // Setup and start RPC actor.
@@ -142,14 +125,13 @@ where
                 .peer_gauge(&counters::PENDING_RPC_REQUESTS, &peer_id.short_str()),
         );
         let rpc = Rpc::new(
-            executor.clone(),
             peer_handle.clone(),
             rpc_reqs_rx,
             peer_rpc_notifs_rx,
             rpc_notifs_tx,
-            Duration::from_millis(validator_network::network_builder::INBOUND_RPC_TIMEOUT_MS),
-            validator_network::network_builder::MAX_CONCURRENT_OUTBOUND_RPCS,
-            validator_network::network_builder::MAX_CONCURRENT_INBOUND_RPCS,
+            Duration::from_millis(constants::INBOUND_RPC_TIMEOUT_MS),
+            constants::MAX_CONCURRENT_OUTBOUND_RPCS,
+            constants::MAX_CONCURRENT_INBOUND_RPCS,
         );
         executor.spawn(rpc.start());
 
@@ -169,7 +151,6 @@ where
             ),
         );
         let ds = DirectSend::new(
-            executor.clone(),
             peer_handle.clone(),
             ds_reqs_rx,
             ds_notifs_tx,
@@ -243,12 +224,12 @@ where
     async fn handle_network_request(
         peer_id: PeerId,
         req: NetworkRequest,
-        mut rpc_reqs_tx: channel::Sender<RpcRequest>,
+        mut rpc_reqs_tx: channel::Sender<OutboundRpcRequest>,
         mut ds_reqs_tx: channel::Sender<DirectSendRequest>,
     ) {
         match req {
             NetworkRequest::SendRpc(req) => {
-                if let Err(e) = rpc_reqs_tx.send(RpcRequest::SendRpc(req)).await {
+                if let Err(e) = rpc_reqs_tx.send(req).await {
                     error!(
                         "Failed to send RPC to peer: {}. Error: {:?}",
                         peer_id.short_str(),
@@ -282,9 +263,7 @@ where
         trace!("RpcNotification::{:?}", notif);
         match notif {
             RpcNotification::RecvRpc(req) => {
-                if let Err(e) =
-                    notifs_tx.push(req.protocol.clone(), NetworkNotification::RecvRpc(req))
-                {
+                if let Err(e) = notifs_tx.push(req.protocol, NetworkNotification::RecvRpc(req)) {
                     warn!("Failed to push RpcNotification to NetworkProvider for peer: {}. Error: {:?}", peer_id.short_str(), e);
                 }
             }
@@ -299,8 +278,7 @@ where
         trace!("DirectSendNotification::{:?}", notif);
         match notif {
             DirectSendNotification::RecvMessage(msg) => {
-                if let Err(e) =
-                    notifs_tx.push(msg.protocol.clone(), NetworkNotification::RecvMessage(msg))
+                if let Err(e) = notifs_tx.push(msg.protocol, NetworkNotification::RecvMessage(msg))
                 {
                     warn!("Failed to push DirectSendNotification to NetworkProvider for peer: {}. Error: {:?}", peer_id.short_str(), e);
                 }
@@ -309,17 +287,15 @@ where
     }
 
     async fn handle_peer_notification(
-        notif: PeerNotification<TSubstream>,
-        mut connection_notifs_tx: channel::Sender<ConnectionNotification<TMuxer>>,
+        notif: PeerNotification,
+        mut connection_notifs_tx: channel::Sender<TransportNotification<TSocket>>,
     ) {
         match notif {
-            PeerNotification::PeerDisconnected(identity, addr, origin, reason) => {
+            PeerNotification::PeerDisconnected(conn_info, reason) => {
                 // Send notification to PeerManager. PeerManager is responsible for initiating
                 // cleanup.
                 if let Err(err) = connection_notifs_tx
-                    .send(ConnectionNotification::Disconnected(
-                        identity, addr, origin, reason,
-                    ))
+                    .send(TransportNotification::Disconnected(conn_info, reason))
                     .await
                 {
                     warn!("Failed to push Disconnected event to connection event handler. Probably in shutdown mode. Error: {:?}", err);

@@ -1,4 +1,4 @@
-address 0x42:
+address 0x42 {
 
 module A {
     resource struct Coin { u: u64 }
@@ -15,7 +15,7 @@ module A {
 
     public fun split(c1: Coin, amt: u64): (Coin, Coin) {
         let Coin { u } = c1;
-        0x0::Transaction::assert(u >= amt, 42);
+        assert(u >= amt, 42);
         (Coin { u: u - amt }, Coin { u: amt })
     }
 }
@@ -40,3 +40,5 @@ module Tester {
 }
 
 // check: GLOBAL_REFERENCE_ERROR
+
+}

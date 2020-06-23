@@ -6,7 +6,7 @@ use crate::{
     cfgir::ast as G,
     compiled_unit::*,
     errors::*,
-    expansion::ast::SpecId,
+    expansion::ast::{SpecId, Value_},
     hlir::{
         ast::{self as H},
         translate::{display_var, DisplayVar},
@@ -14,7 +14,7 @@ use crate::{
     naming::ast::{BuiltinTypeName_, TParam},
     parser::ast::{
         BinOp, BinOp_, Field, FunctionName, FunctionVisibility, Kind, Kind_, ModuleIdent,
-        StructName, UnaryOp, UnaryOp_, Value_, Var,
+        StructName, UnaryOp, UnaryOp_, Var,
     },
     shared::{unique_map::UniqueMap, *},
 };
@@ -23,6 +23,12 @@ use libra_types::account_address::AccountAddress as LibraAddress;
 use move_ir_types::{ast as IR, location::*};
 use move_vm::file_format as F;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+type CollectedInfos = UniqueMap<FunctionName, CollectedInfo>;
+type CollectedInfo = (
+    Vec<(Var, H::SingleType)>,
+    BTreeMap<SpecId, (IR::NopLabel, BTreeMap<Var, H::SingleType>)>,
+);
 
 //**************************************************************************************************
 // Entry
@@ -73,8 +79,13 @@ pub fn program(prog: G::Program) -> Result<Vec<CompiledUnit>, Errors> {
             Err(err) => errors.push(err),
         }
     }
-    if let Some((addr, n, fdef)) = prog.main {
-        match main(addr, n, fdef, &orderings, &sdecls, &fdecls) {
+    for (key, s) in prog.scripts {
+        let G::Script {
+            loc: _,
+            function_name,
+            function,
+        } = s;
+        match script(key, function_name, function, &orderings, &sdecls, &fdecls) {
             Ok(unit) => units.push(unit),
             Err(err) => errors.push(err),
         }
@@ -100,13 +111,13 @@ fn module(
         .map(|(s, sdef)| struct_def(&mut context, &ident, s, sdef))
         .collect();
 
-    let mut function_infos = UniqueMap::new();
+    let mut collected_function_infos = UniqueMap::new();
     let functions = mdef
         .functions
         .into_iter()
         .map(|(f, fdef)| {
-            let (res, specs) = function(&mut context, Some(&ident), f.clone(), fdef);
-            function_infos.add(f, specs).unwrap();
+            let (res, info) = function(&mut context, Some(&ident), f.clone(), fdef);
+            collected_function_infos.add(f, info).unwrap();
             res
         })
         .collect();
@@ -129,18 +140,18 @@ fn module(
     let deps: Vec<&F::CompiledModule> = vec![];
     let (module, source_map) = ir_to_bytecode::compiler::compile_module(addr, ir_module, deps)
         .map_err(|e| vec![(ident.loc(), format!("IR ERROR: {}", e))])?;
-    let spec_info = module_spec_info(&module, &source_map, &function_infos);
+    let function_infos = module_function_infos(&module, &source_map, &collected_function_infos);
     Ok(CompiledUnit::Module {
         ident,
         module,
         source_map,
-        spec_info,
+        function_infos,
     })
 }
 
-fn main(
-    addr: Address,
-    main_name: FunctionName,
+fn script(
+    key: String,
+    name: FunctionName,
     fdef: G::Function,
     dependency_orderings: &HashMap<ModuleIdent, usize>,
     struct_declarations: &HashMap<(ModuleIdent, StructName), (bool, Vec<(IR::TypeVar, IR::Kind)>)>,
@@ -149,10 +160,10 @@ fn main(
         (BTreeSet<(ModuleIdent, StructName)>, IR::FunctionSignature),
     >,
 ) -> Result<CompiledUnit, Error> {
-    let loc = main_name.loc();
+    let loc = name.loc();
     let mut context = Context::new(None);
 
-    let ((_, main), specs) = function(&mut context, None, main_name, fdef);
+    let ((_, main), info) = function(&mut context, None, name, fdef);
 
     let (imports, explicit_dependency_declarations) = context.materialize(
         dependency_orderings,
@@ -164,43 +175,37 @@ fn main(
         explicit_dependency_declarations,
         main,
     };
-    let addr = LibraAddress::new(addr.to_u8());
     let deps: Vec<&F::CompiledModule> = vec![];
-    let (script, source_map) = ir_to_bytecode::compiler::compile_script(addr, ir_script, deps)
+    let (script, source_map) = ir_to_bytecode::compiler::compile_script(None, ir_script, deps)
         .map_err(|e| vec![(loc, format!("IR ERROR: {}", e))])?;
-    let spec_info = main_spec_id_map(&source_map, specs);
+    let function_info = main_function_info(&source_map, info);
     Ok(CompiledUnit::Script {
         loc,
+        key,
         script,
         source_map,
-        spec_info,
+        function_info,
     })
 }
 
-fn module_spec_info(
+fn module_function_infos(
     compile_module: &F::CompiledModule,
     source_map: &SourceMap<Loc>,
-    function_infos: &UniqueMap<
-        FunctionName,
-        BTreeMap<SpecId, (IR::NopLabel, BTreeMap<Var, H::SingleType>)>,
-    >,
-) -> UniqueMap<FunctionName, BTreeMap<SpecId, SpecInfo>> {
+    collected_function_infos: &CollectedInfos,
+) -> UniqueMap<FunctionName, FunctionInfo> {
     UniqueMap::maybe_from_iter((0..compile_module.as_inner().function_defs.len()).map(|i| {
         let idx = F::FunctionDefinitionIndex(i as F::TableIndex);
-        function_spec_id_map(compile_module, source_map, function_infos, idx)
+        function_info_map(compile_module, source_map, collected_function_infos, idx)
     }))
     .unwrap()
 }
 
-fn function_spec_id_map(
+fn function_info_map(
     compile_module: &F::CompiledModule,
     source_map: &SourceMap<Loc>,
-    function_infos: &UniqueMap<
-        FunctionName,
-        BTreeMap<SpecId, (IR::NopLabel, BTreeMap<Var, H::SingleType>)>,
-    >,
+    collected_function_infos: &CollectedInfos,
     idx: F::FunctionDefinitionIndex,
-) -> (FunctionName, BTreeMap<SpecId, SpecInfo>) {
+) -> (FunctionName, FunctionInfo) {
     let module = compile_module.as_inner();
     let handle_idx = module.function_defs[idx.0 as usize].function;
     let name_idx = module.function_handles[handle_idx.0 as usize].name;
@@ -209,42 +214,83 @@ fn function_spec_id_map(
         .into_string();
 
     let function_source_map = source_map.get_function_source_map(idx).unwrap();
-    let spec_ids = function_infos
-        .get_(&name)
-        .unwrap()
+    let local_map = function_source_map.make_local_name_to_index_map();
+    let (params, specs) = collected_function_infos.get_(&name).unwrap();
+    let parameters = params
         .iter()
-        .map(|(id, (label, used_locals))| {
+        .map(|(v, ty)| var_info(&local_map, v.clone(), ty.clone()))
+        .collect();
+    let spec_info = specs
+        .iter()
+        .map(|(id, (label, used_local_types))| {
             let offset = *function_source_map.nops.get(label).unwrap();
+            let used_locals = used_local_info(&local_map, used_local_types);
             let info = SpecInfo {
                 offset,
-                used_locals: used_locals.clone(),
+                used_locals,
             };
             (*id, info)
         })
         .collect();
+    let function_info = FunctionInfo {
+        parameters,
+        spec_info,
+    };
 
-    let name_loc = *function_infos.get_loc_(&name).unwrap();
+    let name_loc = *collected_function_infos.get_loc_(&name).unwrap();
     let function_name = FunctionName(sp(name_loc, name));
-    (function_name, spec_ids)
+    (function_name, function_info)
 }
 
-fn main_spec_id_map(
-    source_map: &SourceMap<Loc>,
-    specs: BTreeMap<SpecId, (IR::NopLabel, BTreeMap<Var, H::SingleType>)>,
-) -> BTreeMap<SpecId, SpecInfo> {
+fn main_function_info(source_map: &SourceMap<Loc>, (params, specs): CollectedInfo) -> FunctionInfo {
     let idx = F::FunctionDefinitionIndex(0);
     let function_source_map = source_map.get_function_source_map(idx).unwrap();
-    specs
+    let local_map = function_source_map.make_local_name_to_index_map();
+    let parameters = params
         .into_iter()
-        .map(|(id, (label, used_locals))| {
+        .map(|(v, ty)| var_info(&local_map, v, ty))
+        .collect();
+    let spec_info = specs
+        .into_iter()
+        .map(|(id, (label, used_local_types))| {
             let offset = *function_source_map.nops.get(&label).unwrap();
+            let used_locals = used_local_info(&local_map, &used_local_types);
             let info = SpecInfo {
                 offset,
                 used_locals,
             };
             (id, info)
         })
-        .collect()
+        .collect();
+    FunctionInfo {
+        parameters,
+        spec_info,
+    }
+}
+
+fn used_local_info(
+    local_map: &BTreeMap<&String, F::LocalIndex>,
+    used_local_types: &BTreeMap<Var, H::SingleType>,
+) -> UniqueMap<Var, VarInfo> {
+    UniqueMap::maybe_from_iter(used_local_types.iter().map(|(v, ty)| {
+        let (v, info) = var_info(&local_map, v.clone(), ty.clone());
+        let v_orig_ = match display_var(&v.0.value) {
+            DisplayVar::Tmp => panic!("ICE spec block captured a tmp"),
+            DisplayVar::Orig(s) => s,
+        };
+        let v_orig = Var(sp(v.0.loc, v_orig_));
+        (v_orig, info)
+    }))
+    .unwrap()
+}
+
+fn var_info(
+    local_map: &BTreeMap<&String, F::LocalIndex>,
+    v: Var,
+    type_: H::SingleType,
+) -> (Var, VarInfo) {
+    let index = *local_map.get(&v.0.value).unwrap();
+    (v, VarInfo { type_, index })
 }
 
 //**************************************************************************************************
@@ -315,10 +361,7 @@ fn function(
     m: Option<&ModuleIdent>,
     f: FunctionName,
     fdef: G::Function,
-) -> (
-    (IR::FunctionName, IR::Function),
-    BTreeMap<SpecId, (IR::NopLabel, BTreeMap<Var, H::SingleType>)>,
-) {
+) -> ((IR::FunctionName, IR::Function), CollectedInfo) {
     let G::Function {
         visibility: v,
         signature,
@@ -330,7 +373,7 @@ fn function(
     let signature = function_signature(context, signature);
     let acquires = acquires
         .into_iter()
-        .map(|s| context.struct_definition_name(m.unwrap(), s))
+        .map(|(s, _)| context.struct_definition_name(m.unwrap(), s))
         .collect();
     let body = match body.value {
         G::FunctionBody_::Native => IR::FunctionBody::Native,
@@ -339,7 +382,7 @@ fn function(
             start,
             blocks,
         } => {
-            let (locals, code) = function_body(context, parameters, locals, start, blocks);
+            let (locals, code) = function_body(context, parameters.clone(), locals, start, blocks);
             IR::FunctionBody::Bytecode { locals, code }
         }
     };
@@ -352,7 +395,10 @@ fn function(
         specifications: vec![],
         body,
     };
-    ((name, sp(loc, ir_function)), context.finish_function())
+    (
+        (name, sp(loc, ir_function)),
+        (parameters, context.finish_function()),
+    )
 }
 
 fn visibility(v: FunctionVisibility) -> IR::FunctionVisibility {
@@ -369,11 +415,11 @@ fn function_signature(context: &mut Context, sig: H::FunctionSignature) -> IR::F
         .into_iter()
         .map(|(v, st)| (var(v), single_type(context, st)))
         .collect();
-    let type_formals = type_parameters(sig.type_parameters);
+    let type_parameters = type_parameters(sig.type_parameters);
     IR::FunctionSignature {
         return_type,
         formals,
-        type_formals,
+        type_formals: type_parameters,
     }
 }
 
@@ -429,7 +475,7 @@ fn function_body(
     parameters: Vec<(Var, H::SingleType)>,
     mut locals_map: UniqueMap<Var, H::SingleType>,
     start: H::Label,
-    blocks: H::BasicBlocks,
+    blocks_map: H::BasicBlocks,
 ) -> (Vec<(IR::Var, IR::Type)>, IR::BytecodeBlocks) {
     parameters
         .iter()
@@ -438,6 +484,8 @@ fn function_body(
         .into_iter()
         .map(|(v, ty)| (var(v), single_type(context, ty)))
         .collect();
+    let mut blocks = blocks_map.into_iter().collect::<Vec<_>>();
+    blocks.sort_by_key(|(lbl, _)| *lbl);
 
     let mut bytecode_blocks = Vec::new();
     for (idx, (lbl, basic_block)) in blocks.into_iter().enumerate() {
@@ -518,13 +566,13 @@ fn kind(sp!(_, k_): &Kind) -> IR::Kind {
     match k_ {
         GK::Unknown => IRK::All,
         GK::Resource => IRK::Resource,
-        GK::Affine | GK::Unrestricted => IRK::Unrestricted,
+        GK::Affine | GK::Copyable => IRK::Copyable,
     }
 }
 
 fn type_parameters(tps: Vec<TParam>) -> Vec<(IR::TypeVar, IR::Kind)> {
     tps.into_iter()
-        .map(|tp| (type_var(tp.debug), kind(&tp.kind)))
+        .map(|tp| (type_var(tp.user_specified_name), kind(&tp.kind)))
         .collect()
 }
 
@@ -541,6 +589,7 @@ fn base_type(context: &mut Context, sp!(_, bt_): H::BaseType) -> IR::Type {
             panic!("ICE should not have reached compilation if there are errors")
         }
         B::Apply(_, sp!(_, TN::Builtin(sp!(_, BT::Address))), _) => IRT::Address,
+        B::Apply(_, sp!(_, TN::Builtin(sp!(_, BT::Signer))), _) => IRT::Signer,
         B::Apply(_, sp!(_, TN::Builtin(sp!(_, BT::U8))), _) => IRT::U8,
         B::Apply(_, sp!(_, TN::Builtin(sp!(_, BT::U64))), _) => IRT::U64,
         B::Apply(_, sp!(_, TN::Builtin(sp!(_, BT::U128))), _) => IRT::U128,
@@ -558,7 +607,10 @@ fn base_type(context: &mut Context, sp!(_, bt_): H::BaseType) -> IR::Type {
             let tys = base_types(context, tys);
             IRT::Struct(n, tys)
         }
-        B::Param(TParam { debug, .. }) => IRT::TypeParameter(type_var(debug).value),
+        B::Param(TParam {
+            user_specified_name,
+            ..
+        }) => IRT::TypeParameter(type_var(user_specified_name).value),
     }
 }
 
@@ -685,22 +737,9 @@ fn exp_(context: &mut Context, code: &mut IR::BytecodeBlock, e: H::Exp) {
     match e_ {
         E::Unreachable => panic!("ICE should not compile dead code"),
         E::UnresolvedError => panic!("ICE should not have reached compilation if there are errors"),
-        E::Unit => (),
+        E::Unit { .. } => (),
         // remember to switch to orig_name
-        E::Spec(id, raw_used_locals) => {
-            let used_locals = raw_used_locals
-                .into_iter()
-                .map(|(v, st)| {
-                    let sp!(loc, raw_n_) = v.0;
-                    let n_ = match display_var(&raw_n_) {
-                        DisplayVar::Tmp => panic!("ICE spec block captured a tmp"),
-                        DisplayVar::Orig(s) => s,
-                    };
-                    (Var(sp(loc, n_)), st)
-                })
-                .collect();
-            code.push(sp(loc, B::Nop(Some(context.spec(id, used_locals)))))
-        }
+        E::Spec(id, used_locals) => code.push(sp(loc, B::Nop(Some(context.spec(id, used_locals))))),
         E::Value(v) => {
             code.push(sp(
                 loc,
@@ -817,7 +856,7 @@ fn exp_(context: &mut Context, code: &mut IR::BytecodeBlock, e: H::Exp) {
                 BT::U8 => B::CastU8,
                 BT::U64 => B::CastU64,
                 BT::U128 => B::CastU128,
-                _ => panic!("ICE type checking failed"),
+                _ => panic!("ICE type checking failed. unexpected cast"),
             };
             code.push(sp(loc, instr));
         }
@@ -837,8 +876,6 @@ fn call(
 
     match (&m.0.value.address, m.0.value.name.value(), f.value()) {
         (&A::LIBRA_CORE, TXN::MOD, TXN::SENDER) => code.push(sp(f.loc(), B::GetTxnSenderAddress)),
-        (&A::LIBRA_CORE, TXN::MOD, TXN::ASSERT) => panic!("ICE should have been covered in hlir"),
-        (&A::LIBRA_CORE, TXN::MOD, f) => panic!("ICE unknown magic transaction function {}", f),
         _ => module_call(context, code, m, f, tys),
     }
 }
@@ -865,6 +902,10 @@ fn builtin(context: &mut Context, code: &mut IR::BytecodeBlock, sp!(loc, b_): H:
             HB::MoveToSender(bt) => {
                 let (n, tys) = struct_definition_name_base(context, bt);
                 B::MoveToSender(n, tys)
+            }
+            HB::MoveTo(bt) => {
+                let (n, tys) = struct_definition_name_base(context, bt);
+                B::MoveTo(n, tys)
             }
             HB::MoveFrom(bt) => {
                 let (n, tys) = struct_definition_name_base(context, bt);

@@ -5,8 +5,8 @@
 
 use crate::{
     ast::QualifiedSymbol,
-    env::{ModuleId, StructId},
-    symbol::SymbolPool,
+    env::{GlobalEnv, ModuleId, StructEnv, StructId},
+    symbol::{Symbol, SymbolPool},
 };
 use std::{collections::BTreeMap, fmt, fmt::Formatter};
 
@@ -24,6 +24,8 @@ pub enum Type {
 
     // Types only appearing in specifications
     Fun(Vec<Type>, Box<Type>),
+    TypeDomain(Box<Type>),
+    TypeLocal(Symbol),
 
     // Temporary types used during type checking
     Error,
@@ -41,10 +43,11 @@ pub enum PrimitiveType {
     U64,
     U128,
     Address,
-
+    Signer,
     // Types only appearing in specifications
     Num,
     Range,
+    TypeValue,
 }
 
 /// A type substitution.
@@ -85,6 +88,16 @@ impl Type {
         }
     }
 
+    /// Determines whether this is an immutable reference.
+    pub fn is_immutable_reference(&self) -> bool {
+        if let Type::Reference(false, _) = self {
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns true if this is any number type.
     pub fn is_number(&self) -> bool {
         if let Type::Primitive(p) = self {
             if let PrimitiveType::U8
@@ -98,9 +111,33 @@ impl Type {
         false
     }
 
+    /// If this is a struct type, replace the type instantiation.
+    pub fn replace_struct_instantiation(&self, inst: &[Type]) -> Type {
+        match self {
+            Type::Struct(mid, sid, _) => Type::Struct(*mid, *sid, inst.to_vec()),
+            _ => self.clone(),
+        }
+    }
+
+    /// If this is a struct type, return the associated struct env and type parameters.
+    pub fn get_struct<'env>(
+        &'env self,
+        env: &'env GlobalEnv,
+    ) -> Option<(StructEnv<'env>, &'env [Type])> {
+        if let Type::Struct(module_idx, struct_idx, params) = self {
+            Some((env.get_module(*module_idx).into_struct(*struct_idx), params))
+        } else {
+            None
+        }
+    }
+
     /// Instantiates type parameters in this type.
     pub fn instantiate(&self, params: &[Type]) -> Type {
-        self.replace(Some(params), None)
+        if params.is_empty() {
+            self.clone()
+        } else {
+            self.replace(Some(params), None)
+        }
     }
 
     /// A helper function to do replacement of type parameters and/or type variables.
@@ -138,6 +175,7 @@ impl Type {
             }
             Type::Tuple(args) => Type::Tuple(replace_vec(args)),
             Type::Vector(et) => Type::Vector(Box::new(et.replace(params, subs))),
+            Type::TypeDomain(et) => Type::TypeDomain(Box::new(et.replace(params, subs))),
             _ => self.clone(),
         }
     }
@@ -288,6 +326,14 @@ impl Substitution {
             (Type::Vector(e1), Type::Vector(e2)) => {
                 return self.unify(display_context, &*e1, &*e2);
             }
+            (Type::TypeDomain(e1), Type::TypeDomain(e2)) => {
+                return self.unify(display_context, &*e1, &*e2);
+            }
+            (Type::TypeLocal(s1), Type::TypeLocal(s2)) => {
+                if s1 == s2 {
+                    return Ok(t1.clone());
+                }
+            }
             _ => {}
         }
 
@@ -332,22 +378,27 @@ impl Substitution {
     ) -> Result<Option<Type>, TypeError> {
         if let Type::Var(v1) = t1 {
             if let Some(s1) = self.subs.get(&v1).cloned() {
-                if swapped {
+                return if swapped {
                     // Place the type terms in the right order again, so we
                     // get the 'expected vs actual' direction right.
-                    return Ok(Some(self.unify(display_context, t2, &s1)?));
+                    Ok(Some(self.unify(display_context, t2, &s1)?))
                 } else {
-                    return Ok(Some(self.unify(display_context, &s1, t2)?));
-                }
+                    Ok(Some(self.unify(display_context, &s1, t2)?))
+                };
             }
-            let is_var = |t: &Type| {
+            let is_t1_var = |t: &Type| {
                 if let Type::Var(v2) = t {
                     v1 == v2
                 } else {
                     false
                 }
             };
-            if !t2.contains(&is_var) {
+            // Skip the cycle check if we are unifying the same two variables.
+            if is_t1_var(t2) {
+                return Ok(Some(t1.clone()));
+            }
+            // Cycle check.
+            if !t2.contains(&is_t1_var) {
                 self.subs.insert(*v1, t2.clone());
                 Ok(Some(t2.clone()))
             } else {
@@ -370,9 +421,24 @@ impl Default for Substitution {
 }
 
 /// Data providing context for displaying types.
-pub struct TypeDisplayContext<'a> {
-    pub symbol_pool: &'a SymbolPool,
-    pub reverse_struct_table: &'a BTreeMap<(ModuleId, StructId), QualifiedSymbol>,
+pub enum TypeDisplayContext<'a> {
+    WithoutEnv {
+        symbol_pool: &'a SymbolPool,
+        reverse_struct_table: &'a BTreeMap<(ModuleId, StructId), QualifiedSymbol>,
+    },
+    WithEnv {
+        env: &'a GlobalEnv,
+        type_param_names: Option<Vec<Symbol>>,
+    },
+}
+
+impl<'a> TypeDisplayContext<'a> {
+    pub fn symbol_pool(&self) -> &SymbolPool {
+        match self {
+            TypeDisplayContext::WithEnv { env, .. } => env.symbol_pool(),
+            TypeDisplayContext::WithoutEnv { symbol_pool, .. } => symbol_pool,
+        }
+    }
 }
 
 /// Helper for type displays.
@@ -393,7 +459,7 @@ impl Type {
 impl<'a> fmt::Display for TypeDisplay<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         use Type::*;
-        let comma_list = |f: &mut Formatter<'_>, ts: &[Type]| {
+        let comma_list = |f: &mut Formatter<'_>, ts: &[Type]| -> fmt::Result {
             let mut first = true;
             for t in ts {
                 if first {
@@ -413,6 +479,8 @@ impl<'a> fmt::Display for TypeDisplay<'a> {
                 f.write_str(")")
             }
             Vector(t) => write!(f, "vector<{}>", t.display(self.context)),
+            TypeDomain(t) => write!(f, "domain<{}>", t.display(self.context)),
+            TypeLocal(s) => write!(f, "{}", s.display(self.context.symbol_pool())),
             Fun(ts, t) => {
                 f.write_str("|")?;
                 comma_list(f, ts)?;
@@ -420,10 +488,26 @@ impl<'a> fmt::Display for TypeDisplay<'a> {
                 write!(f, "{}", t.display(self.context))
             }
             Struct(mid, sid, ts) => {
-                if let Some(sym) = self.context.reverse_struct_table.get(&(*mid, *sid)) {
-                    write!(f, "{}", sym.display(self.context.symbol_pool))?;
-                } else {
-                    f.write_str("??unknown??")?;
+                match self.context {
+                    TypeDisplayContext::WithoutEnv {
+                        symbol_pool,
+                        reverse_struct_table,
+                    } => {
+                        if let Some(sym) = reverse_struct_table.get(&(*mid, *sid)) {
+                            write!(f, "{}", sym.display(symbol_pool))?;
+                        } else {
+                            f.write_str("??unknown??")?;
+                        }
+                    }
+                    TypeDisplayContext::WithEnv { env, .. } => {
+                        let func_env = env.get_module(*mid).into_struct(*sid);
+                        write!(
+                            f,
+                            "{}::{}",
+                            func_env.module_env.get_name().display(env.symbol_pool()),
+                            func_env.get_name().display(env.symbol_pool())
+                        )?;
+                    }
                 }
                 if !ts.is_empty() {
                     f.write_str("<")?;
@@ -439,9 +523,24 @@ impl<'a> fmt::Display for TypeDisplay<'a> {
                 }
                 write!(f, "{}", t.display(self.context))
             }
-            TypeParameter(idx) => write!(f, "#{}", idx),
+            TypeParameter(idx) => {
+                if let TypeDisplayContext::WithEnv {
+                    env,
+                    type_param_names: Some(names),
+                } = self.context
+                {
+                    let idx = *idx as usize;
+                    if idx < names.len() {
+                        write!(f, "{}", names[idx].display(env.symbol_pool()))
+                    } else {
+                        write!(f, "#{}", idx)
+                    }
+                } else {
+                    write!(f, "#{}", idx)
+                }
+            }
             Var(idx) => write!(f, "?{}", idx),
-            Error => f.write_str("?error"),
+            Error => f.write_str("*error*"),
         }
     }
 }
@@ -455,8 +554,10 @@ impl fmt::Display for PrimitiveType {
             U64 => f.write_str("u64"),
             U128 => f.write_str("u128"),
             Address => f.write_str("address"),
+            Signer => f.write_str("signer"),
             Range => f.write_str("range"),
             Num => f.write_str("num"),
+            TypeValue => f.write_str("type"),
         }
     }
 }

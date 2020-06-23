@@ -1,23 +1,13 @@
-// dep: tests/sources/stdlib/modules/libra_account.move
-// dep: tests/sources/stdlib/modules/libra_system.move
-// dep: tests/sources/stdlib/modules/address_util.move
-// dep: tests/sources/stdlib/modules/transaction.move
-// dep: tests/sources/stdlib/modules/vector.move
-// dep: tests/sources/stdlib/modules/libra_coin.move
-// dep: tests/sources/stdlib/modules/validator_config.move
-// dep: tests/sources/stdlib/modules/u64_util.move
-// dep: tests/sources/stdlib/modules/hash.move
-// dep: tests/sources/stdlib/modules/libra_time.move
-// dep: tests/sources/stdlib/modules/libra_transaction_timeout.move
-// no-verify
-address 0x0:
+address 0x1 {
 
 module TransactionFee {
-    use 0x0::LibraAccount;
-    use 0x0::LibraSystem;
-    use 0x0::AddressUtil;
-    use 0x0::Transaction;
-    use 0x0::Vector;
+    use 0x1::Transaction;
+    use 0x1::LibraAccount;
+    use 0x1::LibraSystem;
+
+    spec module {
+        pragma verify = false;
+    }
 
     ///////////////////////////////////////////////////////////////////////////
     // Transaction Fee Distribution
@@ -43,18 +33,18 @@ module TransactionFee {
     // encapsulate the withdrawal capability to the transaction fee account so that we can withdraw
     // the fees from this account from block metadata transactions.
     fun initialize_transaction_fees() {
-        Transaction::assert(Transaction::sender() == 0xFEE, 0);
+        assert(Transaction::sender() == 0xFEE, 0);
         move_to_sender<TransactionFees>(TransactionFees {
             fee_withdrawal_capability: LibraAccount::extract_sender_withdrawal_capability(),
         });
     }
 
-    public fun distribute_transaction_fees() acquires TransactionFees {
+    public fun distribute_transaction_fees<Token>() acquires TransactionFees {
       // Can only be invoked by LibraVM privilege.
-      Transaction::assert(Transaction::sender() == 0x0, 33);
+      assert(Transaction::sender() == 0x0, 33);
 
       let num_validators = LibraSystem::validator_set_size();
-      let amount_collected = LibraAccount::balance(0xFEE);
+      let amount_collected = LibraAccount::balance<Token>(0xFEE);
 
       // If amount_collected == 0, this will also return early
       if (amount_collected < num_validators) return ();
@@ -66,7 +56,7 @@ module TransactionFee {
       );
 
       // Iterate through the validators distributing fees equally
-      distribute_transaction_fees_internal(
+      distribute_transaction_fees_internal<Token>(
           amount_to_distribute_per_validator,
           num_validators,
       );
@@ -77,7 +67,7 @@ module TransactionFee {
     // any remainder (in the case that the number of validators does not
     // evenly divide the transaction fee pot) is distributed to the first
     // validator.
-    fun distribute_transaction_fees_internal(
+    fun distribute_transaction_fees_internal<Token>(
         amount_to_distribute_per_validator: u64,
         num_validators: u64
     ) acquires TransactionFees {
@@ -90,13 +80,12 @@ module TransactionFee {
             // Increment the index into the validator set.
             index = index + 1;
 
-            LibraAccount::pay_from_capability(
+            LibraAccount::pay_from_capability<Token>(
                 addr,
-                Vector::empty(),
+                x"",
                 &distribution_resource.fee_withdrawal_capability,
                 amount_to_distribute_per_validator,
-                // FIXME: Update this once we have bytearray literals
-                AddressUtil::address_to_bytes(0xFEE),
+                x"",
             );
            }
     }
@@ -107,9 +96,10 @@ module TransactionFee {
     // transaction fees collected, then there will be a remainder that is left in the transaction
     // fees pot to be distributed later.
     fun per_validator_distribution_amount(amount_collected: u64, num_validators: u64): u64 {
-        Transaction::assert(num_validators != 0, 0);
+        assert(num_validators != 0, 0);
         let validator_payout = amount_collected / num_validators;
-        Transaction::assert(validator_payout * num_validators <= amount_collected, 1);
+        assert(validator_payout * num_validators <= amount_collected, 1);
         validator_payout
     }
+}
 }

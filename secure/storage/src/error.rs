@@ -49,14 +49,8 @@ impl From<lcs::Error> for Error {
     }
 }
 
-impl From<toml::de::Error> for Error {
-    fn from(error: toml::de::Error) -> Self {
-        Self::SerializationError(format!("{}", error))
-    }
-}
-
-impl From<toml::ser::Error> for Error {
-    fn from(error: toml::ser::Error) -> Self {
+impl From<serde_json::Error> for Error {
+    fn from(error: serde_json::Error) -> Self {
         Self::SerializationError(format!("{}", error))
     }
 }
@@ -66,6 +60,16 @@ impl From<libra_vault_client::Error> for Error {
         match error {
             libra_vault_client::Error::NotFound(_, key) => Self::KeyNotSet(key),
             libra_vault_client::Error::HttpError(403, _) => Self::PermissionDenied,
+            _ => Self::InternalError(format!("{}", error)),
+        }
+    }
+}
+
+impl From<libra_github_client::Error> for Error {
+    fn from(error: libra_github_client::Error) -> Self {
+        match error {
+            libra_github_client::Error::NotFound(key) => Self::KeyNotSet(key),
+            libra_github_client::Error::HttpError(403, _) => Self::PermissionDenied,
             _ => Self::InternalError(format!("{}", error)),
         }
     }

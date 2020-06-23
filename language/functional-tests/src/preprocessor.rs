@@ -18,14 +18,28 @@ use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
 
 /// Substitutes the placeholders (account names in double curly brackets) with addresses.
-pub fn substitute_addresses(config: &GlobalConfig, text: &str) -> String {
-    static PAT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\{\{([A-Za-z][A-Za-z0-9]*)\}\}").unwrap());
-    PAT.replace_all(text, |caps: &Captures| {
+pub fn substitute_addresses_and_auth_keys(config: &GlobalConfig, text: &str) -> String {
+    static AUTH_KEY_PAT: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"\{\{([A-Za-z][A-Za-z0-9]*)(::auth_key)\}\}").unwrap());
+    static ADDR_PAT: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"\{\{([A-Za-z][A-Za-z0-9]*)\}\}").unwrap());
+
+    let keyed = AUTH_KEY_PAT.replace_all(text, |caps: &Captures| {
         let name = &caps[1];
 
-        format!("0x{}", config.get_account_for_name(name).unwrap().address())
-    })
-    .to_string()
+        format!(
+            "x\"{}\"",
+            hex::encode(config.get_account_for_name(name).unwrap().auth_key_prefix())
+        )
+    });
+
+    ADDR_PAT
+        .replace_all(&keyed, |caps: &Captures| {
+            let name = &caps[1];
+
+            format!("0x{}", config.get_account_for_name(name).unwrap().address())
+        })
+        .to_string()
 }
 
 pub struct RawTransactionInput {
@@ -87,15 +101,28 @@ fn new_command(input: &str) -> Option<RawCommand> {
     None
 }
 
+pub fn extract_global_config(
+    lines: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Result<GlobalConfig> {
+    let mut entries = vec![];
+
+    for line in lines.into_iter() {
+        let line = line.as_ref();
+
+        if let Ok(entry) = line.parse::<GlobalConfigEntry>() {
+            entries.push(entry);
+            continue;
+        }
+    }
+
+    GlobalConfig::build(&entries)
+}
+
 /// Parses the input string into three parts: a global config, directives and transactions.
 pub fn split_input(
     lines: impl IntoIterator<Item = impl AsRef<str>>,
-) -> Result<(
-    Vec<GlobalConfigEntry>,
-    Vec<LineSp<Directive>>,
-    Vec<RawCommand>,
-)> {
-    let mut global_config = vec![];
+    global_config: &GlobalConfig,
+) -> Result<(Vec<LineSp<Directive>>, Vec<RawCommand>)> {
     let mut directives = vec![];
     let mut commands = vec![];
     let mut first_transaction = true;
@@ -119,20 +146,21 @@ pub fn split_input(
             continue;
         }
 
-        if let Ok(entry) = line.parse::<GlobalConfigEntry>() {
-            global_config.push(entry);
-            continue;
-        }
-
         if let Ok(dirs) = Directive::parse_line(line) {
             directives.extend(dirs.into_iter().map(|sp| sp.into_line_sp(line_idx)));
             continue;
         }
 
+        let line = substitute_addresses_and_auth_keys(global_config, line);
         match &mut command {
             RawCommand::Transaction(txn) => {
                 if let Ok(entry) = line.parse::<TransactionConfigEntry>() {
                     txn.config_entries.push(entry);
+                    continue;
+                }
+                // TODO: a hack to not send an empty transaction to the compiler.
+                // This should go away as we refactor functional tests.
+                if line.trim_start().starts_with("//") {
                     continue;
                 }
                 if !line.trim().is_empty() {
@@ -152,7 +180,7 @@ pub fn split_input(
     check_raw_command(&command)?;
     commands.push(command);
 
-    Ok((global_config, directives, commands))
+    Ok((directives, commands))
 }
 
 pub fn build_transactions<'a>(
@@ -164,7 +192,7 @@ pub fn build_transactions<'a>(
         .map(|command_input| match command_input {
             RawCommand::Transaction(txn_input) => Ok(Command::Transaction(Transaction {
                 config: TransactionConfig::build(config, &txn_input.config_entries)?,
-                input: substitute_addresses(config, &txn_input.text.join("\n")),
+                input: txn_input.text.join("\n"),
             })),
             RawCommand::BlockMetadata(entries) => Ok(Command::BlockMetadata(build_block_metadata(
                 config, &entries,

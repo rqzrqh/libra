@@ -3,7 +3,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod chain_id;
 pub mod config;
 pub mod generator;
 pub mod keys;
+pub mod network_id;
 pub mod utils;

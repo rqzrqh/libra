@@ -14,7 +14,7 @@ fn malformed_simple() {
     let mut res = CompiledScript::deserialize(&binary);
     assert_eq!(
         res.expect_err("Expected malformed binary").major_status,
-        StatusCode::MALFORMED
+        StatusCode::BAD_MAGIC
     );
 
     // under-sized binary
@@ -22,7 +22,7 @@ fn malformed_simple() {
     res = CompiledScript::deserialize(&binary);
     assert_eq!(
         res.expect_err("Expected malformed binary").major_status,
-        StatusCode::MALFORMED
+        StatusCode::BAD_MAGIC
     );
 
     // bad magic
@@ -68,7 +68,7 @@ fn malformed_simple() {
 
 // Ensure that we can deserialize a script from disk
 static EMPTY_SCRIPT: &[u8] =
-    include_bytes!("../../../stdlib/staged/transaction_scripts/empty_script.mv");
+    include_bytes!("../../../stdlib/compiled/transaction_scripts/empty_script.mv");
 
 #[test]
 fn deserialize_file() {

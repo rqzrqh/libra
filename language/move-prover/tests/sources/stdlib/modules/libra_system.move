@@ -1,36 +1,31 @@
-// dep: tests/sources/stdlib/modules/libra_account.move
-// dep: tests/sources/stdlib/modules/validator_config.move
-// dep: tests/sources/stdlib/modules/vector.move
-// dep: tests/sources/stdlib/modules/transaction.move
-// dep: tests/sources/stdlib/modules/libra_time.move
-// dep: tests/sources/stdlib/modules/libra_coin.move
-// dep: tests/sources/stdlib/modules/address_util.move
-// dep: tests/sources/stdlib/modules/u64_util.move
-// dep: tests/sources/stdlib/modules/hash.move
-// dep: tests/sources/stdlib/modules/libra_transaction_timeout.move
-// no-verify
-address 0x0:
+address 0x1 {
 
 module LibraSystem {
-    use 0x0::LibraAccount;
-    use 0x0::ValidatorConfig;
-    use 0x0::Vector;
-    use 0x0::Transaction;
-    use 0x0::LibraTimestamp;
+    use 0x1::LibraAccount;
+    use 0x1::ValidatorConfig;
+    use 0x1::Vector;
+    use 0x1::LibraTimestamp;
+    use 0x1::Transaction;
+
+    spec module {
+        pragma verify = false;
+    }
 
     struct ValidatorInfo {
         addr: address,
         consensus_pubkey: vector<u8>,
         consensus_voting_power: u64,
-        network_signing_pubkey: vector<u8>,
         network_identity_pubkey: vector<u8>,
     }
 
     struct ValidatorSetChangeEvent {
+        scheme: u8,
         new_validator_set: vector<ValidatorInfo>,
     }
 
     resource struct ValidatorSet {
+        // The current consensus crypto scheme.
+        scheme: u8,
         // The current validator set. Updated only at epoch boundaries via reconfiguration.
         validators: vector<ValidatorInfo>,
         // Last time when a reconfiguration happened.
@@ -62,9 +57,10 @@ module LibraSystem {
     // Currently, it is invoked in the genesis transaction
     public fun initialize_validator_set() {
       // Only callable by the validator set address
-      Transaction::assert(Transaction::sender() == 0x1D8, 1);
+      assert(Transaction::sender() == 0x1D8, 1);
 
       move_to_sender<ValidatorSet>(ValidatorSet {
+          scheme: 0,
           validators: Vector::empty(),
           last_reconfiguration_time: 0,
           change_events: LibraAccount::new_event_handle<ValidatorSetChangeEvent>(),
@@ -73,7 +69,7 @@ module LibraSystem {
 
     public fun initialize_discovery_set() {
         // Only callable by the discovery set address
-        Transaction::assert(Transaction::sender() == 0xD15C0, 1);
+        assert(Transaction::sender() == 0xD15C0, 1);
 
         move_to_sender<DiscoverySet>(DiscoverySet {
             discovery_set: Vector::empty(),
@@ -84,7 +80,7 @@ module LibraSystem {
     public fun reconfigure() acquires ValidatorSet {
         // TODO: Transform this method to user capability pattern.
         // Only the Association can emit reconfiguration event for now
-        Transaction::assert(Transaction::sender() == 0xA550C18, 1);
+        assert(Transaction::sender() == 0xA550C18, 1);
 
         reconfigure_()
     }
@@ -101,10 +97,6 @@ module LibraSystem {
 
     public fun get_consensus_voting_power(v: &ValidatorInfo): &u64 {
       &v.consensus_voting_power
-    }
-
-    public fun get_network_signing_pubkey(v: &ValidatorInfo): &vector<u8> {
-      &v.network_signing_pubkey
     }
 
     public fun get_network_identity_pubkey(v: &ValidatorInfo): &vector<u8> {
@@ -167,7 +159,7 @@ module LibraSystem {
     // Get the ValidatorInfo for the ith validator
     public fun get_ith_validator_info(i: u64): ValidatorInfo acquires ValidatorSet {
       let validators_vec_ref = &borrow_global<ValidatorSet>(0x1D8).validators;
-      Transaction::assert(i < Vector::length(validators_vec_ref), 3);
+      assert(i < Vector::length(validators_vec_ref), 3);
       *Vector::borrow(validators_vec_ref, i)
     }
 
@@ -175,14 +167,14 @@ module LibraSystem {
     public fun get_ith_validator_address(i: u64): address acquires ValidatorSet {
       let validator_set = borrow_global<ValidatorSet>(0x1D8);
       let len = Vector::length(&validator_set.validators);
-      Transaction::assert(i < len, 3);
+      assert(i < len, 3);
       Vector::borrow(&validator_set.validators, i).addr
     }
 
     // Get the DiscoveryInfo for the ith validator
     public fun get_ith_discovery_info(i: u64): DiscoveryInfo acquires DiscoverySet {
         let discovery_vec_ref = &borrow_global<DiscoverySet>(0xD15C0).discovery_set;
-        Transaction::assert(i < Vector::length(discovery_vec_ref), 4);
+        assert(i < Vector::length(discovery_vec_ref), 4);
         *Vector::borrow(discovery_vec_ref, i)
     }
 
@@ -233,15 +225,15 @@ module LibraSystem {
 
    fun add_validator_(account_address: address) acquires ValidatorSet, DiscoverySet {
        // Only the Association can add new validators
-       Transaction::assert(Transaction::sender() == 0xA550C18, 1);
+       assert(Transaction::sender() == 0xA550C18, 1);
        // A prospective validator must have a validator config resource
-       Transaction::assert(ValidatorConfig::has(account_address), 17);
+       assert(ValidatorConfig::has(account_address), 17);
 
        let validator_set_ref = borrow_global_mut<ValidatorSet>(0x1D8);
        let discovery_set_ref = borrow_global_mut<DiscoverySet>(0xD15C0);
 
        // Ensure that this address is not already a validator
-       Transaction::assert(
+       assert(
            !is_validator_(&account_address, &validator_set_ref.validators),
            18
        );
@@ -258,12 +250,12 @@ module LibraSystem {
 
    public fun remove_validator(account_address: address) acquires ValidatorSet, DiscoverySet {
        // Only the Association can remove validators
-       Transaction::assert(Transaction::sender() == 0xA550C18, 1);
+       assert(Transaction::sender() == 0xA550C18, 1);
 
        let validator_set_ref = borrow_global_mut<ValidatorSet>(0x1D8);
        let discovery_set_ref = borrow_global_mut<DiscoverySet>(0xD15C0);
        // Ensure that this address is already a validator
-       Transaction::assert(
+       assert(
            is_validator_(&account_address, &validator_set_ref.validators),
            21
        );
@@ -287,17 +279,17 @@ module LibraSystem {
        emit_discovery_set_change();
    }
 
-   public fun rotate_consensus_pubkey(consensus_pubkey: vector<u8>) acquires ValidatorSet {
+   public fun set_consensus_pubkey(consensus_pubkey: vector<u8>) acquires ValidatorSet {
        let validator_set_ref = borrow_global_mut<ValidatorSet>(0x1D8);
        let account_address = Transaction::sender();
 
        // Ensure that this address is already a validator
-       Transaction::assert(
+       assert(
            is_validator_(&account_address, &validator_set_ref.validators),
            21
        );
 
-       ValidatorConfig::rotate_consensus_pubkey(consensus_pubkey);
+       ValidatorConfig::set_consensus_pubkey(consensus_pubkey);
 
        let validator_index = get_validator_index(
            &validator_set_ref.validators,
@@ -346,14 +338,20 @@ module LibraSystem {
    }
 
    fun reconfigure_() acquires ValidatorSet {
+       // Do not do anything if time is not set up yet.
+       if(LibraTimestamp::is_genesis()) {
+           return ()
+       };
+
        let validator_set_ref = borrow_global_mut<ValidatorSet>(0x1D8);
-       let current_block_time = LibraTimestamp::now_microseconds();
 
        // Ensure that there is at most one reconfiguration per transaction. This ensures that there is a 1-1
        // correspondence between system reconfigurations and emitted ReconfigurationEvents.
-       Transaction::assert(current_block_time > validator_set_ref.last_reconfiguration_time, 23);
 
+       let current_block_time = LibraTimestamp::now_microseconds();
+       assert(current_block_time > validator_set_ref.last_reconfiguration_time, 23);
        validator_set_ref.last_reconfiguration_time = current_block_time;
+
        emit_reconfiguration_event();
    }
 
@@ -365,6 +363,7 @@ module LibraSystem {
        LibraAccount::emit_event<ValidatorSetChangeEvent>(
            &mut validator_set_ref.change_events,
            ValidatorSetChangeEvent {
+               scheme: validator_set_ref.scheme,
                new_validator_set: *&validator_set_ref.validators,
            },
        );
@@ -389,16 +388,11 @@ module LibraSystem {
 
        let config = ValidatorConfig::config(validator_info.addr);
        let consensus_pubkey = ValidatorConfig::consensus_pubkey(&config);
-       let network_signing_pubkey = ValidatorConfig::validator_network_signing_pubkey(&config);
        let network_identity_pubkey = ValidatorConfig::validator_network_identity_pubkey(&config);
 
        let changed = false;
        if (&consensus_pubkey != &validator_info.consensus_pubkey) {
            *&mut validator_info.consensus_pubkey = consensus_pubkey;
-           changed = true;
-       };
-       if (&network_signing_pubkey != &validator_info.network_signing_pubkey) {
-           *&mut validator_info.network_signing_pubkey = network_signing_pubkey;
            changed = true;
        };
        if (&network_identity_pubkey != &validator_info.network_identity_pubkey) {
@@ -417,7 +411,6 @@ module LibraSystem {
           addr: addr,
           consensus_pubkey: ValidatorConfig::consensus_pubkey(&config),
           consensus_voting_power: 1,
-          network_signing_pubkey: ValidatorConfig::validator_network_signing_pubkey(&config),
           network_identity_pubkey: ValidatorConfig::validator_network_identity_pubkey(&config),
       }
    }
@@ -471,4 +464,5 @@ module LibraSystem {
               ValidatorConfig::fullnodes_network_address(&config),
       }
    }
+}
 }

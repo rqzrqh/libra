@@ -8,10 +8,14 @@
 
 //! new-transaction
 // Reconfiguration can only be invoked by association.
-import 0x0.LibraSystem;
+import 0x1.LibraConfig;
+import 0x1.Roles;
 
-main() {
-    LibraSystem.reconfigure();
+main(account: &signer) {
+    let x: Roles.Capability<Roles.AssociationRootRole>;
+    x = Roles.extract_privilege_to_capability<Roles.AssociationRootRole>(copy(account));
+    LibraConfig.reconfigure(&x);
+    Roles.restore_capability_to_privilege<Roles.AssociationRootRole>(move(account), move(x));
     return;
 }
 
@@ -20,23 +24,31 @@ main() {
 
 //! new-transaction
 //! sender: association
-import 0x0.LibraSystem;
+import 0x1.LibraConfig;
+import 0x1.Roles;
 
-main() {
-    LibraSystem.reconfigure();
+main(account: &signer) {
+    let x: Roles.Capability<Roles.AssociationRootRole>;
+    x = Roles.extract_privilege_to_capability<Roles.AssociationRootRole>(copy(account));
+    LibraConfig.reconfigure(&x);
+    Roles.restore_capability_to_privilege<Roles.AssociationRootRole>(move(account), move(x));
     return;
 }
 
-// check: ValidatorSetChangeEvent
+// check: NewEpochEvent
 // check: EXECUTED
 
 //! new-transaction
 //! sender: association
 // Cannot trigger two reconfiguration within the same block.
-import 0x0.LibraSystem;
+import 0x1.LibraConfig;
+import 0x1.Roles;
 
-main() {
-    LibraSystem.reconfigure();
+main(account: &signer) {
+    let x: Roles.Capability<Roles.AssociationRootRole>;
+    x = Roles.extract_privilege_to_capability<Roles.AssociationRootRole>(copy(account));
+    LibraConfig.reconfigure(&x);
+    Roles.restore_capability_to_privilege<Roles.AssociationRootRole>(move(account), move(x));
     return;
 }
 
@@ -49,12 +61,16 @@ main() {
 
 //! new-transaction
 //! sender: association
-import 0x0.LibraSystem;
+import 0x1.LibraConfig;
+import 0x1.Roles;
 
-main() {
-    LibraSystem.reconfigure();
+main(account: &signer) {
+    let x: Roles.Capability<Roles.AssociationRootRole>;
+    x = Roles.extract_privilege_to_capability<Roles.AssociationRootRole>(copy(account));
+    LibraConfig.reconfigure(&x);
+    Roles.restore_capability_to_privilege<Roles.AssociationRootRole>(move(account), move(x));
     return;
 }
 
-// check: ValidatorSetChangeEvent
+// check: NewEpochEvent
 // check: EXECUTED

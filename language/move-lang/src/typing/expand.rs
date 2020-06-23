@@ -3,8 +3,9 @@
 
 use super::core::{self, Context};
 use crate::{
+    expansion::ast::Value_,
     naming::ast::{BuiltinTypeName_, FunctionSignature, TParam, Type, Type_},
-    parser::ast::{Kind, Kind_, Value_},
+    parser::ast::{Kind, Kind_},
     typing::ast as T,
 };
 use move_ir_types::location::*;
@@ -85,7 +86,7 @@ pub fn type_(context: &mut Context, ty: &mut Type) {
 fn get_kind(sp!(loc, ty_): &Type) -> Kind {
     use Type_::*;
     match ty_ {
-        Anything | UnresolvedError | Unit | Ref(_, _) => sp(*loc, Kind_::Unrestricted),
+        Anything | UnresolvedError | Unit | Ref(_, _) => sp(*loc, Kind_::Copyable),
         Var(_) => panic!("ICE unexpanded type"),
         Param(TParam { kind, .. }) => kind.clone(),
         Apply(Some(kind), _, _) => kind.clone(),
@@ -153,7 +154,7 @@ fn exp(context: &mut Context, e: &mut T::Exp) {
             let from_user = false;
             let var = v.clone();
             e.exp.value = match get_kind(&e.ty).value {
-                Kind_::Unrestricted => E::Copy { from_user, var },
+                Kind_::Copyable => E::Copy { from_user, var },
                 Kind_::Unknown | Kind_::Affine | Kind_::Resource => E::Move { from_user, var },
             }
         }
@@ -209,7 +210,7 @@ fn exp(context: &mut Context, e: &mut T::Exp) {
 
         E::Spec(_, used_locals) => used_locals.values_mut().for_each(|ty| type_(context, ty)),
 
-        E::Unit
+        E::Unit { .. }
         | E::Value(_)
         | E::Move { .. }
         | E::Copy { .. }
@@ -305,12 +306,14 @@ fn builtin_function(context: &mut Context, b: &mut T::BuiltinFunction) {
     use T::BuiltinFunction_ as B;
     match &mut b.value {
         B::MoveToSender(bt)
+        | B::MoveTo(bt)
         | B::MoveFrom(bt)
         | B::BorrowGlobal(_, bt)
         | B::Exists(bt)
         | B::Freeze(bt) => {
             type_(context, bt);
         }
+        B::Assert => (),
     }
 }
 

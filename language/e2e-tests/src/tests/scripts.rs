@@ -1,15 +1,15 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{account::AccountData, executor::FakeExecutor, gas_costs};
+use crate::{account, account::AccountData, executor::FakeExecutor, gas_costs};
 use libra_types::{
-    account_address::AccountAddress, account_config::lbr_type_tag,
-    on_chain_config::VMPublishingOption, transaction::TransactionStatus, vm_error::StatusCode,
+    account_address::AccountAddress, account_config, on_chain_config::VMPublishingOption,
+    transaction::TransactionStatus, vm_error::StatusCode,
 };
 use move_core_types::identifier::Identifier;
 use vm::file_format::{
-    empty_script, AddressPoolIndex, Bytecode, FunctionHandle, FunctionHandleIndex,
-    FunctionSignatureIndex, IdentifierIndex, LocalsSignatureIndex, ModuleHandle, ModuleHandleIndex,
+    empty_script, AddressIdentifierIndex, Bytecode, FunctionHandle, FunctionHandleIndex,
+    IdentifierIndex, ModuleHandle, ModuleHandleIndex, SignatureIndex,
 };
 
 #[test]
@@ -21,16 +21,17 @@ fn script_code_unverifiable() {
 
     // create a bogus script
     let mut script = empty_script();
-    script.main.code.code = vec![Bytecode::LdU8(0), Bytecode::Add, Bytecode::Ret];
+    script.code.code = vec![Bytecode::LdU8(0), Bytecode::Add, Bytecode::Ret];
     let mut blob = vec![];
     script.serialize(&mut blob).expect("script must serialize");
     let txn = sender.account().create_signed_txn_with_args(
         blob,
         vec![],
+        vec![],
         10,
         gas_costs::TXN_RESERVED,
         1,
-        lbr_type_tag(),
+        account_config::LBR_NAME.to_owned(),
     );
 
     // execute transaction
@@ -49,9 +50,12 @@ fn script_code_unverifiable() {
     // Check that numbers in store are correct.
     let gas = output.gas_used();
     let balance = 1_000_000 - gas;
-    let (updated_sender, updated_sender_balance) = executor
-        .read_account_info(sender.account())
+    let updated_sender = executor
+        .read_account_resource(sender.account())
         .expect("sender must exist");
+    let updated_sender_balance = executor
+        .read_balance_resource(sender.account(), account::lbr_currency_code())
+        .expect("sender balance must exist");
     assert_eq!(balance, updated_sender_balance.coin());
     assert_eq!(11, updated_sender.sequence_number());
 }
@@ -65,13 +69,14 @@ fn script_none_existing_module_dep() {
 
     // create a bogus script
     let mut script = empty_script();
+
     // make a non existent external module
     script
-        .address_pool
-        .push(AccountAddress::new([1u8; AccountAddress::LENGTH]));
+        .address_identifiers
+        .push(AccountAddress::new([2u8; AccountAddress::LENGTH]));
     script.identifiers.push(Identifier::new("module").unwrap());
     let module_handle = ModuleHandle {
-        address: AddressPoolIndex((script.address_pool.len() - 1) as u16),
+        address: AddressIdentifierIndex((script.address_identifiers.len() - 1) as u16),
         name: IdentifierIndex((script.identifiers.len() - 1) as u16),
     };
     script.module_handles.push(module_handle);
@@ -80,15 +85,16 @@ fn script_none_existing_module_dep() {
     let fun_handle = FunctionHandle {
         module: ModuleHandleIndex((script.module_handles.len() - 1) as u16),
         name: IdentifierIndex((script.identifiers.len() - 1) as u16),
-        signature: FunctionSignatureIndex(0),
+        parameters: SignatureIndex(0),
+        return_: SignatureIndex(0),
+        type_parameters: vec![],
     };
     script.function_handles.push(fun_handle);
 
-    script.main.code.code = vec![
-        Bytecode::Call(
-            FunctionHandleIndex((script.function_handles.len() - 1) as u16),
-            LocalsSignatureIndex(0),
-        ),
+    script.code.code = vec![
+        Bytecode::Call(FunctionHandleIndex(
+            (script.function_handles.len() - 1) as u16,
+        )),
         Bytecode::Ret,
     ];
     let mut blob = vec![];
@@ -96,10 +102,11 @@ fn script_none_existing_module_dep() {
     let txn = sender.account().create_signed_txn_with_args(
         blob,
         vec![],
+        vec![],
         10,
         gas_costs::TXN_RESERVED,
         1,
-        lbr_type_tag(),
+        account_config::LBR_NAME.to_owned(),
     );
 
     // execute transaction
@@ -115,9 +122,12 @@ fn script_none_existing_module_dep() {
     // Check that numbers in store are correct.
     let gas = output.gas_used();
     let balance = 1_000_000 - gas;
-    let (updated_sender, updated_sender_balance) = executor
-        .read_account_info(sender.account())
+    let updated_sender = executor
+        .read_account_resource(sender.account())
         .expect("sender must exist");
+    let updated_sender_balance = executor
+        .read_balance_resource(sender.account(), account::lbr_currency_code())
+        .expect("sender balance must exist");
     assert_eq!(balance, updated_sender_balance.coin());
     assert_eq!(11, updated_sender.sequence_number());
 }
@@ -131,32 +141,32 @@ fn script_non_existing_function_dep() {
 
     // create a bogus script
     let mut script = empty_script();
-    // AddressUtil module
+
+    // LCS module
     script
-        .address_pool
-        .push(AccountAddress::new([0u8; AccountAddress::LENGTH]));
-    script
-        .identifiers
-        .push(Identifier::new("AddressUtil").unwrap());
+        .address_identifiers
+        .push(account_config::CORE_CODE_ADDRESS);
+    script.identifiers.push(Identifier::new("LCS").unwrap());
     let module_handle = ModuleHandle {
-        address: AddressPoolIndex((script.address_pool.len() - 1) as u16),
+        address: AddressIdentifierIndex((script.address_identifiers.len() - 1) as u16),
         name: IdentifierIndex((script.identifiers.len() - 1) as u16),
     };
     script.module_handles.push(module_handle);
-    // make a non existent function on AddressUtil
+    // make a non existent function on LCS
     script.identifiers.push(Identifier::new("foo").unwrap());
     let fun_handle = FunctionHandle {
         module: ModuleHandleIndex((script.module_handles.len() - 1) as u16),
         name: IdentifierIndex((script.identifiers.len() - 1) as u16),
-        signature: FunctionSignatureIndex(0),
+        parameters: SignatureIndex(0),
+        return_: SignatureIndex(0),
+        type_parameters: vec![],
     };
     script.function_handles.push(fun_handle);
 
-    script.main.code.code = vec![
-        Bytecode::Call(
-            FunctionHandleIndex((script.function_handles.len() - 1) as u16),
-            LocalsSignatureIndex(0),
-        ),
+    script.code.code = vec![
+        Bytecode::Call(FunctionHandleIndex(
+            (script.function_handles.len() - 1) as u16,
+        )),
         Bytecode::Ret,
     ];
     let mut blob = vec![];
@@ -164,10 +174,11 @@ fn script_non_existing_function_dep() {
     let txn = sender.account().create_signed_txn_with_args(
         blob,
         vec![],
+        vec![],
         10,
         gas_costs::TXN_RESERVED,
         1,
-        lbr_type_tag(),
+        account_config::LBR_NAME.to_owned(),
     );
 
     // execute transaction
@@ -183,9 +194,12 @@ fn script_non_existing_function_dep() {
     // Check that numbers in store are correct.
     let gas = output.gas_used();
     let balance = 1_000_000 - gas;
-    let (updated_sender, updated_sender_balance) = executor
-        .read_account_info(sender.account())
+    let updated_sender = executor
+        .read_account_resource(sender.account())
         .expect("sender must exist");
+    let updated_sender_balance = executor
+        .read_balance_resource(sender.account(), account::lbr_currency_code())
+        .expect("sender balance must exist");
     assert_eq!(balance, updated_sender_balance.coin());
     assert_eq!(11, updated_sender.sequence_number());
 }
@@ -199,34 +213,34 @@ fn script_bad_sig_function_dep() {
 
     // create a bogus script
     let mut script = empty_script();
-    // AddressUtil module
+
+    // LCS module
     script
-        .address_pool
-        .push(AccountAddress::new([0u8; AccountAddress::LENGTH]));
-    script
-        .identifiers
-        .push(Identifier::new("AddressUtil").unwrap());
+        .address_identifiers
+        .push(account_config::CORE_CODE_ADDRESS);
+    script.identifiers.push(Identifier::new("LCS").unwrap());
     let module_handle = ModuleHandle {
-        address: AddressPoolIndex((script.address_pool.len() - 1) as u16),
+        address: AddressIdentifierIndex((script.address_identifiers.len() - 1) as u16),
         name: IdentifierIndex((script.identifiers.len() - 1) as u16),
     };
     script.module_handles.push(module_handle);
-    // AddressUtil::address_to_bytes with bad sig
+    // LCS::to_bytes with bad sig
     script
         .identifiers
-        .push(Identifier::new("address_to_bytes").unwrap());
+        .push(Identifier::new("to_bytes").unwrap());
     let fun_handle = FunctionHandle {
         module: ModuleHandleIndex((script.module_handles.len() - 1) as u16),
         name: IdentifierIndex((script.identifiers.len() - 1) as u16),
-        signature: FunctionSignatureIndex(0),
+        parameters: SignatureIndex(0),
+        return_: SignatureIndex(0),
+        type_parameters: vec![],
     };
     script.function_handles.push(fun_handle);
 
-    script.main.code.code = vec![
-        Bytecode::Call(
-            FunctionHandleIndex((script.function_handles.len() - 1) as u16),
-            LocalsSignatureIndex(0),
-        ),
+    script.code.code = vec![
+        Bytecode::Call(FunctionHandleIndex(
+            (script.function_handles.len() - 1) as u16,
+        )),
         Bytecode::Ret,
     ];
     let mut blob = vec![];
@@ -234,10 +248,11 @@ fn script_bad_sig_function_dep() {
     let txn = sender.account().create_signed_txn_with_args(
         blob,
         vec![],
+        vec![],
         10,
         gas_costs::TXN_RESERVED,
         1,
-        lbr_type_tag(),
+        account_config::LBR_NAME.to_owned(),
     );
 
     // execute transaction
@@ -253,9 +268,12 @@ fn script_bad_sig_function_dep() {
     // Check that numbers in store are correct.
     let gas = output.gas_used();
     let balance = 1_000_000 - gas;
-    let (updated_sender, updated_sender_balance) = executor
-        .read_account_info(sender.account())
+    let updated_sender = executor
+        .read_account_resource(sender.account())
         .expect("sender must exist");
+    let updated_sender_balance = executor
+        .read_balance_resource(sender.account(), account::lbr_currency_code())
+        .expect("sender balance must exist");
     assert_eq!(balance, updated_sender_balance.coin());
     assert_eq!(11, updated_sender.sequence_number());
 }

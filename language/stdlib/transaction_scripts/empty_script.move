@@ -1,1 +1,3 @@
-fun main() { }
+script {
+fun empty_script() { }
+}

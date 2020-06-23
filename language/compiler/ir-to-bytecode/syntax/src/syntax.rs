@@ -392,6 +392,7 @@ fn parse_qualified_function_name<'input>(
         | Tok::GetTxnSender
         | Tok::MoveFrom
         | Tok::MoveToSender
+        | Tok::MoveTo
         | Tok::Freeze
         | Tok::ToU8
         | Tok::ToU64
@@ -530,6 +531,7 @@ fn parse_call_or_term_<'input>(
         | Tok::GetTxnSender
         | Tok::MoveFrom
         | Tok::MoveToSender
+        | Tok::MoveTo
         | Tok::Freeze
         | Tok::DotNameValue
         | Tok::ToU8
@@ -744,6 +746,12 @@ fn parse_builtin<'input>(
             consume_end_of_generics(tokens)?;
             Ok(Builtin::MoveToSender(StructName::new(name), type_actuals))
         }
+        Tok::MoveTo => {
+            tokens.advance()?;
+            let (name, type_actuals) = parse_name_and_type_actuals(tokens)?;
+            consume_end_of_generics(tokens)?;
+            Ok(Builtin::MoveTo(StructName::new(name), type_actuals))
+        }
         Tok::Freeze => {
             tokens.advance()?;
             Ok(Builtin::Freeze)
@@ -923,6 +931,7 @@ fn parse_cmd_<'input>(tokens: &mut Lexer<'input>) -> Result<Cmd_, ParseError<Loc
         | Tok::GetTxnSender
         | Tok::MoveFrom
         | Tok::MoveToSender
+        | Tok::MoveTo
         | Tok::Freeze
         | Tok::DotNameValue
         | Tok::ToU8
@@ -1130,13 +1139,13 @@ fn parse_function_block_<'input>(
 
 // Kind: Kind = {
 //     "resource" => Kind::Resource,
-//     "unrestricted" => Kind::Unrestricted,
+//     "copyable" => Kind::Copyable,
 // }
 
 fn parse_kind<'input>(tokens: &mut Lexer<'input>) -> Result<Kind, ParseError<Loc, anyhow::Error>> {
     let k = match tokens.peek() {
         Tok::Resource => Kind::Resource,
-        Tok::Unrestricted => Kind::Unrestricted,
+        Tok::Copyable => Kind::Copyable,
         _ => {
             return Err(ParseError::InvalidToken {
                 location: current_token_loc(tokens),
@@ -1149,6 +1158,7 @@ fn parse_kind<'input>(tokens: &mut Lexer<'input>) -> Result<Kind, ParseError<Loc
 
 // Type: Type = {
 //     "address" => Type::Address,
+//     "signer" => Type::Signer,
 //     "u64" => Type::U64,
 //     "bool" => Type::Bool,
 //     "bytearray" => Type::ByteArray,
@@ -1163,6 +1173,10 @@ fn parse_type<'input>(tokens: &mut Lexer<'input>) -> Result<Type, ParseError<Loc
         Tok::Address => {
             tokens.advance()?;
             Type::Address
+        }
+        Tok::Signer => {
+            tokens.advance()?;
+            Type::Signer
         }
         Tok::U8 => {
             tokens.advance()?;
@@ -1229,7 +1243,7 @@ fn parse_type_var<'input>(
 //     <type_var: Sp<TypeVar>> <k: (":" <Kind>)?> =>? {
 // }
 
-fn parse_type_formal<'input>(
+fn parse_type_parameter<'input>(
     tokens: &mut Lexer<'input>,
 ) -> Result<(TypeVar, Kind), ParseError<Loc, anyhow::Error>> {
     let type_var = parse_type_var(tokens)?;
@@ -1265,7 +1279,7 @@ fn parse_type_actuals<'input>(
 //     <n: Name> => (n, vec![]),
 // }
 
-fn parse_name_and_type_formals<'input>(
+fn parse_name_and_type_parameters<'input>(
     tokens: &mut Lexer<'input>,
 ) -> Result<(String, Vec<(TypeVar, Kind)>), ParseError<Loc, anyhow::Error>> {
     let mut has_types = false;
@@ -1276,7 +1290,7 @@ fn parse_name_and_type_formals<'input>(
         parse_name(tokens)?
     };
     let k = if has_types {
-        let list = parse_comma_list(tokens, &[Tok::Greater], parse_type_formal, true)?;
+        let list = parse_comma_list(tokens, &[Tok::Greater], parse_type_parameter, true)?;
         consume_token(tokens, Tok::Greater)?;
         list
     } else {
@@ -1713,14 +1727,14 @@ fn parse_synthetic_<'input>(
 // }
 
 // MoveFunctionDecl : (FunctionName, Function) = {
-//     <p: Public?> <name_and_type_formals: NameAndTypeFormals> "(" <args:
+//     <p: Public?> <name_and_type_parameters: NameAndTypeFormals> "(" <args:
 //     (ArgDecl)*> ")" <ret: ReturnType?>
 //     <acquires: AcquireList?>
 //     <locals_body: FunctionBlock> =>? { ... }
 // }
 
 // NativeFunctionDecl: (FunctionName, Function) = {
-//     <nat: NativeTag> <p: Public?> <name_and_type_formals: NameAndTypeFormals>
+//     <nat: NativeTag> <p: Public?> <name_and_type_parameters: NameAndTypeFormals>
 //     "(" <args: Comma<ArgDecl>> ")" <ret: ReturnType?>
 //         <acquires: AcquireList?>
 //         ";" =>? { ... }
@@ -1745,7 +1759,7 @@ fn parse_function_decl<'input>(
         false
     };
 
-    let (name, type_formals) = parse_name_and_type_formals(tokens)?;
+    let (name, type_parameters) = parse_name_and_type_parameters(tokens)?;
     consume_token(tokens, Tok::LParen)?;
     let args = parse_comma_list(tokens, &[Tok::RParen], parse_arg_decl, true)?;
     consume_token(tokens, Tok::RParen)?;
@@ -1779,8 +1793,8 @@ fn parse_function_decl<'input>(
             FunctionVisibility::Internal
         },
         args,
-        ret.unwrap_or_else(|| vec![]),
-        type_formals,
+        ret.unwrap_or_else(Vec::new),
+        type_parameters,
         acquires.unwrap_or_else(Vec::new),
         specifications,
         if is_native {
@@ -1826,6 +1840,14 @@ fn parse_script<'input>(
         imports.push(parse_import_decl(tokens)?);
     }
     consume_token(tokens, Tok::Main)?;
+    let type_formals = if tokens.peek() == Tok::Less {
+        consume_token(tokens, Tok::Less)?;
+        let list = parse_comma_list(tokens, &[Tok::Greater], parse_type_parameter, true)?;
+        consume_token(tokens, Tok::Greater)?;
+        list
+    } else {
+        vec![]
+    };
     consume_token(tokens, Tok::LParen)?;
     let args = parse_comma_list(tokens, &[Tok::RParen], parse_arg_decl, true)?;
     consume_token(tokens, Tok::RParen)?;
@@ -1835,7 +1857,7 @@ fn parse_script<'input>(
         FunctionVisibility::Public,
         args,
         vec![],
-        vec![],
+        type_formals,
         vec![],
         vec![],
         FunctionBody::Move { locals, code: body },
@@ -1849,10 +1871,10 @@ fn parse_script<'input>(
 //     "resource" => true
 // }
 // StructDecl: StructDefinition_ = {
-//     <is_nominal_resource: StructKind> <name_and_type_formals:
+//     <is_nominal_resource: StructKind> <name_and_type_parameters:
 //     NameAndTypeFormals> "{" <data: Comma<FieldDecl>> "}" =>? { ... }
 //     <native: NativeTag> <is_nominal_resource: StructKind>
-//     <name_and_type_formals: NameAndTypeFormals> ";" =>? { ... }
+//     <name_and_type_parameters: NameAndTypeFormals> ";" =>? { ... }
 // }
 
 fn parse_struct_decl<'input>(
@@ -1878,7 +1900,7 @@ fn parse_struct_decl<'input>(
     };
     tokens.advance()?;
 
-    let (name, type_formals) = parse_name_and_type_formals(tokens)?;
+    let (name, type_parameters) = parse_name_and_type_parameters(tokens)?;
 
     if is_native {
         consume_token(tokens, Tok::Semicolon)?;
@@ -1887,7 +1909,7 @@ fn parse_struct_decl<'input>(
             tokens.file_name(),
             start_loc,
             end_loc,
-            StructDefinition_::native(is_nominal_resource, name, type_formals)?,
+            StructDefinition_::native(is_nominal_resource, name, type_parameters)?,
         ));
     }
 
@@ -1912,7 +1934,7 @@ fn parse_struct_decl<'input>(
         StructDefinition_::move_declared(
             is_nominal_resource,
             name,
-            type_formals,
+            type_parameters,
             fields,
             invariants,
         )?,

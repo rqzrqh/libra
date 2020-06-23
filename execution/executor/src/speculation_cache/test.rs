@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use libra_types::{block_info::BlockInfo, validator_set::ValidatorSet};
+use libra_types::{block_info::BlockInfo, epoch_state::EpochState};
 
 fn id(index: u64) -> HashValue {
     let bytes = index.to_be_bytes();
@@ -29,7 +29,7 @@ fn gen_ledger_info(block_id: HashValue, reconfig: bool) -> LedgerInfo {
             0,
             0,
             if reconfig {
-                Some(ValidatorSet::empty())
+                Some(EpochState::empty())
             } else {
                 None
             },
