@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -96,8 +96,8 @@ impl Command for QueryCommandGetLatestAccountState {
     }
     fn execute(&self, client: &mut ClientProxy, params: &[&str]) {
         println!(">> Getting latest account state");
-        match client.get_latest_account_state(&params) {
-            Ok((acc, version)) => println!(
+        match client.get_latest_account(&params) {
+            Ok(acc) => println!(
                 "Latest account state is: \n \
                  Account: {:#?}\n \
                  State: {:#?}\n \
@@ -106,7 +106,7 @@ impl Command for QueryCommandGetLatestAccountState {
                     .get_account_address_from_parameter(params[1])
                     .expect("Unable to parse account parameter"),
                 acc,
-                version,
+                client.get_latest_version(),
             ),
             Err(e) => report_error("Error getting latest account state", e),
         }

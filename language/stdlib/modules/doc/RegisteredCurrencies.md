@@ -3,19 +3,25 @@
 
 # Module `0x1::RegisteredCurrencies`
 
-### Table of Contents
+Module for registering currencies in Diem. Basically, this means adding a
+string (vector<u8>) for the currency name to vector of names in DiemConfig.
+
 
 -  [Struct `RegisteredCurrencies`](#0x1_RegisteredCurrencies_RegisteredCurrencies)
--  [Struct `RegistrationCapability`](#0x1_RegisteredCurrencies_RegistrationCapability)
+-  [Constants](#@Constants_0)
 -  [Function `initialize`](#0x1_RegisteredCurrencies_initialize)
--  [Function `empty`](#0x1_RegisteredCurrencies_empty)
 -  [Function `add_currency_code`](#0x1_RegisteredCurrencies_add_currency_code)
--  [Specification](#0x1_RegisteredCurrencies_Specification)
-    -  [Module specifications](#0x1_RegisteredCurrencies_@Module_specifications)
-    -  [Function `initialize`](#0x1_RegisteredCurrencies_Specification_initialize)
-        -  [Initialization](#0x1_RegisteredCurrencies_@Initialization)
-        -  [Uniqueness of the RegisteredCurrencies config.](#0x1_RegisteredCurrencies_@Uniqueness_of_the_RegisteredCurrencies_config.)
-        -  [Currency codes](#0x1_RegisteredCurrencies_@Currency_codes)
+-  [Module Specification](#@Module_Specification_1)
+    -  [Initialization](#@Initialization_2)
+    -  [Helper Functions](#@Helper_Functions_3)
+
+
+<pre><code><b>use</b> <a href="DiemConfig.md#0x1_DiemConfig">0x1::DiemConfig</a>;
+<b>use</b> <a href="DiemTimestamp.md#0x1_DiemTimestamp">0x1::DiemTimestamp</a>;
+<b>use</b> <a href="Errors.md#0x1_Errors">0x1::Errors</a>;
+<b>use</b> <a href="Roles.md#0x1_Roles">0x1::Roles</a>;
+<b>use</b> <a href="Vector.md#0x1_Vector">0x1::Vector</a>;
+</code></pre>
 
 
 
@@ -23,9 +29,12 @@
 
 ## Struct `RegisteredCurrencies`
 
+A DiemConfig config holding all of the currency codes for registered
+currencies. The inner vector<u8>'s are string representations of
+currency names.
 
 
-<pre><code><b>struct</b> <a href="#0x1_RegisteredCurrencies">RegisteredCurrencies</a>
+<pre><code><b>struct</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies">RegisteredCurrencies</a>
 </code></pre>
 
 
@@ -36,7 +45,6 @@
 
 <dl>
 <dt>
-
 <code>currency_codes: vector&lt;vector&lt;u8&gt;&gt;</code>
 </dt>
 <dd>
@@ -47,41 +55,30 @@
 
 </details>
 
-<a name="0x1_RegisteredCurrencies_RegistrationCapability"></a>
+<a name="@Constants_0"></a>
 
-## Struct `RegistrationCapability`
+## Constants
 
 
+<a name="0x1_RegisteredCurrencies_ECURRENCY_CODE_ALREADY_TAKEN"></a>
 
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_RegisteredCurrencies_RegistrationCapability">RegistrationCapability</a>
+Attempted to add a currency code that is already in use
+
+
+<pre><code><b>const</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_ECURRENCY_CODE_ALREADY_TAKEN">ECURRENCY_CODE_ALREADY_TAKEN</a>: u64 = 0;
 </code></pre>
 
 
-
-<details>
-<summary>Fields</summary>
-
-
-<dl>
-<dt>
-
-<code>cap: <a href="LibraConfig.md#0x1_LibraConfig_ModifyConfigCapability">LibraConfig::ModifyConfigCapability</a>&lt;<a href="#0x1_RegisteredCurrencies_RegisteredCurrencies">RegisteredCurrencies::RegisteredCurrencies</a>&gt;</code>
-</dt>
-<dd>
-
-</dd>
-</dl>
-
-
-</details>
 
 <a name="0x1_RegisteredCurrencies_initialize"></a>
 
 ## Function `initialize`
 
+Initializes this module. Can only be called from genesis, with
+a Diem root signer.
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_RegisteredCurrencies_initialize">initialize</a>(config_account: &signer, create_config_capability: &<a href="Roles.md#0x1_Roles_Capability">Roles::Capability</a>&lt;<a href="LibraConfig.md#0x1_LibraConfig_CreateOnChainConfig">LibraConfig::CreateOnChainConfig</a>&gt;): <a href="#0x1_RegisteredCurrencies_RegistrationCapability">RegisteredCurrencies::RegistrationCapability</a>
+<pre><code><b>public</b> <b>fun</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_initialize">initialize</a>(dr_account: &signer)
 </code></pre>
 
 
@@ -90,22 +87,13 @@
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_RegisteredCurrencies_initialize">initialize</a>(
-    config_account: &signer,
-    create_config_capability: &Capability&lt;CreateOnChainConfig&gt;,
-): <a href="#0x1_RegisteredCurrencies_RegistrationCapability">RegistrationCapability</a> {
-    // enforce that this is only going <b>to</b> one specific address,
-    <b>assert</b>(
-        <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(config_account) == <a href="CoreAddresses.md#0x1_CoreAddresses_DEFAULT_CONFIG_ADDRESS">CoreAddresses::DEFAULT_CONFIG_ADDRESS</a>(),
-        0
+<pre><code><b>public</b> <b>fun</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_initialize">initialize</a>(dr_account: &signer) {
+    <a href="DiemTimestamp.md#0x1_DiemTimestamp_assert_genesis">DiemTimestamp::assert_genesis</a>();
+    <a href="Roles.md#0x1_Roles_assert_diem_root">Roles::assert_diem_root</a>(dr_account);
+    <a href="DiemConfig.md#0x1_DiemConfig_publish_new_config">DiemConfig::publish_new_config</a>(
+        dr_account,
+        <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies">RegisteredCurrencies</a> { currency_codes: <a href="Vector.md#0x1_Vector_empty">Vector::empty</a>() }
     );
-    <b>let</b> cap = <a href="LibraConfig.md#0x1_LibraConfig_publish_new_config_with_capability">LibraConfig::publish_new_config_with_capability</a>(
-        config_account,
-        create_config_capability,
-        <a href="#0x1_RegisteredCurrencies_empty">empty</a>()
-    );
-
-    <a href="#0x1_RegisteredCurrencies_RegistrationCapability">RegistrationCapability</a> { cap }
 }
 </code></pre>
 
@@ -113,23 +101,40 @@
 
 </details>
 
-<a name="0x1_RegisteredCurrencies_empty"></a>
-
-## Function `empty`
-
+<details>
+<summary>Specification</summary>
 
 
-<pre><code><b>fun</b> <a href="#0x1_RegisteredCurrencies_empty">empty</a>(): <a href="#0x1_RegisteredCurrencies_RegisteredCurrencies">RegisteredCurrencies::RegisteredCurrencies</a>
+
+<pre><code><b>include</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_InitializeAbortsIf">InitializeAbortsIf</a>;
+<b>include</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_InitializeEnsures">InitializeEnsures</a>;
 </code></pre>
 
 
 
-<details>
-<summary>Implementation</summary>
+
+<a name="0x1_RegisteredCurrencies_InitializeAbortsIf"></a>
 
 
-<pre><code><b>fun</b> <a href="#0x1_RegisteredCurrencies_empty">empty</a>(): <a href="#0x1_RegisteredCurrencies">RegisteredCurrencies</a> {
-    <a href="#0x1_RegisteredCurrencies">RegisteredCurrencies</a> { currency_codes: <a href="Vector.md#0x1_Vector_empty">Vector::empty</a>() }
+<pre><code><b>schema</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_InitializeAbortsIf">InitializeAbortsIf</a> {
+    dr_account: signer;
+    <b>include</b> <a href="DiemTimestamp.md#0x1_DiemTimestamp_AbortsIfNotGenesis">DiemTimestamp::AbortsIfNotGenesis</a>;
+    <b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotDiemRoot">Roles::AbortsIfNotDiemRoot</a>{account: dr_account};
+    <b>include</b> <a href="DiemConfig.md#0x1_DiemConfig_PublishNewConfigAbortsIf">DiemConfig::PublishNewConfigAbortsIf</a>&lt;<a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;;
+}
+</code></pre>
+
+
+
+
+<a name="0x1_RegisteredCurrencies_InitializeEnsures"></a>
+
+
+<pre><code><b>schema</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_InitializeEnsures">InitializeEnsures</a> {
+    <b>include</b> <a href="DiemConfig.md#0x1_DiemConfig_PublishNewConfigEnsures">DiemConfig::PublishNewConfigEnsures</a>&lt;<a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;{
+        payload: <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies">RegisteredCurrencies</a> { currency_codes: <a href="Vector.md#0x1_Vector_empty">Vector::empty</a>() }
+    };
+    <b>ensures</b> len(<a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_get_currency_codes">get_currency_codes</a>()) == 0;
 }
 </code></pre>
 
@@ -141,9 +146,10 @@
 
 ## Function `add_currency_code`
 
+Adds a new currency code. The currency code must not yet exist.
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_RegisteredCurrencies_add_currency_code">add_currency_code</a>(currency_code: vector&lt;u8&gt;, cap: &<a href="#0x1_RegisteredCurrencies_RegistrationCapability">RegisteredCurrencies::RegistrationCapability</a>)
+<pre><code><b>public</b> <b>fun</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_add_currency_code">add_currency_code</a>(dr_account: &signer, currency_code: vector&lt;u8&gt;)
 </code></pre>
 
 
@@ -152,13 +158,17 @@
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_RegisteredCurrencies_add_currency_code">add_currency_code</a>(
+<pre><code><b>public</b> <b>fun</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_add_currency_code">add_currency_code</a>(
+    dr_account: &signer,
     currency_code: vector&lt;u8&gt;,
-    cap: &<a href="#0x1_RegisteredCurrencies_RegistrationCapability">RegistrationCapability</a>,
 ) {
-    <b>let</b> config = <a href="LibraConfig.md#0x1_LibraConfig_get">LibraConfig::get</a>&lt;<a href="#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;();
+    <b>let</b> config = <a href="DiemConfig.md#0x1_DiemConfig_get">DiemConfig::get</a>&lt;<a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;();
+    <b>assert</b>(
+        !<a href="Vector.md#0x1_Vector_contains">Vector::contains</a>(&config.currency_codes, &currency_code),
+        <a href="Errors.md#0x1_Errors_invalid_argument">Errors::invalid_argument</a>(<a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_ECURRENCY_CODE_ALREADY_TAKEN">ECURRENCY_CODE_ALREADY_TAKEN</a>)
+    );
     <a href="Vector.md#0x1_Vector_push_back">Vector::push_back</a>(&<b>mut</b> config.currency_codes, currency_code);
-    <a href="LibraConfig.md#0x1_LibraConfig_set_with_capability">LibraConfig::set_with_capability</a>(&cap.cap, config);
+    <a href="DiemConfig.md#0x1_DiemConfig_set">DiemConfig::set</a>(dr_account, config);
 }
 </code></pre>
 
@@ -166,131 +176,94 @@
 
 </details>
 
-<a name="0x1_RegisteredCurrencies_Specification"></a>
-
-## Specification
-
-
-<a name="0x1_RegisteredCurrencies_@Module_specifications"></a>
-
-### Module specifications
+<details>
+<summary>Specification</summary>
 
 
 
-<pre><code>pragma verify = <b>true</b>;
-<a name="0x1_RegisteredCurrencies_spec_singleton_address"></a>
-<b>define</b> <a href="#0x1_RegisteredCurrencies_spec_singleton_address">spec_singleton_address</a>(): address { 0xF1A95 }
-<a name="0x1_RegisteredCurrencies_spec_is_initialized"></a>
-<b>define</b> <a href="#0x1_RegisteredCurrencies_spec_is_initialized">spec_is_initialized</a>():bool {
-    <a href="LibraConfig.md#0x1_LibraConfig_spec_is_published">LibraConfig::spec_is_published</a>&lt;<a href="#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;(<a href="#0x1_RegisteredCurrencies_spec_singleton_address">spec_singleton_address</a>())
+<pre><code><b>include</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_AddCurrencyCodeAbortsIf">AddCurrencyCodeAbortsIf</a>;
+<b>include</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_AddCurrencyCodeEnsures">AddCurrencyCodeEnsures</a>;
+</code></pre>
+
+
+
+
+<a name="0x1_RegisteredCurrencies_AddCurrencyCodeAbortsIf"></a>
+
+
+<pre><code><b>schema</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_AddCurrencyCodeAbortsIf">AddCurrencyCodeAbortsIf</a> {
+    dr_account: &signer;
+    currency_code: vector&lt;u8&gt;;
+    <b>include</b> <a href="DiemConfig.md#0x1_DiemConfig_SetAbortsIf">DiemConfig::SetAbortsIf</a>&lt;<a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;{ account: dr_account };
 }
 </code></pre>
 
 
-
-<a name="0x1_RegisteredCurrencies_Specification_initialize"></a>
-
-### Function `initialize`
+The same currency code can be only added once.
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_RegisteredCurrencies_initialize">initialize</a>(config_account: &signer, create_config_capability: &<a href="Roles.md#0x1_Roles_Capability">Roles::Capability</a>&lt;<a href="LibraConfig.md#0x1_LibraConfig_CreateOnChainConfig">LibraConfig::CreateOnChainConfig</a>&gt;): <a href="#0x1_RegisteredCurrencies_RegistrationCapability">RegisteredCurrencies::RegistrationCapability</a>
-</code></pre>
-
-
-
-<a name="0x1_RegisteredCurrencies_@Initialization"></a>
-
-#### Initialization
-
-
-After
-<code>initialize</code> is called, the module is initialized.
-
-
-<pre><code>pragma aborts_if_is_partial = <b>true</b>;
-<b>aborts_if</b> <a href="#0x1_RegisteredCurrencies_spec_is_initialized">spec_is_initialized</a>();
-<b>ensures</b> <a href="#0x1_RegisteredCurrencies_spec_is_initialized">spec_is_initialized</a>();
-</code></pre>
-
-
-
-
-<a name="0x1_RegisteredCurrencies_InitializationPersists"></a>
-
-*Informally:* Once initialize is run, the module continues to be
-initialized, forever.
-
-
-<pre><code><b>schema</b> <a href="#0x1_RegisteredCurrencies_InitializationPersists">InitializationPersists</a> {
-    <b>ensures</b> <b>old</b>(<a href="#0x1_RegisteredCurrencies_spec_is_initialized">spec_is_initialized</a>()) ==&gt; <a href="#0x1_RegisteredCurrencies_spec_is_initialized">spec_is_initialized</a>();
+<pre><code><b>schema</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_AddCurrencyCodeAbortsIf">AddCurrencyCodeAbortsIf</a> {
+    <b>aborts_if</b> <a href="Vector.md#0x1_Vector_spec_contains">Vector::spec_contains</a>(
+        <a href="DiemConfig.md#0x1_DiemConfig_get">DiemConfig::get</a>&lt;<a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;().currency_codes,
+        currency_code
+    ) <b>with</b> <a href="Errors.md#0x1_Errors_INVALID_ARGUMENT">Errors::INVALID_ARGUMENT</a>;
 }
 </code></pre>
 
 
 
 
-<pre><code><b>apply</b> <a href="#0x1_RegisteredCurrencies_InitializationPersists">InitializationPersists</a> <b>to</b> *;
-</code></pre>
+<a name="0x1_RegisteredCurrencies_AddCurrencyCodeEnsures"></a>
 
 
-
-<a name="0x1_RegisteredCurrencies_@Uniqueness_of_the_RegisteredCurrencies_config."></a>
-
-#### Uniqueness of the RegisteredCurrencies config.
-
-
-
-<a name="0x1_RegisteredCurrencies_OnlySingletonHasRegisteredCurrencies"></a>
-
-
-<pre><code><b>schema</b> <a href="#0x1_RegisteredCurrencies_OnlySingletonHasRegisteredCurrencies">OnlySingletonHasRegisteredCurrencies</a> {
-    <b>invariant</b> !<a href="#0x1_RegisteredCurrencies_spec_is_initialized">spec_is_initialized</a>()
-        ==&gt; (forall addr: address: !<a href="LibraConfig.md#0x1_LibraConfig_spec_is_published">LibraConfig::spec_is_published</a>&lt;<a href="#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;(addr));
-    <b>invariant</b> <a href="#0x1_RegisteredCurrencies_spec_is_initialized">spec_is_initialized</a>()
-        ==&gt; <a href="LibraConfig.md#0x1_LibraConfig_spec_is_published">LibraConfig::spec_is_published</a>&lt;<a href="#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;(<a href="#0x1_RegisteredCurrencies_spec_singleton_address">spec_singleton_address</a>())
-            && (forall addr: address:
-                   <a href="LibraConfig.md#0x1_LibraConfig_spec_is_published">LibraConfig::spec_is_published</a>&lt;<a href="#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;(addr)
-                              ==&gt; addr == <a href="#0x1_RegisteredCurrencies_spec_singleton_address">spec_singleton_address</a>());
+<pre><code><b>schema</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_AddCurrencyCodeEnsures">AddCurrencyCodeEnsures</a> {
+    currency_code: vector&lt;u8&gt;;
+    <b>ensures</b> <a href="Vector.md#0x1_Vector_eq_push_back">Vector::eq_push_back</a>(<a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_get_currency_codes">get_currency_codes</a>(), <b>old</b>(<a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_get_currency_codes">get_currency_codes</a>()), currency_code);
+    <b>include</b> <a href="DiemConfig.md#0x1_DiemConfig_SetEnsures">DiemConfig::SetEnsures</a>&lt;<a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt; {payload: <a href="DiemConfig.md#0x1_DiemConfig_get">DiemConfig::get</a>&lt;<a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;()};
 }
 </code></pre>
 
 
 
+</details>
 
-<pre><code><b>apply</b> <a href="#0x1_RegisteredCurrencies_OnlySingletonHasRegisteredCurrencies">OnlySingletonHasRegisteredCurrencies</a> <b>to</b> *;
+<a name="@Module_Specification_1"></a>
+
+## Module Specification
+
+
+
+<a name="@Initialization_2"></a>
+
+### Initialization
+
+
+Global invariant that currency config is always available after genesis.
+
+
+<pre><code><b>invariant</b> [<b>global</b>] <a href="DiemTimestamp.md#0x1_DiemTimestamp_is_operating">DiemTimestamp::is_operating</a>() ==&gt; <a href="DiemConfig.md#0x1_DiemConfig_spec_is_published">DiemConfig::spec_is_published</a>&lt;<a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;();
 </code></pre>
 
 
 
-<a name="0x1_RegisteredCurrencies_@Currency_codes"></a>
+<a name="@Helper_Functions_3"></a>
 
-#### Currency codes
-
-Attempting to specify that only
-<code>add_currency</code> changes the currency_codes
-vector.
-**Confused:** I think
-<code>initialize</code> should violate this property unless it
-checks whether the module is already initialized, because it can be
-called a second time, overwriting existing currency_codes.
+### Helper Functions
 
 
-<a name="0x1_RegisteredCurrencies_OnlyAddCurrencyChangesT"></a>
+Helper to get the currency code vector.
 
 
-<pre><code><b>schema</b> <a href="#0x1_RegisteredCurrencies_OnlyAddCurrencyChangesT">OnlyAddCurrencyChangesT</a> {
-    <b>ensures</b> <b>old</b>(<a href="#0x1_RegisteredCurrencies_spec_is_initialized">spec_is_initialized</a>())
-                 ==&gt; <b>old</b>(<a href="LibraConfig.md#0x1_LibraConfig_spec_get">LibraConfig::spec_get</a>&lt;<a href="#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;().currency_codes)
-                      == <a href="LibraConfig.md#0x1_LibraConfig_spec_get">LibraConfig::spec_get</a>&lt;<a href="#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;().currency_codes;
+<a name="0x1_RegisteredCurrencies_get_currency_codes"></a>
+
+
+<pre><code><b>define</b> <a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies_get_currency_codes">get_currency_codes</a>(): vector&lt;vector&lt;u8&gt;&gt; {
+    <a href="DiemConfig.md#0x1_DiemConfig_get">DiemConfig::get</a>&lt;<a href="RegisteredCurrencies.md#0x1_RegisteredCurrencies">RegisteredCurrencies</a>&gt;().currency_codes
 }
 </code></pre>
 
 
-
-
-<code>add_currency_code</code> and
-<code>initialize</code> change the currency_code vector.
-
-
-<pre><code><b>apply</b> <a href="#0x1_RegisteredCurrencies_OnlyAddCurrencyChangesT">OnlyAddCurrencyChangesT</a> <b>to</b> * <b>except</b> add_currency_code;
-</code></pre>
+[//]: # ("File containing references which can be used from documentation")
+[ACCESS_CONTROL]: https://github.com/diem/dip/blob/master/dips/dip-2.md
+[ROLE]: https://github.com/diem/dip/blob/master/dips/dip-2.md#roles
+[PERMISSION]: https://github.com/diem/dip/blob/master/dips/dip-2.md#permissions

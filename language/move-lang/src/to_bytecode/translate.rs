@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{context::*, remove_fallthrough_jumps};
@@ -13,13 +13,13 @@ use crate::{
     },
     naming::ast::{BuiltinTypeName_, TParam},
     parser::ast::{
-        BinOp, BinOp_, Field, FunctionName, FunctionVisibility, Kind, Kind_, ModuleIdent,
-        StructName, UnaryOp, UnaryOp_, Var,
+        BinOp, BinOp_, ConstantName, Field, FunctionName, FunctionVisibility, Kind, Kind_,
+        ModuleIdent, StructName, UnaryOp, UnaryOp_, Var,
     },
     shared::{unique_map::UniqueMap, *},
 };
 use bytecode_source_map::source_map::SourceMap;
-use libra_types::account_address::AccountAddress as LibraAddress;
+use diem_types::account_address::AccountAddress as DiemAddress;
 use move_ir_types::{ast as IR, location::*};
 use move_vm::file_format as F;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -82,10 +82,19 @@ pub fn program(prog: G::Program) -> Result<Vec<CompiledUnit>, Errors> {
     for (key, s) in prog.scripts {
         let G::Script {
             loc: _,
+            constants,
             function_name,
             function,
         } = s;
-        match script(key, function_name, function, &orderings, &sdecls, &fdecls) {
+        match script(
+            key,
+            constants,
+            function_name,
+            function,
+            &orderings,
+            &sdecls,
+            &fdecls,
+        ) {
             Ok(unit) => units.push(unit),
             Err(err) => errors.push(err),
         }
@@ -110,6 +119,11 @@ fn module(
         .into_iter()
         .map(|(s, sdef)| struct_def(&mut context, &ident, s, sdef))
         .collect();
+    let constants = mdef
+        .constants
+        .into_iter()
+        .map(|(n, c)| constant(&mut context, Some(&ident), n, c))
+        .collect();
 
     let mut collected_function_infos = UniqueMap::new();
     let functions = mdef
@@ -122,7 +136,7 @@ fn module(
         })
         .collect();
 
-    let addr = LibraAddress::new(ident.0.value.address.to_u8());
+    let addr = DiemAddress::new(ident.0.value.address.to_u8());
     let mname = ident.0.value.name.clone();
     let (imports, explicit_dependency_declarations) = context.materialize(
         dependency_orderings,
@@ -134,6 +148,7 @@ fn module(
         imports,
         explicit_dependency_declarations,
         structs,
+        constants,
         functions,
         synthetics: vec![],
     };
@@ -151,6 +166,7 @@ fn module(
 
 fn script(
     key: String,
+    constants: UniqueMap<ConstantName, G::Constant>,
     name: FunctionName,
     fdef: G::Function,
     dependency_orderings: &HashMap<ModuleIdent, usize>,
@@ -163,6 +179,11 @@ fn script(
     let loc = name.loc();
     let mut context = Context::new(None);
 
+    let constants = constants
+        .into_iter()
+        .map(|(n, c)| constant(&mut context, None, n, c))
+        .collect();
+
     let ((_, main), info) = function(&mut context, None, name, fdef);
 
     let (imports, explicit_dependency_declarations) = context.materialize(
@@ -173,12 +194,13 @@ fn script(
     let ir_script = IR::Script {
         imports,
         explicit_dependency_declarations,
+        constants,
         main,
     };
     let deps: Vec<&F::CompiledModule> = vec![];
     let (script, source_map) = ir_to_bytecode::compiler::compile_script(None, ir_script, deps)
         .map_err(|e| vec![(loc, format!("IR ERROR: {}", e))])?;
-    let function_info = main_function_info(&source_map, info);
+    let function_info = script_function_info(&source_map, info);
     Ok(CompiledUnit::Script {
         loc,
         key,
@@ -242,7 +264,10 @@ fn function_info_map(
     (function_name, function_info)
 }
 
-fn main_function_info(source_map: &SourceMap<Loc>, (params, specs): CollectedInfo) -> FunctionInfo {
+fn script_function_info(
+    source_map: &SourceMap<Loc>,
+    (params, specs): CollectedInfo,
+) -> FunctionInfo {
     let idx = F::FunctionDefinitionIndex(0);
     let function_source_map = source_map.get_function_source_map(idx).unwrap();
     let local_map = function_source_map.make_local_name_to_index_map();
@@ -349,6 +374,26 @@ fn struct_fields(
                 .collect();
             IRF::Move { fields }
         }
+    }
+}
+
+//**************************************************************************************************
+// Structs
+//**************************************************************************************************
+
+fn constant(
+    context: &mut Context,
+    m: Option<&ModuleIdent>,
+    n: ConstantName,
+    c: G::Constant,
+) -> IR::Constant {
+    let name = context.constant_definition_name(m, n);
+    let signature = base_type(context, c.signature);
+    let value = c.value.unwrap();
+    IR::Constant {
+        name,
+        signature,
+        value,
     }
 }
 
@@ -744,7 +789,7 @@ fn exp_(context: &mut Context, code: &mut IR::BytecodeBlock, e: H::Exp) {
             code.push(sp(
                 loc,
                 match v.value {
-                    V::Address(a) => B::LdAddr(LibraAddress::new(a.to_u8())),
+                    V::Address(a) => B::LdAddr(DiemAddress::new(a.to_u8())),
                     V::Bytearray(bytes) => B::LdByteArray(bytes),
                     V::U8(u) => B::LdU8(u),
                     V::U64(u) => B::LdU64(u),
@@ -764,9 +809,11 @@ fn exp_(context: &mut Context, code: &mut IR::BytecodeBlock, e: H::Exp) {
         }
         E::Copy { var: v, .. } => code.push(sp(loc, B::CopyLoc(var(v)))),
 
+        E::Constant(c) => code.push(sp(loc, B::LdConst(context.constant_name(c)))),
+
         E::ModuleCall(mcall) => {
             exp(context, code, mcall.arguments);
-            call(
+            module_call(
                 context,
                 code,
                 mcall.module,
@@ -863,23 +910,6 @@ fn exp_(context: &mut Context, code: &mut IR::BytecodeBlock, e: H::Exp) {
     }
 }
 
-fn call(
-    context: &mut Context,
-    code: &mut IR::BytecodeBlock,
-    m: ModuleIdent,
-    f: FunctionName,
-    tys: Vec<H::BaseType>,
-) {
-    use crate::shared::fake_natives::transaction as TXN;
-    use Address as A;
-    use IR::Bytecode_ as B;
-
-    match (&m.0.value.address, m.0.value.name.value(), f.value()) {
-        (&A::LIBRA_CORE, TXN::MOD, TXN::SENDER) => code.push(sp(f.loc(), B::GetTxnSenderAddress)),
-        _ => module_call(context, code, m, f, tys),
-    }
-}
-
 fn module_call(
     context: &mut Context,
     code: &mut IR::BytecodeBlock,
@@ -899,10 +929,6 @@ fn builtin(context: &mut Context, code: &mut IR::BytecodeBlock, sp!(loc, b_): H:
     code.push(sp(
         loc,
         match b_ {
-            HB::MoveToSender(bt) => {
-                let (n, tys) = struct_definition_name_base(context, bt);
-                B::MoveToSender(n, tys)
-            }
             HB::MoveTo(bt) => {
                 let (n, tys) = struct_definition_name_base(context, bt);
                 B::MoveTo(n, tys)

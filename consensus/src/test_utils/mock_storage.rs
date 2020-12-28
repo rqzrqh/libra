@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -11,15 +11,16 @@ use anyhow::Result;
 use consensus_types::{
     block::Block, quorum_cert::QuorumCert, timeout_certificate::TimeoutCertificate, vote::Vote,
 };
-use libra_crypto::HashValue;
-use libra_types::{
+use diem_crypto::HashValue;
+use diem_infallible::Mutex;
+use diem_types::{
     epoch_change::EpochChangeProof,
     ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
     on_chain_config::ValidatorSet,
 };
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 use storage_interface::DbReader;
 
@@ -56,26 +57,11 @@ pub struct MockStorage {
 }
 
 impl MockStorage {
-    pub fn new(shared_storage: Arc<MockSharedStorage>) -> Self {
-        let validator_set = Some(shared_storage.validator_set.clone());
-        let li = LedgerInfo::mock_genesis(validator_set);
-        let lis = LedgerInfoWithSignatures::new(li.clone(), BTreeMap::new());
-        shared_storage
-            .lis
-            .lock()
-            .unwrap()
-            .insert(lis.ledger_info().version(), lis);
-        MockStorage {
-            shared_storage,
-            storage_ledger: Mutex::new(li),
-        }
-    }
-
     pub fn new_with_ledger_info(
         shared_storage: Arc<MockSharedStorage>,
         ledger_info: LedgerInfo,
     ) -> Self {
-        let li = if ledger_info.next_epoch_state().is_some() {
+        let li = if ledger_info.ends_epoch() {
             ledger_info.clone()
         } else {
             let validator_set = Some(shared_storage.validator_set.clone());
@@ -85,7 +71,6 @@ impl MockStorage {
         shared_storage
             .lis
             .lock()
-            .unwrap()
             .insert(lis.ledger_info().version(), lis);
         MockStorage {
             shared_storage,
@@ -94,11 +79,11 @@ impl MockStorage {
     }
 
     pub fn get_ledger_info(&self) -> LedgerInfo {
-        self.storage_ledger.lock().unwrap().clone()
+        self.storage_ledger.lock().clone()
     }
 
     pub fn commit_to_storage(&self, ledger: LedgerInfo) {
-        *self.storage_ledger.lock().unwrap() = ledger;
+        *self.storage_ledger.lock() = ledger;
 
         if let Err(e) = self.verify_consistency() {
             panic!("invalid db after commit: {}", e);
@@ -110,7 +95,7 @@ impl MockStorage {
     }
 
     pub fn get_ledger_recovery_data(&self) -> LedgerRecoveryData {
-        LedgerRecoveryData::new(self.storage_ledger.lock().unwrap().clone())
+        LedgerRecoveryData::new(self.storage_ledger.lock().clone())
     }
 
     pub fn try_start(&self) -> Result<RecoveryData> {
@@ -119,7 +104,6 @@ impl MockStorage {
             .shared_storage
             .block
             .lock()
-            .unwrap()
             .clone()
             .into_iter()
             .map(|(_, v)| v)
@@ -128,14 +112,13 @@ impl MockStorage {
             .shared_storage
             .qc
             .lock()
-            .unwrap()
             .clone()
             .into_iter()
             .map(|(_, v)| v)
             .collect();
         blocks.sort_by_key(Block::round);
         RecoveryData::new(
-            self.shared_storage.last_vote.lock().unwrap().clone(),
+            self.shared_storage.last_vote.lock().clone(),
             ledger_recovery_data,
             blocks,
             RootMetadata::new_empty(),
@@ -143,7 +126,6 @@ impl MockStorage {
             self.shared_storage
                 .highest_timeout_certificate
                 .lock()
-                .unwrap()
                 .clone(),
         )
     }
@@ -153,14 +135,7 @@ impl MockStorage {
     }
 
     pub fn start_for_testing(validator_set: ValidatorSet) -> (RecoveryData, Arc<Self>) {
-        let shared_storage = Arc::new(MockSharedStorage {
-            block: Mutex::new(HashMap::new()),
-            qc: Mutex::new(HashMap::new()),
-            lis: Mutex::new(HashMap::new()),
-            last_vote: Mutex::new(None),
-            highest_timeout_certificate: Mutex::new(None),
-            validator_set: validator_set.clone(),
-        });
+        let shared_storage = Arc::new(MockSharedStorage::new(validator_set.clone()));
         let genesis_li = LedgerInfo::mock_genesis(Some(validator_set));
         let storage = Self::new_with_ledger_info(shared_storage, genesis_li);
         let recovery_data = storage
@@ -177,20 +152,15 @@ impl PersistentLivenessStorage for MockStorage {
         // When the shared storage is empty, we are expected to not able to construct an block tree
         // from it. During test we will intentionally clear shared_storage to simulate the situation
         // of restarting from an empty consensusDB
-        let should_check_for_consistency = !(self.shared_storage.block.lock().unwrap().is_empty()
-            && self.shared_storage.qc.lock().unwrap().is_empty());
+        let should_check_for_consistency = !(self.shared_storage.block.lock().is_empty()
+            && self.shared_storage.qc.lock().is_empty());
         for block in blocks {
-            self.shared_storage
-                .block
-                .lock()
-                .unwrap()
-                .insert(block.id(), block);
+            self.shared_storage.block.lock().insert(block.id(), block);
         }
         for qc in quorum_certs {
             self.shared_storage
                 .qc
                 .lock()
-                .unwrap()
                 .insert(qc.certified_block().id(), qc);
         }
         if should_check_for_consistency {
@@ -203,8 +173,8 @@ impl PersistentLivenessStorage for MockStorage {
 
     fn prune_tree(&self, block_id: Vec<HashValue>) -> Result<()> {
         for id in block_id {
-            self.shared_storage.block.lock().unwrap().remove(&id);
-            self.shared_storage.qc.lock().unwrap().remove(&id);
+            self.shared_storage.block.lock().remove(&id);
+            self.shared_storage.qc.lock().remove(&id);
         }
         if let Err(e) = self.verify_consistency() {
             panic!("invalid db after prune tree: {}", e);
@@ -216,7 +186,6 @@ impl PersistentLivenessStorage for MockStorage {
         self.shared_storage
             .last_vote
             .lock()
-            .unwrap()
             .replace(last_vote.clone());
         Ok(())
     }
@@ -239,7 +208,6 @@ impl PersistentLivenessStorage for MockStorage {
         self.shared_storage
             .highest_timeout_certificate
             .lock()
-            .unwrap()
             .replace(highest_timeout_certificate);
         Ok(())
     }
@@ -249,14 +217,13 @@ impl PersistentLivenessStorage for MockStorage {
             .shared_storage
             .lis
             .lock()
-            .unwrap()
             .get(&version)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("LedgerInfo for version not found"))?;
         Ok(EpochChangeProof::new(vec![lis], false))
     }
 
-    fn libra_db(&self) -> Arc<dyn DbReader> {
+    fn diem_db(&self) -> Arc<dyn DbReader> {
         unimplemented!()
     }
 }
@@ -320,7 +287,7 @@ impl PersistentLivenessStorage for EmptyStorage {
         unimplemented!()
     }
 
-    fn libra_db(&self) -> Arc<dyn DbReader> {
+    fn diem_db(&self) -> Arc<dyn DbReader> {
         unimplemented!()
     }
 }

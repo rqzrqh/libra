@@ -1,19 +1,23 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::account_address::AccountAddress;
 use anyhow::{ensure, Error, Result};
-#[cfg(feature = "fuzzing")]
+#[cfg(any(test, feature = "fuzzing"))]
 use proptest_derive::Arbitrary;
-#[cfg(feature = "fuzzing")]
+#[cfg(any(test, feature = "fuzzing"))]
 use rand::{rngs::OsRng, RngCore};
 use serde::{de, ser, Deserialize, Serialize};
-use std::{convert::TryFrom, fmt};
+use std::{
+    convert::{TryFrom, TryInto},
+    fmt,
+    str::FromStr,
+};
 
 /// A struct that represents a globally unique id for an Event stream that a user can listen to.
 /// By design, the lower part of EventKey is the same as account address.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "fuzzing", derive(Arbitrary))]
+#[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
 pub struct EventKey([u8; EventKey::LENGTH]);
 
 impl EventKey {
@@ -43,7 +47,12 @@ impl EventKey {
         AccountAddress::new(arr_bytes)
     }
 
-    #[cfg(feature = "fuzzing")]
+    /// If this is the `ith` EventKey` created by `get_creator_address()`, return `i`
+    pub fn get_creation_number(&self) -> u64 {
+        u64::from_le_bytes(self.0[0..8].try_into().unwrap())
+    }
+
+    #[cfg(any(test, feature = "fuzzing"))]
     /// Create a random event key for testing
     pub fn random() -> Self {
         let mut rng = OsRng;
@@ -58,6 +67,15 @@ impl EventKey {
         lhs.copy_from_slice(&salt.to_le_bytes());
         rhs.copy_from_slice(addr.as_ref());
         EventKey(output_bytes)
+    }
+}
+
+impl FromStr for EventKey {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let bytes_out = ::hex::decode(s)?;
+        EventKey::try_from(bytes_out.as_slice())
     }
 }
 
@@ -79,10 +97,14 @@ impl ser::Serialize for EventKey {
     where
         S: ser::Serializer,
     {
-        // In order to preserve the Serde data model and help analysis tools,
-        // make sure to wrap our value in a container with the same name
-        // as the original type.
-        serializer.serialize_newtype_struct("EventKey", serde_bytes::Bytes::new(&self.0))
+        if serializer.is_human_readable() {
+            self.to_string().serialize(serializer)
+        } else {
+            // In order to preserve the Serde data model and help analysis tools,
+            // make sure to wrap our value in a container with the same name
+            // as the original type.
+            serializer.serialize_newtype_struct("EventKey", serde_bytes::Bytes::new(&self.0))
+        }
     }
 }
 
@@ -91,13 +113,23 @@ impl<'de> de::Deserialize<'de> for EventKey {
     where
         D: de::Deserializer<'de>,
     {
-        // See comment in serialize.
-        #[derive(::serde::Deserialize)]
-        #[serde(rename = "EventKey")]
-        struct Value<'a>(&'a [u8]);
+        if deserializer.is_human_readable() {
+            let s = <String>::deserialize(deserializer)?;
+            Self::try_from(
+                hex::decode(s)
+                    .map_err(<D::Error as ::serde::de::Error>::custom)?
+                    .as_slice(),
+            )
+            .map_err(<D::Error as ::serde::de::Error>::custom)
+        } else {
+            // See comment in serialize.
+            #[derive(::serde::Deserialize)]
+            #[serde(rename = "EventKey")]
+            struct Value<'a>(&'a [u8]);
 
-        let value = Value::deserialize(deserializer)?;
-        Self::try_from(value.0).map_err(<D::Error as ::serde::de::Error>::custom)
+            let value = Value::deserialize(deserializer)?;
+            Self::try_from(value.0).map_err(<D::Error as ::serde::de::Error>::custom)
+        }
     }
 }
 
@@ -141,12 +173,12 @@ impl EventHandle {
         self.count
     }
 
-    #[cfg(feature = "fuzzing")]
+    #[cfg(any(test, feature = "fuzzing"))]
     pub fn count_mut(&mut self) -> &mut u64 {
         &mut self.count
     }
 
-    #[cfg(feature = "fuzzing")]
+    #[cfg(any(test, feature = "fuzzing"))]
     /// Create a random event handle for testing
     pub fn random_handle(count: u64) -> Self {
         Self {
@@ -155,7 +187,7 @@ impl EventHandle {
         }
     }
 
-    #[cfg(feature = "fuzzing")]
+    #[cfg(any(test, feature = "fuzzing"))]
     /// Derive a unique handle by using an AccountAddress and a counter.
     pub fn new_from_address(addr: &AccountAddress, salt: u64) -> Self {
         Self {

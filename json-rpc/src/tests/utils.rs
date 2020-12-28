@@ -1,15 +1,18 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{Error, Result};
-use libra_config::config::RoleType;
-use libra_crypto::HashValue;
-use libra_mempool::MempoolClientSender;
-use libra_types::{
+use anyhow::{format_err, Error, Result};
+use diem_config::config::{
+    RoleType, DEFAULT_BATCH_SIZE_LIMIT, DEFAULT_CONTENT_LENGTH_LIMIT, DEFAULT_PAGE_SIZE_LIMIT,
+};
+use diem_crypto::HashValue;
+use diem_mempool::MempoolClientSender;
+use diem_types::{
     account_address::AccountAddress,
     account_state_blob::{AccountStateBlob, AccountStateWithProof},
     block_info::BlockInfo,
-    contract_event::ContractEvent,
+    chain_id::ChainId,
+    contract_event::{ContractEvent, EventWithProof},
     epoch_change::EpochChangeProof,
     event::EventKey,
     ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
@@ -20,39 +23,55 @@ use libra_types::{
     transaction::{
         Transaction, TransactionInfo, TransactionListWithProof, TransactionWithProof, Version,
     },
-    vm_error::StatusCode,
+    vm_status::KeptVMStatus,
 };
-use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
-use storage_interface::{DbReader, StartupInfo, TreeState};
+use std::{
+    collections::{BTreeMap, HashMap},
+    net::SocketAddr,
+    sync::Arc,
+};
+use storage_interface::{DbReader, Order, StartupInfo, TreeState};
 use tokio::runtime::Runtime;
 
 /// Creates JSON RPC server for a Validator node
 /// Should only be used for unit-tests
 pub fn test_bootstrap(
     address: SocketAddr,
-    libra_db: Arc<dyn DbReader>,
+    diem_db: Arc<dyn DbReader>,
     mp_sender: MempoolClientSender,
 ) -> Runtime {
-    crate::bootstrap(address, libra_db, mp_sender, RoleType::Validator)
+    crate::bootstrap(
+        address,
+        DEFAULT_BATCH_SIZE_LIMIT,
+        DEFAULT_PAGE_SIZE_LIMIT,
+        DEFAULT_CONTENT_LENGTH_LIMIT,
+        diem_db,
+        mp_sender,
+        RoleType::Validator,
+        ChainId::test(),
+    )
 }
 
-/// Lightweight mock of LibraDB
+/// Lightweight mock of DiemDB
 #[derive(Clone)]
-pub(crate) struct MockLibraDB {
+pub struct MockDiemDB {
     pub version: u64,
-    pub timestamp: u64,
-    pub all_accounts: BTreeMap<AccountAddress, AccountStateBlob>,
-    pub all_txns: Vec<(Transaction, StatusCode)>,
+    pub genesis: HashMap<AccountAddress, AccountStateBlob>,
+    pub all_accounts: HashMap<AccountAddress, AccountStateBlob>,
+    pub all_txns: Vec<(Transaction, KeptVMStatus)>,
     pub events: Vec<(u64, ContractEvent)>,
     pub account_state_with_proof: Vec<AccountStateWithProof>,
+    pub timestamps: Vec<u64>,
 }
 
-impl DbReader for MockLibraDB {
+impl DbReader for MockDiemDB {
     fn get_latest_account_state(
         &self,
         address: AccountAddress,
     ) -> Result<Option<AccountStateBlob>> {
-        if let Some(blob) = self.all_accounts.get(&address) {
+        if let Some(blob) = self.genesis.get(&address) {
+            Ok(Some(blob.clone()))
+        } else if let Some(blob) = self.all_accounts.get(&address) {
             Ok(Some(blob.clone()))
         } else {
             Ok(None)
@@ -68,7 +87,7 @@ impl DbReader for MockLibraDB {
                     HashValue::zero(),
                     HashValue::zero(),
                     self.version,
-                    self.timestamp,
+                    self.get_block_timestamp(self.version).unwrap(),
                     None,
                 ),
                 HashValue::zero(),
@@ -117,7 +136,7 @@ impl DbReader for MockLibraDB {
                         Default::default(),
                         Default::default(),
                         0,
-                        *status,
+                        status.clone(),
                     ),
                 ),
             }))
@@ -143,7 +162,7 @@ impl DbReader for MockLibraDB {
                     Default::default(),
                     Default::default(),
                     0,
-                    *status,
+                    status.clone(),
                 ));
             });
         let first_transaction_version = transactions.first().map(|_| start_version);
@@ -176,7 +195,7 @@ impl DbReader for MockLibraDB {
         &self,
         key: &EventKey,
         start: u64,
-        _ascending: bool,
+        _order: Order,
         limit: u64,
     ) -> Result<Vec<(u64, ContractEvent)>> {
         let events = self
@@ -190,6 +209,17 @@ impl DbReader for MockLibraDB {
             .cloned()
             .collect();
         Ok(events)
+    }
+
+    fn get_events_with_proofs(
+        &self,
+        _key: &EventKey,
+        _start: u64,
+        _order: Order,
+        _limit: u64,
+        _known_version: Option<u64>,
+    ) -> Result<Vec<EventWithProof>> {
+        unimplemented!()
     }
 
     fn get_state_proof(
@@ -226,7 +256,11 @@ impl DbReader for MockLibraDB {
         _version: Version,
         _ledger_version: Version,
     ) -> Result<AccountStateWithProof> {
-        Ok(self.account_state_with_proof[0].clone())
+        Ok(self
+            .account_state_with_proof
+            .get(0)
+            .ok_or_else(|| format_err!("could not find account state"))?
+            .clone())
     }
 
     fn get_startup_info(&self) -> Result<Option<StartupInfo>> {
@@ -262,5 +296,16 @@ impl DbReader for MockLibraDB {
 
     fn get_epoch_ending_ledger_info(&self, _: u64) -> Result<LedgerInfoWithSignatures> {
         unimplemented!()
+    }
+
+    fn get_block_timestamp(&self, version: u64) -> Result<u64> {
+        Ok(match self.timestamps.get(version as usize) {
+            Some(t) => *t,
+            None => *self.timestamps.last().unwrap(),
+        })
+    }
+
+    fn get_accumulator_root_hash(&self, _version: Version) -> Result<HashValue> {
+        Ok(HashValue::zero())
     }
 }

@@ -1,8 +1,8 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::config::Error;
-use libra_secure_storage::{
+use diem_secure_storage::{
     GitHubStorage, InMemoryStorage, NamespacedStorage, OnDiskStorage, Storage, VaultStorage,
 };
 use serde::{Deserialize, Serialize};
@@ -41,10 +41,16 @@ pub struct VaultConfig {
     /// a secret, S, without a namespace would be available in secret/data/S, with a namespace, N, it
     /// would be in secret/data/N/S.
     pub namespace: Option<String>,
+    /// Vault leverages leases on many tokens, specify this to automatically have your lease
+    /// renewed up to that many seconds more. If this is not specified, the lease will not
+    /// automatically be renewed.
+    pub renew_ttl_secs: Option<u32>,
     /// Vault's URL, note: only HTTP is currently supported.
     pub server: String,
     /// The authorization token for accessing secrets
     pub token: Token,
+    /// Disable check-and-set when writing secrets to Vault
+    pub disable_cas: Option<bool>,
 }
 
 impl VaultConfig {
@@ -52,7 +58,7 @@ impl VaultConfig {
         let path = self
             .ca_certificate
             .as_ref()
-            .ok_or_else(|| Error::Missing("ca_certificate"))?;
+            .ok_or(Error::Missing("ca_certificate"))?;
         read_file(path)
     }
 }
@@ -104,8 +110,8 @@ impl Default for OnDiskStorageConfig {
     fn default() -> Self {
         Self {
             namespace: None,
-            path: PathBuf::from("secure_storage.toml"),
-            data_dir: PathBuf::from("/opt/libra/data/common"),
+            path: PathBuf::from("secure_storage.json"),
+            data_dir: PathBuf::from("/opt/diem/data"),
         }
     }
 }
@@ -137,24 +143,24 @@ impl From<&SecureBackend> for Storage {
     fn from(backend: &SecureBackend) -> Self {
         match backend {
             SecureBackend::GitHub(config) => {
-                let storage = GitHubStorage::new(
+                let storage = Storage::from(GitHubStorage::new(
                     config.repository_owner.clone(),
                     config.repository.clone(),
                     config.token.read_token().expect("Unable to read token"),
-                );
+                ));
                 if let Some(namespace) = &config.namespace {
-                    Storage::from(NamespacedStorage::new(Box::new(storage), namespace.clone()))
+                    Storage::from(NamespacedStorage::new(storage, namespace.clone()))
                 } else {
-                    Storage::from(storage)
+                    storage
                 }
             }
             SecureBackend::InMemoryStorage => Storage::from(InMemoryStorage::new()),
             SecureBackend::OnDiskStorage(config) => {
-                let storage = OnDiskStorage::new(config.path());
+                let storage = Storage::from(OnDiskStorage::new(config.path()));
                 if let Some(namespace) = &config.namespace {
-                    Storage::from(NamespacedStorage::new(Box::new(storage), namespace.clone()))
+                    Storage::from(NamespacedStorage::new(storage, namespace.clone()))
                 } else {
-                    Storage::from(storage)
+                    storage
                 }
             }
             SecureBackend::Vault(config) => Storage::from(VaultStorage::new(
@@ -165,6 +171,12 @@ impl From<&SecureBackend> for Storage {
                     .ca_certificate
                     .as_ref()
                     .map(|_| config.ca_certificate().unwrap()),
+                config.renew_ttl_secs,
+                if let Some(disable) = config.disable_cas {
+                    !disable
+                } else {
+                    true
+                },
             )),
         }
     }
@@ -187,6 +199,8 @@ mod tests {
                 server: "127.0.0.1:8200".to_string(),
                 ca_certificate: None,
                 token: Token::FromConfig("test".to_string()),
+                renew_ttl_secs: None,
+                disable_cas: None,
             },
         };
 
@@ -211,6 +225,8 @@ vault:
                 server: "127.0.0.1:8200".to_string(),
                 ca_certificate: None,
                 token: Token::FromDisk(PathBuf::from("/token")),
+                renew_ttl_secs: None,
+                disable_cas: None,
             },
         };
 
@@ -229,7 +245,7 @@ vault:
 
     #[test]
     fn test_token_reading() {
-        let temppath = libra_temppath::TempPath::new();
+        let temppath = diem_temppath::TempPath::new();
         temppath.create_as_file().unwrap();
         let mut file = File::create(temppath.path()).unwrap();
         file.write_all(b"disk_token").unwrap();

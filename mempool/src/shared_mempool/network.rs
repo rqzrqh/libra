@@ -1,12 +1,13 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! Interface between Mempool and Network layers.
 
 use crate::counters;
 use channel::message_queues::QueueStyle;
-use libra_metrics::IntCounterVec;
-use libra_types::{transaction::SignedTransaction, PeerId};
+use diem_metrics::IntCounterVec;
+use diem_types::{transaction::SignedTransaction, PeerId};
+use fail::fail_point;
 use network::{
     error::NetworkError,
     peer_manager::{ConnectionRequestSender, PeerManagerRequestSender},
@@ -21,23 +22,24 @@ pub enum MempoolSyncMsg {
     /// broadcast request issued by the sender
     BroadcastTransactionsRequest {
         /// unique id of sync request. Can be used by sender for rebroadcast analysis
-        request_id: String,
+        request_id: Vec<u8>,
         /// shared transactions in this batch
         transactions: Vec<SignedTransaction>,
     },
     /// broadcast ack issued by the receiver
     BroadcastTransactionsResponse {
         /// unique id of received broadcast request
-        request_id: String,
-        /// indices of transactions that failed that may succeed on resend
-        retry_txns: Vec<u64>,
+        request_id: Vec<u8>,
+        /// retry signal from recipient if there are txns in corresponding broadcast
+        /// that were rejected from mempool but may succeed on resend
+        retry: bool,
         /// backpressure signal from recipient when it is overwhelmed (e.g. mempool is full)
         backoff: bool,
     },
 }
 
 /// Protocol id for mempool direct-send calls
-pub const MEMPOOL_DIRECT_SEND_PROTOCOL: &[u8] = b"/libra/direct-send/0.1.0/mempool/0.1.0";
+pub const MEMPOOL_DIRECT_SEND_PROTOCOL: &[u8] = b"/diem/direct-send/0.1.0/mempool/0.1.0";
 
 /// The interface from Network to Mempool layer.
 ///
@@ -100,6 +102,9 @@ impl MempoolNetworkSender {
         recipient: PeerId,
         message: MempoolSyncMsg,
     ) -> Result<(), NetworkError> {
+        fail_point!("mempool::send_to", |_| {
+            Err(anyhow::anyhow!("Injected error in mempool::send_to").into())
+        });
         let protocol = ProtocolId::MempoolDirectSend;
         self.inner.send_to(recipient, protocol, message)
     }

@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -81,8 +81,8 @@ impl CompiledUnit {
 
     pub fn serialize_source_map(&self) -> Vec<u8> {
         match self {
-            CompiledUnit::Module { source_map, .. } => lcs::to_bytes(source_map).unwrap(),
-            CompiledUnit::Script { source_map, .. } => lcs::to_bytes(source_map).unwrap(),
+            CompiledUnit::Module { source_map, .. } => bcs::to_bytes(source_map).unwrap(),
+            CompiledUnit::Script { source_map, .. } => bcs::to_bytes(source_map).unwrap(),
         }
     }
 
@@ -125,9 +125,9 @@ impl CompiledUnit {
 }
 
 fn verify_module(loc: Loc, cm: F::CompiledModule) -> (F::CompiledModule, Errors) {
-    match move_bytecode_verifier::verifier::VerifiedModule::new(cm) {
-        Ok(v) => (v.into_inner(), vec![]),
-        Err((cm, e)) => (
+    match move_bytecode_verifier::verifier::verify_module(&cm) {
+        Ok(_) => (cm, vec![]),
+        Err(e) => (
             cm,
             vec![vec![(
                 loc,
@@ -138,9 +138,9 @@ fn verify_module(loc: Loc, cm: F::CompiledModule) -> (F::CompiledModule, Errors)
 }
 
 fn verify_script(loc: Loc, cs: F::CompiledScript) -> (F::CompiledScript, Errors) {
-    match move_bytecode_verifier::verifier::VerifiedScript::new(cs) {
-        Ok(v) => (v.into_inner(), vec![]),
-        Err((cs, e)) => (
+    match move_bytecode_verifier::verifier::verify_script(&cs) {
+        Ok(_) => (cs, vec![]),
+        Err(e) => (
             cs,
             vec![vec![(
                 loc,

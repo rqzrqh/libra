@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::liveness::{
@@ -11,7 +11,7 @@ use consensus_types::{
     block::{block_test_utils::certificate_for_genesis, Block},
     common::{Author, Round},
 };
-use libra_types::{block_metadata::NewBlockEvent, validator_signer::ValidatorSigner};
+use diem_types::{block_metadata::NewBlockEvent, validator_signer::ValidatorSigner};
 
 struct MockHistory {
     window_size: usize,
@@ -141,4 +141,16 @@ fn test_api() {
         &signers[unexpected_index],
     );
     assert!(!proposer_election.is_valid_proposal(&bad_proposal));
+    let bad_proposal_2 = Block::new_proposal(
+        vec![],
+        round,
+        2,
+        certificate_for_genesis(),
+        &signers[expected_index],
+    );
+    assert_ne!(good_proposal.id(), bad_proposal_2.id());
+    // another proposal from the valid proposer should fail
+    assert!(!proposer_election.is_valid_proposal(&bad_proposal_2));
+    // good proposal still passes
+    assert!(proposer_election.is_valid_proposal(&good_proposal));
 }

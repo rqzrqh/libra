@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! Project and package linters that run queries on guppy.
@@ -52,7 +52,7 @@ impl<'cfg> ProjectLinter for BannedDeps<'cfg> {
             // Look at the reverse direct dependencies of this package.
             for link in package.reverse_direct_links() {
                 let from = link.from();
-                if let Some(workspace_path) = from.workspace_path() {
+                if let Some(workspace_path) = from.source().workspace_path() {
                     out.write_kind(
                         LintKind::Package {
                             name: from.name(),
@@ -188,7 +188,7 @@ impl PackageLinter for CrateNamesPaths {
     }
 }
 
-/// Ensure libra-workspace-hack is a dependency
+/// Ensure diem-workspace-hack is a dependency
 #[derive(Debug)]
 pub struct WorkspaceHack;
 
@@ -208,11 +208,11 @@ impl PackageLinter for WorkspaceHack {
         let pkg_graph = ctx.package_graph();
         let workspace_hack_id = pkg_graph
             .workspace()
-            .member_by_name("libra-workspace-hack")
-            .expect("can't find libra-workspace-hack package")
+            .member_by_name("diem-workspace-hack")
+            .expect("can't find diem-workspace-hack package")
             .id();
 
-        // libra-workspace-hack does not need to depend on itself
+        // diem-workspace-hack does not need to depend on itself
         if package.id() == workspace_hack_id {
             return Ok(RunStatus::Executed);
         }
@@ -222,7 +222,7 @@ impl PackageLinter for WorkspaceHack {
             .directly_depends_on(package.id(), workspace_hack_id)
             .expect("valid package ID");
         if has_links && !has_hack_dep {
-            out.write(LintLevel::Error, "missing libra-workspace-hack dependency");
+            out.write(LintLevel::Error, "missing diem-workspace-hack dependency");
         }
 
         Ok(RunStatus::Executed)
@@ -361,26 +361,25 @@ impl<'cfg> PackageLinter for OverlayFeatures<'cfg> {
 
         let package_graph = ctx.package_graph();
 
-        let package_query = package_graph
-            .query_forward(iter::once(package.id()))
-            .expect("valid package ID");
         let feature_query = package_graph
-            .feature_graph()
-            .query_packages(&package_query, filter);
+            .query_forward(iter::once(package.id()))
+            .expect("valid package ID")
+            .to_feature_query(filter);
 
         let mut overlays: Vec<(Option<&str>, &str, Option<&str>)> = vec![];
 
         feature_query.resolve_with_fn(|_, link| {
-            // Consider the dependency even if it's dev-only since the v1 resolver unifies these.
-            // TODO: might be able to relax this for the v2 resolver.
-            let (from, to) = link.endpoints();
-            let to_package = to.package();
-            if to_package.in_workspace() && self.is_overlay(to.feature_id().feature()) {
-                overlays.push((
-                    from.feature_id().feature(),
-                    to_package.name(),
-                    to.feature_id().feature(),
-                ));
+            // We now use the v2 resolver, so dev-only links can be skipped.
+            if !link.dev_only() {
+                let (from, to) = link.endpoints();
+                let to_package = to.package();
+                if to_package.in_workspace() && self.is_overlay(to.feature_id().feature()) {
+                    overlays.push((
+                        from.feature_id().feature(),
+                        to_package.name(),
+                        to.feature_id().feature(),
+                    ));
+                }
             }
 
             // Don't need to traverse past direct dependencies.

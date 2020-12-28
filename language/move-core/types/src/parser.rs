@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -36,10 +36,7 @@ enum Token {
 
 impl Token {
     fn is_whitespace(&self) -> bool {
-        match self {
-            Self::Whitespace(_) => true,
-            _ => false,
-        }
+        matches!(self, Self::Whitespace(_))
     }
 }
 
@@ -126,6 +123,19 @@ fn next_token(s: &str) -> Result<Option<(Token, usize)>> {
             }
             c if c.is_ascii_digit() => next_number(c, it)?,
             'b' if it.peek() == Some(&'"') => {
+                it.next().unwrap();
+                let mut r = String::new();
+                loop {
+                    match it.next() {
+                        Some('"') => break,
+                        Some(c) if c.is_ascii() => r.push(c),
+                        _ => bail!("unrecognized token"),
+                    }
+                }
+                let len = r.len() + 3;
+                (Token::Bytes(hex::encode(r)), len)
+            }
+            'x' if it.peek() == Some(&'"') => {
                 it.next().unwrap();
                 let mut r = String::new();
                 loop {
@@ -320,6 +330,10 @@ pub fn parse_type_tags(s: &str) -> Result<Vec<TypeTag>> {
     })
 }
 
+pub fn parse_type_tag(s: &str) -> Result<TypeTag> {
+    parse(s, |parser| parser.parse_type_tag())
+}
+
 pub fn parse_transaction_arguments(s: &str) -> Result<Vec<TransactionArgument>> {
     parse(s, |parser| {
         parser.parse_comma_list(
@@ -367,10 +381,10 @@ fn tests_parse_transaction_argument_positive() {
             "0X54afa3526",
             T::Address(AccountAddress::from_hex_literal("0x54afa3526").unwrap()),
         ),
-        ("b\"7fff\"", T::U8Vector(vec![0x7f, 0xff])),
-        ("b\"\"", T::U8Vector(vec![])),
-        ("b\"00\"", T::U8Vector(vec![0x00])),
-        ("b\"deadbeef\"", T::U8Vector(vec![0xde, 0xad, 0xbe, 0xef])),
+        ("x\"7fff\"", T::U8Vector(vec![0x7f, 0xff])),
+        ("x\"\"", T::U8Vector(vec![])),
+        ("x\"00\"", T::U8Vector(vec![0x00])),
+        ("x\"deadbeef\"", T::U8Vector(vec![0xde, 0xad, 0xbe, 0xef])),
     ] {
         assert_eq!(&parse_transaction_argument(s).unwrap(), expected)
     }
@@ -394,11 +408,11 @@ fn tests_parse_transaction_argument_negative() {
         "0x",
         "0x_",
         "",
-        "b\"ffff",
-        "b\"a \"",
-        "b\" \"",
-        "b\"0g\"",
-        "b\"0\"",
+        "x\"ffff",
+        "x\"a \"",
+        "x\" \"",
+        "x\"0g\"",
+        "x\"0\"",
         "garbage",
         "true3",
         "3false",

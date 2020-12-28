@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! Objects used by/related to shared mempool
@@ -8,34 +8,29 @@ use crate::{
     shared_mempool::{network::MempoolNetworkSender, peer_manager::PeerManager},
 };
 use anyhow::Result;
-use channel::libra_channel::Receiver;
+use channel::diem_channel::Receiver;
+use diem_config::{
+    config::{MempoolConfig, PeerNetworkId},
+    network_id::NodeNetworkId,
+};
+use diem_infallible::{Mutex, RwLock};
+use diem_types::{
+    account_address::AccountAddress,
+    mempool_status::MempoolStatus,
+    on_chain_config::{ConfigID, DiemVersion, OnChainConfig, OnChainConfigPayload, VMConfig},
+    transaction::SignedTransaction,
+    vm_status::DiscardedVMStatus,
+};
 use futures::{
     channel::{mpsc, mpsc::UnboundedSender, oneshot},
     future::Future,
     task::{Context, Poll},
 };
-use libra_config::config::{MempoolConfig, PeerNetworkId};
-use libra_types::{
-    account_address::AccountAddress,
-    mempool_status::MempoolStatus,
-    on_chain_config::{ConfigID, LibraVersion, OnChainConfig, OnChainConfigPayload, VMConfig},
-    transaction::SignedTransaction,
-    vm_error::VMStatus,
-    PeerId,
-};
-use std::{
-    collections::HashMap,
-    pin::Pin,
-    sync::{Arc, Mutex, RwLock},
-    task::Waker,
-    time::Instant,
-};
+use std::{collections::HashMap, fmt, pin::Pin, sync::Arc, task::Waker, time::Instant};
 use storage_interface::DbReader;
 use subscription_service::ReconfigSubscription;
 use tokio::runtime::Handle;
 use vm_validator::vm_validator::TransactionValidation;
-
-pub(crate) const DEFAULT_MIN_BROADCAST_RECIPIENT_COUNT: usize = 0;
 
 /// Struct that owns all dependencies required by shared mempool routines
 #[derive(Clone)]
@@ -45,7 +40,7 @@ where
 {
     pub mempool: Arc<Mutex<CoreMempool>>,
     pub config: MempoolConfig,
-    pub network_senders: HashMap<PeerId, MempoolNetworkSender>,
+    pub network_senders: HashMap<NodeNetworkId, MempoolNetworkSender>,
     pub db: Arc<dyn DbReader>,
     pub validator: Arc<RwLock<V>>,
     pub peer_manager: Arc<PeerManager>,
@@ -90,7 +85,7 @@ impl ScheduledBroadcast {
             let tokio_instant = tokio::time::Instant::from_std(deadline);
             executor.spawn(async move {
                 tokio::time::delay_until(tokio_instant).await;
-                let mut waker = waker_clone.lock().expect("failed to acquire waker lock");
+                let mut waker = waker_clone.lock();
                 if let Some(waker) = waker.take() {
                     waker.wake()
                 }
@@ -112,12 +107,12 @@ impl Future for ScheduledBroadcast {
     fn poll(self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
         if Instant::now() < self.deadline {
             let waker_clone = context.waker().clone();
-            let mut waker = self.waker.lock().expect("failed to acquire waker lock");
+            let mut waker = self.waker.lock();
             *waker = Some(waker_clone);
 
             Poll::Pending
         } else {
-            Poll::Ready((self.peer, self.backoff))
+            Poll::Ready((self.peer.clone(), self.backoff))
         }
     }
 }
@@ -142,6 +137,31 @@ pub enum ConsensusRequest {
     ),
 }
 
+impl fmt::Display for ConsensusRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let payload = match self {
+            ConsensusRequest::GetBlockRequest(block_size, excluded_txns, _) => {
+                let mut txns_str = "".to_string();
+                for tx in excluded_txns.iter() {
+                    txns_str += &format!("{} ", tx);
+                }
+                format!(
+                    "GetBlockRequest [block_size: {}, excluded_txns: {}]",
+                    block_size, txns_str
+                )
+            }
+            ConsensusRequest::RejectNotification(rejected_txns, _) => {
+                let mut txns_str = "".to_string();
+                for tx in rejected_txns.iter() {
+                    txns_str += &format!("{} ", tx);
+                }
+                format!("RejectNotification [rejected_txns: {}]", txns_str)
+            }
+        };
+        write!(f, "{}", payload)
+    }
+}
+
 /// Response setn from mempool to consensus
 pub enum ConsensusResponse {
     /// block to submit to consensus
@@ -164,6 +184,20 @@ pub struct CommitNotification {
     pub callback: oneshot::Sender<Result<CommitResponse>>,
 }
 
+impl fmt::Display for CommitNotification {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut txns = "".to_string();
+        for txn in self.transactions.iter() {
+            txns += &format!("{} ", txn);
+        }
+        write!(
+            f,
+            "CommitNotification [block_timestamp_usecs: {}, txns: {}]",
+            self.block_timestamp_usecs, txns
+        )
+    }
+}
+
 /// ACK response to commit notification
 #[derive(Debug)]
 pub struct CommitResponse {
@@ -179,7 +213,14 @@ pub struct CommittedTransaction {
     pub sequence_number: u64,
 }
 
+impl fmt::Display for CommittedTransaction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.sender, self.sequence_number,)
+    }
+}
+
 /// excluded txn
+#[derive(Clone)]
 pub struct TransactionExclusion {
     /// sender
     pub sender: AccountAddress,
@@ -187,18 +228,27 @@ pub struct TransactionExclusion {
     pub sequence_number: u64,
 }
 
+impl fmt::Display for TransactionExclusion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.sender, self.sequence_number,)
+    }
+}
+
 /// Submission Status is represented as combination of vm_validator internal status and core mempool insertion status
-pub type SubmissionStatus = (MempoolStatus, Option<VMStatus>);
+pub type SubmissionStatus = (MempoolStatus, Option<DiscardedVMStatus>);
+
+/// A txn's submission status coupled with the txn itself.
+pub type SubmissionStatusBundle = (SignedTransaction, SubmissionStatus);
 
 /// sender type: used to enqueue new transactions to shared mempool by client endpoints
 pub type MempoolClientSender =
     mpsc::Sender<(SignedTransaction, oneshot::Sender<Result<SubmissionStatus>>)>;
 
 /// On-chain configs that mempool subscribes to for reconfiguration
-const MEMPOOL_SUBSCRIBED_CONFIGS: &[ConfigID] = &[LibraVersion::CONFIG_ID, VMConfig::CONFIG_ID];
+const MEMPOOL_SUBSCRIBED_CONFIGS: &[ConfigID] = &[DiemVersion::CONFIG_ID, VMConfig::CONFIG_ID];
 
 /// Creates mempool's subscription bundle for on-chain reconfiguration
 pub fn gen_mempool_reconfig_subscription(
 ) -> (ReconfigSubscription, Receiver<(), OnChainConfigPayload>) {
-    ReconfigSubscription::subscribe_all(MEMPOOL_SUBSCRIBED_CONFIGS.to_vec(), vec![])
+    ReconfigSubscription::subscribe_all("mempool", MEMPOOL_SUBSCRIBED_CONFIGS.to_vec(), vec![])
 }

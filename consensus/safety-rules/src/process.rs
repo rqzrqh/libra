@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -6,7 +6,7 @@ use crate::{
     remote_service::{self, RemoteService},
     safety_rules_manager,
 };
-use libra_config::config::{NodeConfig, SafetyRulesService};
+use diem_config::config::{SafetyRulesConfig, SafetyRulesService};
 
 use std::net::SocketAddr;
 
@@ -15,48 +15,69 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn new(mut config: NodeConfig) -> Self {
-        let storage = safety_rules_manager::storage(&mut config);
+    pub fn new(config: SafetyRulesConfig) -> Self {
+        let storage = safety_rules_manager::storage(&config);
 
-        let service = &config.consensus.safety_rules.service;
-        let service = match &service {
+        let verify_vote_proposal_signature = config.verify_vote_proposal_signature;
+        let export_consensus_key = config.export_consensus_key;
+        let service = match &config.service {
             SafetyRulesService::Process(service) => service,
-            SafetyRulesService::SpawnedProcess(service) => service,
-            _ => panic!("Unexpected SafetyRules service: {:?}", service),
+            _ => panic!("Unexpected SafetyRules service: {:?}", config.service),
         };
-        let server_addr = service.server_address;
+        let server_addr = service.server_address();
 
         Self {
             data: Some(ProcessData {
                 server_addr,
                 storage,
+                verify_vote_proposal_signature,
+                export_consensus_key,
+                network_timeout: config.network_timeout_ms,
             }),
         }
     }
 
     pub fn start(&mut self) {
         let data = self.data.take().expect("Unable to retrieve ProcessData");
-        remote_service::execute(data.storage, data.server_addr);
+        remote_service::execute(
+            data.storage,
+            data.server_addr,
+            data.verify_vote_proposal_signature,
+            data.export_consensus_key,
+            data.network_timeout,
+        );
     }
 }
 
 struct ProcessData {
     server_addr: SocketAddr,
     storage: PersistentSafetyStorage,
+    verify_vote_proposal_signature: bool,
+    export_consensus_key: bool,
+    // Timeout in Seconds for network operations
+    network_timeout: u64,
 }
 
 pub struct ProcessService {
     server_addr: SocketAddr,
+    network_timeout_ms: u64,
 }
 
 impl ProcessService {
-    pub fn new(server_addr: SocketAddr) -> Self {
-        Self { server_addr }
+    pub fn new(server_addr: SocketAddr, network_timeout: u64) -> Self {
+        Self {
+            server_addr,
+            network_timeout_ms: network_timeout,
+        }
     }
 }
 
 impl RemoteService for ProcessService {
     fn server_address(&self) -> SocketAddr {
         self.server_addr
+    }
+
+    fn network_timeout_ms(&self) -> u64 {
+        self.network_timeout_ms
     }
 }

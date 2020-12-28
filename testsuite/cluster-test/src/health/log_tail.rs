@@ -1,15 +1,15 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
 
-use crate::{health::ValidatorEvent, util::unix_timestamp_now};
-use debug_interface::json_log::JsonLogEntry as DebugInterfaceEvent;
-use libra_logger::*;
+use crate::health::ValidatorEvent;
+use diem_infallible::{duration_since_epoch, Mutex};
+use diem_logger::{json_log::JsonLogEntry as DebugInterfaceEvent, *};
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicI64, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc,
     },
     thread,
     time::{Duration, Instant},
@@ -39,7 +39,7 @@ impl LogTail {
             .pending_messages
             .fetch_sub(events_count, Ordering::Relaxed);
         let pending = prev - events_count;
-        let now = unix_timestamp_now();
+        let now = duration_since_epoch();
         if let Some(last) = events.last() {
             let delay = now - last.received_timestamp;
             if delay > Duration::from_secs(1) {
@@ -72,7 +72,7 @@ impl TraceTail {
         tokio::time::delay_for(duration).await;
         self.trace_enabled.store(false, Ordering::Relaxed);
         let mut events = vec![];
-        while let Ok(event) = self.trace_receiver.lock().unwrap().try_recv() {
+        while let Ok(event) = self.trace_receiver.lock().try_recv() {
             events.push(event);
         }
         events

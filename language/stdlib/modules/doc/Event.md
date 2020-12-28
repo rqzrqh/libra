@@ -3,47 +3,41 @@
 
 # Module `0x1::Event`
 
-### Table of Contents
+The Event module defines an <code><a href="Event.md#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code> that is used to create
+<code><a href="Event.md#0x1_Event_EventHandle">EventHandle</a></code>s with unique GUIDs. It contains a counter for the number
+of <code><a href="Event.md#0x1_Event_EventHandle">EventHandle</a></code>s it generates. An <code><a href="Event.md#0x1_Event_EventHandle">EventHandle</a></code> is used to count the number of
+events emitted to a handle and emit events to the event store.
 
--  [Struct `EventHandleGenerator`](#0x1_Event_EventHandleGenerator)
--  [Struct `EventHandle`](#0x1_Event_EventHandle)
+
+-  [Resource `EventHandleGenerator`](#0x1_Event_EventHandleGenerator)
+-  [Resource `EventHandle`](#0x1_Event_EventHandle)
+-  [Constants](#@Constants_0)
 -  [Function `publish_generator`](#0x1_Event_publish_generator)
 -  [Function `fresh_guid`](#0x1_Event_fresh_guid)
 -  [Function `new_event_handle`](#0x1_Event_new_event_handle)
 -  [Function `emit_event`](#0x1_Event_emit_event)
 -  [Function `write_to_event_store`](#0x1_Event_write_to_event_store)
 -  [Function `destroy_handle`](#0x1_Event_destroy_handle)
--  [Specification](#0x1_Event_Specification)
-    -  [Module specifications](#0x1_Event_@Module_specifications)
-        -  [Management of EventHandleGenerators](#0x1_Event_@Management_of_EventHandleGenerators)
-        -  [Uniqueness and Counter Incrementation of EventHandleGenerators](#0x1_Event_@Uniqueness_and_Counter_Incrementation_of_EventHandleGenerators)
-        -  [Uniqueness of EventHandle GUIDs](#0x1_Event_@Uniqueness_of_EventHandle_GUIDs)
-        -  [Destruction of EventHandles](#0x1_Event_@Destruction_of_EventHandles)
-    -  [Struct `EventHandleGenerator`](#0x1_Event_Specification_EventHandleGenerator)
-    -  [Struct `EventHandle`](#0x1_Event_Specification_EventHandle)
-    -  [Function `publish_generator`](#0x1_Event_Specification_publish_generator)
-    -  [Function `fresh_guid`](#0x1_Event_Specification_fresh_guid)
-    -  [Function `new_event_handle`](#0x1_Event_Specification_new_event_handle)
-    -  [Function `emit_event`](#0x1_Event_Specification_emit_event)
-    -  [Function `destroy_handle`](#0x1_Event_Specification_destroy_handle)
+-  [Module Specification](#@Module_Specification_1)
 
 
-The Event module defines an
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code> that is used to create
-<code><a href="#0x1_Event_EventHandle">EventHandle</a></code>s with unique GUIDs. It contains a counter for the number
-of
-<code><a href="#0x1_Event_EventHandle">EventHandle</a></code>s it generates. An
-<code><a href="#0x1_Event_EventHandle">EventHandle</a></code> is used to count the number of
-events emitted to a handle and emit events to the event store.
+<pre><code><b>use</b> <a href="BCS.md#0x1_BCS">0x1::BCS</a>;
+<b>use</b> <a href="Errors.md#0x1_Errors">0x1::Errors</a>;
+<b>use</b> <a href="Signer.md#0x1_Signer">0x1::Signer</a>;
+<b>use</b> <a href="Vector.md#0x1_Vector">0x1::Vector</a>;
+</code></pre>
+
 
 
 <a name="0x1_Event_EventHandleGenerator"></a>
 
-## Struct `EventHandleGenerator`
+## Resource `EventHandleGenerator`
+
+A resource representing the counter used to generate uniqueness under each account. There won't be destructor for
+this resource to guarantee the uniqueness of the generated handle.
 
 
-
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>
+<pre><code><b>resource</b> <b>struct</b> <a href="Event.md#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>
 </code></pre>
 
 
@@ -54,14 +48,12 @@ events emitted to a handle and emit events to the event store.
 
 <dl>
 <dt>
-
 <code>counter: u64</code>
 </dt>
 <dd>
 
 </dd>
 <dt>
-
 <code>addr: address</code>
 </dt>
 <dd>
@@ -74,11 +66,14 @@ events emitted to a handle and emit events to the event store.
 
 <a name="0x1_Event_EventHandle"></a>
 
-## Struct `EventHandle`
+## Resource `EventHandle`
+
+A handle for an event such that:
+1. Other modules can emit events to this handle.
+2. Storage can use this handle to prove the total number of events that happened in the past.
 
 
-
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Event_EventHandle">EventHandle</a>&lt;T: <b>copyable</b>&gt;
+<pre><code><b>resource</b> <b>struct</b> <a href="Event.md#0x1_Event_EventHandle">EventHandle</a>&lt;T: <b>copyable</b>&gt;
 </code></pre>
 
 
@@ -89,31 +84,45 @@ events emitted to a handle and emit events to the event store.
 
 <dl>
 <dt>
-
 <code>counter: u64</code>
 </dt>
 <dd>
-
+ Total number of events emitted to this event stream.
 </dd>
 <dt>
-
 <code>guid: vector&lt;u8&gt;</code>
 </dt>
 <dd>
-
+ A globally unique ID for this event stream.
 </dd>
 </dl>
 
 
 </details>
 
+<a name="@Constants_0"></a>
+
+## Constants
+
+
+<a name="0x1_Event_EEVENT_GENERATOR"></a>
+
+The event generator resource was in an invalid state
+
+
+<pre><code><b>const</b> <a href="Event.md#0x1_Event_EEVENT_GENERATOR">EEVENT_GENERATOR</a>: u64 = 0;
+</code></pre>
+
+
+
 <a name="0x1_Event_publish_generator"></a>
 
 ## Function `publish_generator`
 
+Publishs a new event handle generator.
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Event_publish_generator">publish_generator</a>(account: &signer)
+<pre><code><b>public</b> <b>fun</b> <a href="Event.md#0x1_Event_publish_generator">publish_generator</a>(account: &signer)
 </code></pre>
 
 
@@ -122,8 +131,10 @@ events emitted to a handle and emit events to the event store.
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Event_publish_generator">publish_generator</a>(account: &signer) {
-    move_to(account, <a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>{ counter: 0, addr: <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account) })
+<pre><code><b>public</b> <b>fun</b> <a href="Event.md#0x1_Event_publish_generator">publish_generator</a>(account: &signer) {
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account);
+    <b>assert</b>(!<b>exists</b>&lt;<a href="Event.md#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>&gt;(addr), <a href="Errors.md#0x1_Errors_already_published">Errors::already_published</a>(<a href="Event.md#0x1_Event_EEVENT_GENERATOR">EEVENT_GENERATOR</a>));
+    move_to(account, <a href="Event.md#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>{ counter: 0, addr })
 }
 </code></pre>
 
@@ -135,9 +146,14 @@ events emitted to a handle and emit events to the event store.
 
 ## Function `fresh_guid`
 
+Derive a fresh unique id by using sender's EventHandleGenerator. The generated vector<u8> is indeed unique because it
+was derived from the hash(sender's EventHandleGenerator || sender_address). This module guarantees that the
+EventHandleGenerator is only going to be monotonically increased and there's no way to revert it or destroy it. Thus
+such counter is going to give distinct value for each of the new event stream under each sender. And since we
+hash it with the sender's address, the result is guaranteed to be globally unique.
 
 
-<pre><code><b>fun</b> <a href="#0x1_Event_fresh_guid">fresh_guid</a>(counter: &<b>mut</b> <a href="#0x1_Event_EventHandleGenerator">Event::EventHandleGenerator</a>): vector&lt;u8&gt;
+<pre><code><b>fun</b> <a href="Event.md#0x1_Event_fresh_guid">fresh_guid</a>(counter: &<b>mut</b> <a href="Event.md#0x1_Event_EventHandleGenerator">Event::EventHandleGenerator</a>): vector&lt;u8&gt;
 </code></pre>
 
 
@@ -146,12 +162,12 @@ events emitted to a handle and emit events to the event store.
 <summary>Implementation</summary>
 
 
-<pre><code><b>fun</b> <a href="#0x1_Event_fresh_guid">fresh_guid</a>(counter: &<b>mut</b> <a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>): vector&lt;u8&gt; {
-    <b>let</b> sender_bytes = <a href="LCS.md#0x1_LCS_to_bytes">LCS::to_bytes</a>(&counter.addr);
-    <b>let</b> count_bytes = <a href="LCS.md#0x1_LCS_to_bytes">LCS::to_bytes</a>(&counter.counter);
+<pre><code><b>fun</b> <a href="Event.md#0x1_Event_fresh_guid">fresh_guid</a>(counter: &<b>mut</b> <a href="Event.md#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>): vector&lt;u8&gt; {
+    <b>let</b> sender_bytes = <a href="BCS.md#0x1_BCS_to_bytes">BCS::to_bytes</a>(&counter.addr);
+    <b>let</b> count_bytes = <a href="BCS.md#0x1_BCS_to_bytes">BCS::to_bytes</a>(&counter.counter);
     counter.counter = counter.counter + 1;
 
-    // <a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a> goes first just in case we want <b>to</b> extend address in the future.
+    // <a href="Event.md#0x1_Event_EventHandleGenerator">EventHandleGenerator</a> goes first just in case we want <b>to</b> extend address in the future.
     <a href="Vector.md#0x1_Vector_append">Vector::append</a>(&<b>mut</b> count_bytes, sender_bytes);
 
     count_bytes
@@ -166,9 +182,10 @@ events emitted to a handle and emit events to the event store.
 
 ## Function `new_event_handle`
 
+Use EventHandleGenerator to generate a unique event handle for <code>sig</code>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Event_new_event_handle">new_event_handle</a>&lt;T: <b>copyable</b>&gt;(account: &signer): <a href="#0x1_Event_EventHandle">Event::EventHandle</a>&lt;T&gt;
+<pre><code><b>public</b> <b>fun</b> <a href="Event.md#0x1_Event_new_event_handle">new_event_handle</a>&lt;T: <b>copyable</b>&gt;(account: &signer): <a href="Event.md#0x1_Event_EventHandle">Event::EventHandle</a>&lt;T&gt;
 </code></pre>
 
 
@@ -177,11 +194,13 @@ events emitted to a handle and emit events to the event store.
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Event_new_event_handle">new_event_handle</a>&lt;T: <b>copyable</b>&gt;(account: &signer): <a href="#0x1_Event_EventHandle">EventHandle</a>&lt;T&gt;
-<b>acquires</b> <a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a> {
-    <a href="#0x1_Event_EventHandle">EventHandle</a>&lt;T&gt; {
+<pre><code><b>public</b> <b>fun</b> <a href="Event.md#0x1_Event_new_event_handle">new_event_handle</a>&lt;T: <b>copyable</b>&gt;(account: &signer): <a href="Event.md#0x1_Event_EventHandle">EventHandle</a>&lt;T&gt;
+<b>acquires</b> <a href="Event.md#0x1_Event_EventHandleGenerator">EventHandleGenerator</a> {
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account);
+    <b>assert</b>(<b>exists</b>&lt;<a href="Event.md#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>&gt;(addr), <a href="Errors.md#0x1_Errors_not_published">Errors::not_published</a>(<a href="Event.md#0x1_Event_EEVENT_GENERATOR">EEVENT_GENERATOR</a>));
+    <a href="Event.md#0x1_Event_EventHandle">EventHandle</a>&lt;T&gt; {
         counter: 0,
-        guid: <a href="#0x1_Event_fresh_guid">fresh_guid</a>(borrow_global_mut&lt;<a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>&gt;(<a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account)))
+        guid: <a href="Event.md#0x1_Event_fresh_guid">fresh_guid</a>(borrow_global_mut&lt;<a href="Event.md#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>&gt;(addr))
     }
 }
 </code></pre>
@@ -194,9 +213,10 @@ events emitted to a handle and emit events to the event store.
 
 ## Function `emit_event`
 
+Emit an event with payload <code>msg</code> by using <code>handle_ref</code>'s key and counter.
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Event_emit_event">emit_event</a>&lt;T: <b>copyable</b>&gt;(handle_ref: &<b>mut</b> <a href="#0x1_Event_EventHandle">Event::EventHandle</a>&lt;T&gt;, msg: T)
+<pre><code><b>public</b> <b>fun</b> <a href="Event.md#0x1_Event_emit_event">emit_event</a>&lt;T: <b>copyable</b>&gt;(handle_ref: &<b>mut</b> <a href="Event.md#0x1_Event_EventHandle">Event::EventHandle</a>&lt;T&gt;, msg: T)
 </code></pre>
 
 
@@ -205,10 +225,10 @@ events emitted to a handle and emit events to the event store.
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Event_emit_event">emit_event</a>&lt;T: <b>copyable</b>&gt;(handle_ref: &<b>mut</b> <a href="#0x1_Event_EventHandle">EventHandle</a>&lt;T&gt;, msg: T) {
+<pre><code><b>public</b> <b>fun</b> <a href="Event.md#0x1_Event_emit_event">emit_event</a>&lt;T: <b>copyable</b>&gt;(handle_ref: &<b>mut</b> <a href="Event.md#0x1_Event_EventHandle">EventHandle</a>&lt;T&gt;, msg: T) {
     <b>let</b> guid = *&handle_ref.guid;
 
-    <a href="#0x1_Event_write_to_event_store">write_to_event_store</a>&lt;T&gt;(guid, handle_ref.counter, msg);
+    <a href="Event.md#0x1_Event_write_to_event_store">write_to_event_store</a>&lt;T&gt;(guid, handle_ref.counter, msg);
     handle_ref.counter = handle_ref.counter + 1;
 }
 </code></pre>
@@ -221,9 +241,11 @@ events emitted to a handle and emit events to the event store.
 
 ## Function `write_to_event_store`
 
+Native procedure that writes to the actual event stream in Event store
+This will replace the "native" portion of EmitEvent bytecode
 
 
-<pre><code><b>fun</b> <a href="#0x1_Event_write_to_event_store">write_to_event_store</a>&lt;T: <b>copyable</b>&gt;(guid: vector&lt;u8&gt;, count: u64, msg: T)
+<pre><code><b>fun</b> <a href="Event.md#0x1_Event_write_to_event_store">write_to_event_store</a>&lt;T: <b>copyable</b>&gt;(guid: vector&lt;u8&gt;, count: u64, msg: T)
 </code></pre>
 
 
@@ -232,7 +254,7 @@ events emitted to a handle and emit events to the event store.
 <summary>Implementation</summary>
 
 
-<pre><code><b>native</b> <b>fun</b> <a href="#0x1_Event_write_to_event_store">write_to_event_store</a>&lt;T: <b>copyable</b>&gt;(guid: vector&lt;u8&gt;, count: u64, msg: T);
+<pre><code><b>native</b> <b>fun</b> <a href="Event.md#0x1_Event_write_to_event_store">write_to_event_store</a>&lt;T: <b>copyable</b>&gt;(guid: vector&lt;u8&gt;, count: u64, msg: T);
 </code></pre>
 
 
@@ -243,9 +265,10 @@ events emitted to a handle and emit events to the event store.
 
 ## Function `destroy_handle`
 
+Destroy a unique handle.
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Event_destroy_handle">destroy_handle</a>&lt;T: <b>copyable</b>&gt;(handle: <a href="#0x1_Event_EventHandle">Event::EventHandle</a>&lt;T&gt;)
+<pre><code><b>public</b> <b>fun</b> <a href="Event.md#0x1_Event_destroy_handle">destroy_handle</a>&lt;T: <b>copyable</b>&gt;(handle: <a href="Event.md#0x1_Event_EventHandle">Event::EventHandle</a>&lt;T&gt;)
 </code></pre>
 
 
@@ -254,8 +277,8 @@ events emitted to a handle and emit events to the event store.
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Event_destroy_handle">destroy_handle</a>&lt;T: <b>copyable</b>&gt;(handle: <a href="#0x1_Event_EventHandle">EventHandle</a>&lt;T&gt;) {
-    <a href="#0x1_Event_EventHandle">EventHandle</a>&lt;T&gt; { counter: _, guid: _ } = handle;
+<pre><code><b>public</b> <b>fun</b> <a href="Event.md#0x1_Event_destroy_handle">destroy_handle</a>&lt;T: <b>copyable</b>&gt;(handle: <a href="Event.md#0x1_Event_EventHandle">EventHandle</a>&lt;T&gt;) {
+    <a href="Event.md#0x1_Event_EventHandle">EventHandle</a>&lt;T&gt; { counter: _, guid: _ } = handle;
 }
 </code></pre>
 
@@ -263,515 +286,26 @@ events emitted to a handle and emit events to the event store.
 
 </details>
 
-<a name="0x1_Event_Specification"></a>
+<a name="@Module_Specification_1"></a>
 
-## Specification
-
-
-<a name="0x1_Event_@Module_specifications"></a>
-
-### Module specifications
+## Module Specification
 
 
-Helper function that returns whether or not an EventHandleGenerator is
-initilaized at the given address
-<code>addr</code>.
+
+> NOTE: specification and verification of event related functionality is currently not happening.
+> Since events cannot be observed from Move programs, this does not affect the verification of
+> other functionality; however, this should be completed at a later point to ensure the framework
+> generates events as expected.
+
+Functions of the event module are mocked out using the intrinsic
+pragma. They are implemented in the prover's prelude as no-ops.
 
 
-<a name="0x1_Event_ehg_exists"></a>
-
-
-<pre><code><b>define</b> <a href="#0x1_Event_ehg_exists">ehg_exists</a>(addr: address): bool {
-    exists&lt;<a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>&gt;(addr)
-}
+<pre><code><b>pragma</b> intrinsic = <b>true</b>;
 </code></pre>
 
 
-Helper function that returns the EventHandleGenerator at
-<code>addr</code>.
-
-
-<a name="0x1_Event_get_ehg"></a>
-
-
-<pre><code><b>define</b> <a href="#0x1_Event_get_ehg">get_ehg</a>(addr: address): <a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a> {
-    <b>global</b>&lt;<a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>&gt;(addr)
-}
-</code></pre>
-
-
-Helper function that returns the serialized counter of the
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code> ehg.
-
-
-<a name="0x1_Event_serialized_ehg_counter"></a>
-
-
-<pre><code><b>define</b> <a href="#0x1_Event_serialized_ehg_counter">serialized_ehg_counter</a>(ehg: <a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>): vector&lt;u8&gt; {
-    <a href="LCS.md#0x1_LCS_serialize">LCS::serialize</a>(ehg.counter)
-}
-</code></pre>
-
-
-Helper function that returns the serialized address of the
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code> ehg.
-
-
-<a name="0x1_Event_serialized_ehg_addr"></a>
-
-
-<pre><code><b>define</b> <a href="#0x1_Event_serialized_ehg_addr">serialized_ehg_addr</a>(ehg: <a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>): vector&lt;u8&gt; {
-    <a href="LCS.md#0x1_LCS_serialize">LCS::serialize</a>(ehg.addr)
-}
-</code></pre>
-
-
-
-<a name="0x1_Event_@Management_of_EventHandleGenerators"></a>
-
-#### Management of EventHandleGenerators
-
-
-
-<code><a href="#0x1_Event_ehg_destroyed">ehg_destroyed</a></code> is true whenever an
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code> is destroyed.
-It should never to true to preserve uniqueness of EventHandleGenerators.
-
-
-<a name="0x1_Event_ehg_destroyed"></a>
-
-
-<pre><code><b>global</b> <a href="#0x1_Event_ehg_destroyed">ehg_destroyed</a>: bool;
-</code></pre>
-
-
-
-
-<a name="0x1_Event_@Uniqueness_and_Counter_Incrementation_of_EventHandleGenerators"></a>
-
-#### Uniqueness and Counter Incrementation of EventHandleGenerators
-
-
-
-<a name="0x1_Event_EHGCounterUnchanged"></a>
-
-**Informally:** If an
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code> exists, then it never changes
-except when a function generates a new
-<code><a href="#0x1_Event_EventHandle">EventHandle</a></code> GUID.
-
-
-<pre><code><b>schema</b> <a href="#0x1_Event_EHGCounterUnchanged">EHGCounterUnchanged</a> {
-    <b>ensures</b> forall addr: address where <b>old</b>(<a href="#0x1_Event_ehg_exists">ehg_exists</a>(addr)):
-                <a href="#0x1_Event_ehg_exists">ehg_exists</a>(addr) && <a href="#0x1_Event_get_ehg">get_ehg</a>(addr).counter == <b>old</b>(<a href="#0x1_Event_get_ehg">get_ehg</a>(addr).counter);
-}
-</code></pre>
-
-
-
-
-<a name="0x1_Event_EHGCounterIncreasesOnEventHandleCreate"></a>
-
-**Informally:** If the
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code> has been initialized,
-then the counter never decreases and stays initialized.
-This proves the uniqueness of the
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code>s at entry and
-exit of functions in this module.
-
-> TODO(#4549): Unable to prove thaat the counter increments using schemas.
-However, we can prove the that the
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code> increments
-in the post conditions of the functions.
-
-Base case:
-
-
-<pre><code><b>schema</b> <a href="#0x1_Event_EHGCounterIncreasesOnEventHandleCreate">EHGCounterIncreasesOnEventHandleCreate</a> {
-    <b>ensures</b> forall addr: address where !<b>old</b>(<a href="#0x1_Event_ehg_exists">ehg_exists</a>(addr)) && <a href="#0x1_Event_ehg_exists">ehg_exists</a>(addr):
-                <a href="#0x1_Event_get_ehg">get_ehg</a>(addr).counter == 0;
-}
-</code></pre>
-
-
-Induction step:
-
-> TODO(kkmc): Change
-<code>counter &gt;= <b>old</b>(counter)</code> to
-<code>counter == <b>old</b>(counter) + 1</code>
-Currently, this can be proved at the function level but not the global invariant level.
-
-
-<pre><code><b>schema</b> <a href="#0x1_Event_EHGCounterIncreasesOnEventHandleCreate">EHGCounterIncreasesOnEventHandleCreate</a> {
-    <b>ensures</b> forall addr: address where <b>old</b>(<a href="#0x1_Event_ehg_exists">ehg_exists</a>(addr)):
-                <a href="#0x1_Event_ehg_exists">ehg_exists</a>(addr) && <a href="#0x1_Event_get_ehg">get_ehg</a>(addr).counter &gt;= <b>old</b>(<a href="#0x1_Event_get_ehg">get_ehg</a>(addr).counter);
-}
-</code></pre>
-
-
-
-Apply
-<code><a href="#0x1_Event_EHGCounterUnchanged">EHGCounterUnchanged</a></code> to all functions except for those
-that create a new GUID and increment the
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code> counter.
-
-
-<pre><code><b>apply</b> <a href="#0x1_Event_EHGCounterUnchanged">EHGCounterUnchanged</a> <b>to</b> * <b>except</b> fresh_guid, new_event_handle;
-</code></pre>
-
-
-Apply
-<code><a href="#0x1_Event_EHGCounterIncreasesOnEventHandleCreate">EHGCounterIncreasesOnEventHandleCreate</a></code> to all functions except fresh_guid
-and its callees.
-
-
-<pre><code><b>apply</b> <a href="#0x1_Event_EHGCounterIncreasesOnEventHandleCreate">EHGCounterIncreasesOnEventHandleCreate</a> <b>to</b> *;
-</code></pre>
-
-
-
-
-<a name="0x1_Event_@Uniqueness_of_EventHandle_GUIDs"></a>
-
-#### Uniqueness of EventHandle GUIDs
-
-
-
-<a name="0x1_Event_UniqueEventHandleGUIDs"></a>
-
-**Informally:** All
-<code><a href="#0x1_Event_EventHandle">EventHandle</a></code>s have unqiue GUIDs.
-
-There are several ways we may want to express this invariant:
-
-INV 1: The first invariant is that all
-<code><a href="#0x1_Event_EventHandle">EventHandle</a></code>s have unique GUIDs.
-An intuitive way to write this is to keep a list of previously existing
-<code><a href="#0x1_Event_EventHandle">EventHandle</a></code>s
-and for every
-<code><b>pack</b></code> of an
-<code><a href="#0x1_Event_EventHandle">EventHandle</a></code>, the GUID must be different from all the
-previously existing ones. However, this requires us to keep track of all of the
-newly generated
-<code><a href="#0x1_Event_EventHandle">EventHandle</a></code> resources (possibly through a ghost variable) and
-compare their GUIDs to each other, which is currently not possible.
-
-INV 2: Enforce
-<code>fresh_guid</code> to only return unique GUIDs; every call only increases the counter
-of the EventHandleGenerator and the output of the
-<code>fresh_guid</code>.
-
-> TODO(kkmc): The move-prover does not currently encode the property that LCS::serialize
-returns the same number of bytes for the same primitive types. Which means that
-<code>fresh_guid</code> can return the same GUIDs.
-
-E.g. If LCS::serialize(addr1) == <0,1,2>, LCS::serialize(addr2) == <0,1>,
-LCS::serialize(ctr1) == <3>, LCS::serialize(ctr2) == <2,3>,
-then <0,1,2> appended with <3> is equal to <0,1> appended with <2,3>.
-
-
-<pre><code><b>schema</b> <a href="#0x1_Event_UniqueEventHandleGUIDs">UniqueEventHandleGUIDs</a> {
-    <b>invariant</b> <b>module</b> <b>true</b>;
-}
-</code></pre>
-
-
-
-Apply
-<code><a href="#0x1_Event_UniqueEventHandleGUIDs">UniqueEventHandleGUIDs</a></code> to enforce all
-<code><a href="#0x1_Event_EventHandle">EventHandle</a></code> resources to have unique GUIDs.
-
-
-<pre><code><b>apply</b> <a href="#0x1_Event_UniqueEventHandleGUIDs">UniqueEventHandleGUIDs</a> <b>to</b> *;
-</code></pre>
-
-
-
-
-
-<a name="0x1_Event_@Destruction_of_EventHandles"></a>
-
-#### Destruction of EventHandles
-
-
-Variable that counts the total number of event handles ever to exist.
-
-
-<a name="0x1_Event_total_num_of_event_handles"></a>
-
-
-<pre><code><b>global</b> <a href="#0x1_Event_total_num_of_event_handles">total_num_of_event_handles</a>&lt;T&gt;: num;
-</code></pre>
-
-
-
-<a name="0x1_Event_Specification_EventHandleGenerator"></a>
-
-### Struct `EventHandleGenerator`
-
-
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>
-</code></pre>
-
-
-
-<dl>
-<dt>
-
-<code>counter: u64</code>
-</dt>
-<dd>
-
-</dd>
-<dt>
-
-<code>addr: address</code>
-</dt>
-<dd>
-
-</dd>
-</dl>
-
-
-Updates the ehg_destroyed variable to true if an
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code> is ever unpacked.
-
-
-<pre><code><b>invariant</b> <b>pack</b> <a href="#0x1_Event_ehg_destroyed">ehg_destroyed</a> = <a href="#0x1_Event_ehg_destroyed">ehg_destroyed</a>;
-<b>invariant</b> <b>unpack</b> <a href="#0x1_Event_ehg_destroyed">ehg_destroyed</a> = <b>true</b>;
-</code></pre>
-
-
-
-
-<a name="0x1_Event_EventHandleGeneratorNeverDestroyed"></a>
-
-**Informally:** No
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code> should ever be destroyed.
-Together with
-<code><a href="#0x1_Event_EventHandleGeneratorAtSameAddress">EventHandleGeneratorAtSameAddress</a></code>, the
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code>s
-can never be alternated.
-
-
-<pre><code><b>schema</b> <a href="#0x1_Event_EventHandleGeneratorNeverDestroyed">EventHandleGeneratorNeverDestroyed</a> {
-    <b>invariant</b> <b>module</b> !<a href="#0x1_Event_ehg_destroyed">ehg_destroyed</a>;
-}
-</code></pre>
-
-
-
-
-<a name="0x1_Event_EventHandleGeneratorAtSameAddress"></a>
-
-**Informally:** An EventHandleGenerator should be located at
-<code>addr</code> and is never moved.
-
-
-<pre><code><b>schema</b> <a href="#0x1_Event_EventHandleGeneratorAtSameAddress">EventHandleGeneratorAtSameAddress</a> {
-    <b>invariant</b> <b>module</b> forall addr: address where <a href="#0x1_Event_ehg_exists">ehg_exists</a>(addr): <a href="#0x1_Event_get_ehg">get_ehg</a>(addr).addr == addr;
-}
-</code></pre>
-
-
-
-Apply
-<code><a href="#0x1_Event_EventHandleGeneratorNeverDestroyed">EventHandleGeneratorNeverDestroyed</a></code> to all functions to ensure that the
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code>s are never destroyed.
-Together with
-<code><a href="#0x1_Event_EHGCounterIncreasesOnEventHandleCreate">EHGCounterIncreasesOnEventHandleCreate</a></code>, this proves
-the uniqueness of the
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code> resource throughout transient
-states at each address.
-Without this, the specification would allow an implementation to remove
-an
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code>, say
-<code>ehg</code>, and then have it generate a number
-of events until the
-<code>ehg.counter</code> >=
-<code><b>old</b>(ehg.counter)</code>. Violating the property
-that an EventHandleGenerator should only be used to generate unique GUIDs.
-
-> TODO(#4549): Potential bug. Without
-<code>* <b>except</b> fresh_guid;</code>, this
-takes a long time to return from the Boogie solver. Sometimes it
-returns a precondition violation error quickly (seemingly
-non-determistic). We expect all functions to satisfy this schema.
-
-
-<pre><code><b>apply</b> <a href="#0x1_Event_EventHandleGeneratorNeverDestroyed">EventHandleGeneratorNeverDestroyed</a> <b>to</b> * <b>except</b> fresh_guid;
-</code></pre>
-
-
-Apply
-<code><a href="#0x1_Event_EventHandleGeneratorAtSameAddress">EventHandleGeneratorAtSameAddress</a></code> to all functions to enforce
-that all
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code>s reside at the address they hold.
-
-> TODO(#4549): Potential bug. Refer to the previous TODO.
-The solver takes a long time unless fresh_guid is excepted.
-
-
-<pre><code><b>apply</b> <a href="#0x1_Event_EventHandleGeneratorAtSameAddress">EventHandleGeneratorAtSameAddress</a> <b>to</b> * <b>except</b> fresh_guid;
-</code></pre>
-
-
-
-<a name="0x1_Event_Specification_EventHandle"></a>
-
-### Struct `EventHandle`
-
-
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Event_EventHandle">EventHandle</a>&lt;T: <b>copyable</b>&gt;
-</code></pre>
-
-
-
-<dl>
-<dt>
-
-<code>counter: u64</code>
-</dt>
-<dd>
-
-</dd>
-<dt>
-
-<code>guid: vector&lt;u8&gt;</code>
-</dt>
-<dd>
-
-</dd>
-</dl>
-
-
-Count the total number of
-<code><a href="#0x1_Event_EventHandle">EventHandle</a></code>s.
-This is used in the post condition of
-<code>destroy_handle</code> to ensure that an
-<code><a href="#0x1_Event_EventHandle">EventHandle</a></code> is destroyed.
-
-
-<pre><code><b>invariant</b> <b>pack</b> <a href="#0x1_Event_total_num_of_event_handles">total_num_of_event_handles</a>&lt;T&gt; = <a href="#0x1_Event_total_num_of_event_handles">total_num_of_event_handles</a>&lt;T&gt; + 1;
-<b>invariant</b> <b>unpack</b> <a href="#0x1_Event_total_num_of_event_handles">total_num_of_event_handles</a>&lt;T&gt; = <a href="#0x1_Event_total_num_of_event_handles">total_num_of_event_handles</a>&lt;T&gt; - 1;
-</code></pre>
-
-
-
-<a name="0x1_Event_Specification_publish_generator"></a>
-
-### Function `publish_generator`
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Event_publish_generator">publish_generator</a>(account: &signer)
-</code></pre>
-
-
-
-Creates a new
-<code><a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a></code> with an initial counter 0 and the
-signer
-<code>account</code>'s address.
-
-
-<pre><code><b>aborts_if</b> exists&lt;<a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>&gt;(<a href="Signer.md#0x1_Signer_get_address">Signer::get_address</a>(account));
-<b>ensures</b> <b>global</b>&lt;<a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a>&gt;(<a href="Signer.md#0x1_Signer_get_address">Signer::get_address</a>(account))
-            == <a href="#0x1_Event_EventHandleGenerator">EventHandleGenerator</a> { counter: 0, addr: <a href="Signer.md#0x1_Signer_get_address">Signer::get_address</a>(account) };
-</code></pre>
-
-
-
-<a name="0x1_Event_Specification_fresh_guid"></a>
-
-### Function `fresh_guid`
-
-
-<pre><code><b>fun</b> <a href="#0x1_Event_fresh_guid">fresh_guid</a>(counter: &<b>mut</b> <a href="#0x1_Event_EventHandleGenerator">Event::EventHandleGenerator</a>): vector&lt;u8&gt;
-</code></pre>
-
-
-
-The byte array returned is the concatenation of the serialized
-EventHandleGenerator counter and address.
-
-
-<pre><code><b>aborts_if</b> counter.counter + 1 &gt; max_u64();
-<b>ensures</b> counter.counter == <b>old</b>(counter).counter + 1;
-<b>ensures</b> <a href="Vector.md#0x1_Vector_eq_append">Vector::eq_append</a>(
-            result,
-            <b>old</b>(<a href="#0x1_Event_serialized_ehg_counter">serialized_ehg_counter</a>(counter)),
-            <b>old</b>(<a href="#0x1_Event_serialized_ehg_addr">serialized_ehg_addr</a>(counter))
-        );
-</code></pre>
-
-
-
-<a name="0x1_Event_Specification_new_event_handle"></a>
-
-### Function `new_event_handle`
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Event_new_event_handle">new_event_handle</a>&lt;T: <b>copyable</b>&gt;(account: &signer): <a href="#0x1_Event_EventHandle">Event::EventHandle</a>&lt;T&gt;
-</code></pre>
-
-
-
-
-<pre><code><b>aborts_if</b> !<a href="#0x1_Event_ehg_exists">ehg_exists</a>(<a href="Signer.md#0x1_Signer_get_address">Signer::get_address</a>(account));
-<b>aborts_if</b> <a href="#0x1_Event_get_ehg">get_ehg</a>(<a href="Signer.md#0x1_Signer_get_address">Signer::get_address</a>(account)).counter + 1 &gt; max_u64();
-<b>ensures</b> <a href="#0x1_Event_ehg_exists">ehg_exists</a>(<a href="Signer.md#0x1_Signer_get_address">Signer::get_address</a>(account));
-<b>ensures</b> <a href="#0x1_Event_get_ehg">get_ehg</a>(<a href="Signer.md#0x1_Signer_get_address">Signer::get_address</a>(account)).counter ==
-            <b>old</b>(<a href="#0x1_Event_get_ehg">get_ehg</a>(<a href="Signer.md#0x1_Signer_get_address">Signer::get_address</a>(account)).counter) + 1;
-<b>ensures</b> result.counter == 0;
-<b>ensures</b> <a href="Vector.md#0x1_Vector_eq_append">Vector::eq_append</a>(
-            result.guid,
-            <b>old</b>(<a href="#0x1_Event_serialized_ehg_counter">serialized_ehg_counter</a>(<a href="#0x1_Event_get_ehg">get_ehg</a>(<a href="Signer.md#0x1_Signer_get_address">Signer::get_address</a>(account)))),
-            <b>old</b>(<a href="#0x1_Event_serialized_ehg_addr">serialized_ehg_addr</a>(<a href="#0x1_Event_get_ehg">get_ehg</a>(<a href="Signer.md#0x1_Signer_get_address">Signer::get_address</a>(account))))
-        );
-</code></pre>
-
-
-
-<a name="0x1_Event_Specification_emit_event"></a>
-
-### Function `emit_event`
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Event_emit_event">emit_event</a>&lt;T: <b>copyable</b>&gt;(handle_ref: &<b>mut</b> <a href="#0x1_Event_EventHandle">Event::EventHandle</a>&lt;T&gt;, msg: T)
-</code></pre>
-
-
-
-The counter in
-<code><a href="#0x1_Event_EventHandle">EventHandle</a>&lt;T&gt;</code> increases and the event is emitted to the event store.
-
-> TODO(kkmc): Do we need to specify that the event was sent to the event store?
-
-
-<pre><code><b>aborts_if</b> handle_ref.counter + 1 &gt; max_u64();
-<b>ensures</b> handle_ref.counter == <b>old</b>(handle_ref.counter) + 1;
-<b>ensures</b> handle_ref.guid == <b>old</b>(handle_ref.guid);
-</code></pre>
-
-
-
-<a name="0x1_Event_Specification_destroy_handle"></a>
-
-### Function `destroy_handle`
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Event_destroy_handle">destroy_handle</a>&lt;T: <b>copyable</b>&gt;(handle: <a href="#0x1_Event_EventHandle">Event::EventHandle</a>&lt;T&gt;)
-</code></pre>
-
-
-
-
-<code>destroy_handle</code> should have unpacked an
-<code><a href="#0x1_Event_EventHandle">EventHandle</a></code> and thereby decreasing the
-total number of
-<code><a href="#0x1_Event_EventHandle">EventHandle</a></code>s.
-
-
-<pre><code><b>aborts_if</b> <b>false</b>;
-<b>ensures</b> <a href="#0x1_Event_total_num_of_event_handles">total_num_of_event_handles</a>&lt;T&gt; == <b>old</b>(<a href="#0x1_Event_total_num_of_event_handles">total_num_of_event_handles</a>&lt;T&gt;) - 1;
-</code></pre>
+[//]: # ("File containing references which can be used from documentation")
+[ACCESS_CONTROL]: https://github.com/diem/dip/blob/master/dips/dip-2.md
+[ROLE]: https://github.com/diem/dip/blob/master/dips/dip-2.md#roles
+[PERMISSION]: https://github.com/diem/dip/blob/master/dips/dip-2.md#permissions

@@ -1,10 +1,13 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! This library defines a BitVec struct that represents a bit vector.
 
 use serde::{de::Error, Deserialize, Deserializer, Serialize};
 use std::ops::BitAnd;
+
+#[cfg(any(test, feature = "fuzzing"))]
+use proptest_derive::Arbitrary;
 
 // Every u8 is used as a bucket of 8 bits. Total max buckets = 256 / 8 = 32.
 const BUCKET_SIZE: usize = 8;
@@ -49,7 +52,9 @@ const MAX_BUCKETS: usize = 32;
 /// assert_eq!(false, intersection.is_set(3));
 /// ```
 #[derive(Clone, Default, Debug, PartialEq, Serialize)]
+#[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
 pub struct BitVec {
+    #[serde(with = "serde_bytes")]
     inner: Vec<u8>,
 }
 
@@ -127,7 +132,7 @@ impl<'de> Deserialize<'de> for BitVec {
     where
         D: Deserializer<'de>,
     {
-        let v = <Vec<u8>>::deserialize(deserializer)?;
+        let v = serde_bytes::ByteBuf::deserialize(deserializer)?.into_vec();
         if v.len() > MAX_BUCKETS {
             return Err(D::Error::custom(format!("BitVec too long: {}", v.len())));
         }
@@ -234,18 +239,18 @@ mod test {
     #[test]
     fn test_deserialization() {
         // When the length is smaller than 128, it is encoded in the first byte.
-        // (see comments in LCS crate)
+        // (see comments in BCS crate)
         let mut bytes = [0u8; 47];
         bytes[0] = 46;
-        assert!(lcs::from_bytes::<Vec<u8>>(&bytes).is_ok());
+        assert!(bcs::from_bytes::<Vec<u8>>(&bytes).is_ok());
         // However, 46 > MAX_BUCKET:
-        assert!(lcs::from_bytes::<BitVec>(&bytes).is_err());
+        assert!(bcs::from_bytes::<BitVec>(&bytes).is_err());
         let mut bytes = [0u8; 33];
         bytes[0] = 32;
         let bv = BitVec {
             inner: Vec::from([0u8; 32].as_ref()),
         };
-        assert_eq!(Ok(bv), lcs::from_bytes::<BitVec>(&bytes));
+        assert_eq!(Ok(bv), bcs::from_bytes::<BitVec>(&bytes));
     }
 
     // Constructs a bit vector by setting the positions specified in the argument vector. The

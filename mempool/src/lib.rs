@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
@@ -56,7 +56,6 @@
 //! every Consensus commit request. We use a separate system TTL to ensure that a transaction won't
 //! remain stuck in Mempool forever, even if Consensus doesn't make progress
 
-/// This module provides mocks of shared mempool for tests.
 #[cfg(any(test, feature = "fuzzing"))]
 mod tests;
 pub use shared_mempool::{
@@ -67,14 +66,10 @@ pub use shared_mempool::{
         SubmissionStatus, TransactionExclusion,
     },
 };
-#[cfg(feature = "fuzzing")]
-pub use tests::mocks;
+#[cfg(any(test, feature = "fuzzing"))]
+pub use tests::{fuzzing, mocks};
 
 mod core_mempool;
 mod counters;
+mod logging;
 mod shared_mempool;
-
-// module op counters
-use libra_metrics::OpMetrics;
-use once_cell::sync::Lazy;
-static OP_COUNTERS: Lazy<OpMetrics> = Lazy::new(|| OpMetrics::new_and_registered("mempool"));

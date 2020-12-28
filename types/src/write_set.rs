@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! For each transaction the VM executes, the VM will output a `WriteSet` that contains each access
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum WriteOp {
     Deletion,
-    Value(Vec<u8>),
+    Value(#[serde(with = "serde_bytes")] Vec<u8>),
 }
 
 impl WriteOp {

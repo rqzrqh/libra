@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! Module exposing generic network interface to a single connected peer.
@@ -13,24 +13,26 @@
 //! handler, determined using the protocol negotiated on the RPC substream.
 use crate::{
     constants, counters,
-    peer::{Peer, PeerHandle, PeerNotification},
+    logging::NetworkSchema,
+    peer::{Peer, PeerHandle, PeerNotification, PeerRequest},
     peer_manager::TransportNotification,
     protocols::{
-        direct_send::{DirectSend, DirectSendNotification, DirectSendRequest, Message},
-        rpc::{InboundRpcRequest, OutboundRpcRequest, Rpc, RpcNotification},
+        direct_send::Message,
+        rpc::{InboundRpcRequest, OutboundRpcRequest, Rpc},
     },
     transport::Connection,
     ProtocolId,
 };
-use channel::{self, libra_channel, message_queues::QueueStyle};
+use channel::{self, diem_channel, message_queues::QueueStyle};
+use diem_config::network_id::NetworkContext;
+use diem_logger::prelude::*;
+use diem_types::PeerId;
 use futures::{
     io::{AsyncRead, AsyncWrite},
     stream::StreamExt,
     FutureExt, SinkExt,
 };
-use libra_logger::prelude::*;
-use libra_types::PeerId;
-use std::{fmt::Debug, marker::PhantomData, num::NonZeroUsize, time::Duration};
+use std::{fmt::Debug, marker::PhantomData, num::NonZeroUsize, sync::Arc, time::Duration};
 use tokio::runtime::Handle;
 
 /// Requests [`NetworkProvider`] receives from the network interface.
@@ -63,152 +65,100 @@ where
     TSocket: AsyncRead + AsyncWrite + Send + 'static,
 {
     pub fn start(
+        network_context: Arc<NetworkContext>,
         executor: Handle,
         connection: Connection<TSocket>,
         connection_notifs_tx: channel::Sender<TransportNotification<TSocket>>,
         max_concurrent_reqs: usize,
         max_concurrent_notifs: usize,
         channel_size: usize,
+        max_frame_size: usize,
     ) -> (
-        libra_channel::Sender<ProtocolId, NetworkRequest>,
-        libra_channel::Receiver<ProtocolId, NetworkNotification>,
+        diem_channel::Sender<ProtocolId, NetworkRequest>,
+        diem_channel::Receiver<ProtocolId, NetworkNotification>,
     ) {
-        let peer_id = connection.metadata.peer_id();
+        let peer_id = connection.metadata.remote_peer_id;
 
         // Setup and start Peer actor.
-        let (peer_reqs_tx, peer_reqs_rx) = channel::new(
-            channel_size,
-            &counters::OP_COUNTERS
-                .peer_gauge(&counters::PENDING_PEER_REQUESTS, &peer_id.short_str()),
+        let (peer_reqs_tx, peer_reqs_rx) =
+            channel::new(channel_size, &counters::PENDING_PEER_REQUESTS);
+        let (peer_rpc_notifs_tx, peer_rpc_notifs_rx) =
+            channel::new(channel_size, &counters::PENDING_PEER_RPC_NOTIFICATIONS);
+        let (peer_notifs_tx, peer_notifs_rx) =
+            channel::new(channel_size, &counters::PENDING_PEER_NETWORK_NOTIFICATIONS);
+        let peer_handle = PeerHandle::new(
+            network_context.clone(),
+            connection.metadata.clone(),
+            peer_reqs_tx.clone(),
         );
-        let (peer_rpc_notifs_tx, peer_rpc_notifs_rx) = channel::new(
-            channel_size,
-            &counters::OP_COUNTERS.peer_gauge(
-                &counters::PENDING_PEER_RPC_NOTIFICATIONS,
-                &peer_id.short_str(),
-            ),
-        );
-        let (peer_ds_notifs_tx, peer_ds_notifs_rx) = channel::new(
-            channel_size,
-            &counters::OP_COUNTERS.peer_gauge(
-                &counters::PENDING_PEER_DIRECT_SEND_NOTIFICATIONS,
-                &peer_id.short_str(),
-            ),
-        );
-        let (peer_notifs_tx, peer_notifs_rx) = channel::new(
-            channel_size,
-            &counters::OP_COUNTERS.peer_gauge(
-                &counters::PENDING_PEER_NETWORK_NOTIFICATIONS,
-                &peer_id.short_str(),
-            ),
-        );
-        let peer_handle = PeerHandle::new(peer_id, peer_reqs_tx);
         let peer = Peer::new(
+            Arc::clone(&network_context),
             executor.clone(),
             connection,
             peer_reqs_rx,
             peer_notifs_tx,
             peer_rpc_notifs_tx,
-            peer_ds_notifs_tx,
+            Duration::from_millis(constants::INBOUND_RPC_TIMEOUT_MS),
+            constants::MAX_CONCURRENT_INBOUND_RPCS,
+            max_frame_size,
         );
         executor.spawn(peer.start());
 
         // Setup and start RPC actor.
-        let (rpc_notifs_tx, rpc_notifs_rx) = channel::new(
-            channel_size,
-            &counters::OP_COUNTERS
-                .peer_gauge(&counters::PENDING_RPC_NOTIFICATIONS, &peer_id.short_str()),
-        );
-        let (rpc_reqs_tx, rpc_reqs_rx) = channel::new(
-            channel_size,
-            &counters::OP_COUNTERS
-                .peer_gauge(&counters::PENDING_RPC_REQUESTS, &peer_id.short_str()),
-        );
+        let (rpc_reqs_tx, rpc_reqs_rx) =
+            channel::new(channel_size, &counters::PENDING_RPC_REQUESTS);
         let rpc = Rpc::new(
+            Arc::clone(&network_context),
             peer_handle.clone(),
             rpc_reqs_rx,
             peer_rpc_notifs_rx,
-            rpc_notifs_tx,
-            Duration::from_millis(constants::INBOUND_RPC_TIMEOUT_MS),
             constants::MAX_CONCURRENT_OUTBOUND_RPCS,
-            constants::MAX_CONCURRENT_INBOUND_RPCS,
         );
         executor.spawn(rpc.start());
 
-        // Setup and start DirectSend actor.
-        let (ds_notifs_tx, ds_notifs_rx) = channel::new(
-            channel_size,
-            &counters::OP_COUNTERS.peer_gauge(
-                &counters::PENDING_DIRECT_SEND_NOTIFICATIONS,
-                &peer_id.short_str(),
-            ),
-        );
-        let (ds_reqs_tx, ds_reqs_rx) = channel::new(
-            channel_size,
-            &counters::OP_COUNTERS.peer_gauge(
-                &counters::PENDING_DIRECT_SEND_REQUESTS,
-                &peer_id.short_str(),
-            ),
-        );
-        let ds = DirectSend::new(
-            peer_handle.clone(),
-            ds_reqs_rx,
-            ds_notifs_tx,
-            peer_ds_notifs_rx,
-        );
-        executor.spawn(ds.start());
-
         // TODO: Add label for peer.
-        let (requests_tx, requests_rx) = libra_channel::new(
+        let (requests_tx, requests_rx) = diem_channel::new(
             QueueStyle::FIFO,
-            NonZeroUsize::new(channel_size).expect("libra_channel cannot be of size 0"),
+            NonZeroUsize::new(channel_size).expect("diem_channel cannot be of size 0"),
             Some(&counters::PENDING_NETWORK_REQUESTS),
         );
         // TODO: Add label for peer.
-        let (notifs_tx, notifs_rx) = libra_channel::new(
+        let (notifs_tx, notifs_rx) = diem_channel::new(
             QueueStyle::FIFO,
-            NonZeroUsize::new(channel_size).expect("libra_channel cannot be of size 0"),
+            NonZeroUsize::new(channel_size).expect("diem_channel cannot be of size 0"),
             Some(&counters::PENDING_NETWORK_NOTIFICATIONS),
         );
 
-        // Handle notifications from RPC actor.
-        let inbound_rpc_notifs_tx = notifs_tx.clone();
-        executor.spawn(rpc_notifs_rx.for_each(move |notif| {
-            Self::handle_rpc_notification(peer_id, notif, inbound_rpc_notifs_tx.clone());
-            futures::future::ready(())
-        }));
-
-        // Handle notifications from DirectSend actor.
-        let inbound_ds_notifs_tx = notifs_tx;
-        executor.spawn(ds_notifs_rx.for_each(move |notif| {
-            Self::handle_ds_notification(peer_id, notif, inbound_ds_notifs_tx.clone());
-            futures::future::ready(())
-        }));
-
         // Handle notifications from Peer actor.
+        let inbound_notifs_tx = notifs_tx;
         let connection_notifs_tx = connection_notifs_tx;
         executor.spawn(
             peer_notifs_rx.for_each_concurrent(max_concurrent_notifs, move |notif| {
-                Self::handle_peer_notification(notif, connection_notifs_tx.clone())
+                Self::handle_peer_notification(
+                    notif,
+                    inbound_notifs_tx.clone(),
+                    connection_notifs_tx.clone(),
+                )
             }),
         );
 
         // Handle network requests.
         let f = async move {
-            let peer_id_str = peer_id.short_str();
             requests_rx
                 .for_each_concurrent(max_concurrent_reqs, move |req| {
                     Self::handle_network_request(
                         peer_id,
                         req,
                         rpc_reqs_tx.clone(),
-                        ds_reqs_tx.clone(),
+                        peer_reqs_tx.clone(),
                     )
                 })
                 .then(|_| async move {
                     info!(
-                        "Network provider actor terminating for peer: {}",
-                        peer_id_str
+                        NetworkSchema::new(&network_context).remote_peer(&peer_id),
+                        "{} Network peer actor terminating for peer: {}",
+                        network_context,
+                        peer_id.short_str()
                     );
                     // Cleanly close connection with peer.
                     let mut peer_handle = peer_handle;
@@ -225,62 +175,29 @@ where
         peer_id: PeerId,
         req: NetworkRequest,
         mut rpc_reqs_tx: channel::Sender<OutboundRpcRequest>,
-        mut ds_reqs_tx: channel::Sender<DirectSendRequest>,
+        mut peer_reqs_tx: channel::Sender<PeerRequest>,
     ) {
         match req {
             NetworkRequest::SendRpc(req) => {
                 if let Err(e) = rpc_reqs_tx.send(req).await {
                     error!(
-                        "Failed to send RPC to peer: {}. Error: {:?}",
+                        remote_peer = peer_id,
+                        error = %e,
+                        "Failed to send RPC to peer: {}. Error: {}",
                         peer_id.short_str(),
                         e
                     );
                 }
             }
             NetworkRequest::SendMessage(msg) => {
-                counters::LIBRA_NETWORK_DIRECT_SEND_MESSAGES
-                    .with_label_values(&["sent"])
-                    .inc();
-                counters::LIBRA_NETWORK_DIRECT_SEND_BYTES
-                    .with_label_values(&["sent"])
-                    .observe(msg.mdata.len() as f64);
-                if let Err(e) = ds_reqs_tx.send(DirectSendRequest::SendMessage(msg)).await {
+                if let Err(e) = peer_reqs_tx.send(PeerRequest::SendDirectSend(msg)).await {
                     error!(
-                        "Failed to send DirectSend to peer: {}. Error: {:?}",
+                        remote_peer = peer_id,
+                        error = %e,
+                        "Failed to send DirectSend to peer: {}. Error: {}",
                         peer_id.short_str(),
                         e
                     );
-                }
-            }
-        }
-    }
-
-    fn handle_rpc_notification(
-        peer_id: PeerId,
-        notif: RpcNotification,
-        mut notifs_tx: libra_channel::Sender<ProtocolId, NetworkNotification>,
-    ) {
-        trace!("RpcNotification::{:?}", notif);
-        match notif {
-            RpcNotification::RecvRpc(req) => {
-                if let Err(e) = notifs_tx.push(req.protocol, NetworkNotification::RecvRpc(req)) {
-                    warn!("Failed to push RpcNotification to NetworkProvider for peer: {}. Error: {:?}", peer_id.short_str(), e);
-                }
-            }
-        }
-    }
-
-    fn handle_ds_notification(
-        peer_id: PeerId,
-        notif: DirectSendNotification,
-        mut notifs_tx: libra_channel::Sender<ProtocolId, NetworkNotification>,
-    ) {
-        trace!("DirectSendNotification::{:?}", notif);
-        match notif {
-            DirectSendNotification::RecvMessage(msg) => {
-                if let Err(e) = notifs_tx.push(msg.protocol, NetworkNotification::RecvMessage(msg))
-                {
-                    warn!("Failed to push DirectSendNotification to NetworkProvider for peer: {}. Error: {:?}", peer_id.short_str(), e);
                 }
             }
         }
@@ -288,6 +205,7 @@ where
 
     async fn handle_peer_notification(
         notif: PeerNotification,
+        mut inbound_notifs_tx: diem_channel::Sender<ProtocolId, NetworkNotification>,
         mut connection_notifs_tx: channel::Sender<TransportNotification<TSocket>>,
     ) {
         match notif {
@@ -298,11 +216,38 @@ where
                     .send(TransportNotification::Disconnected(conn_info, reason))
                     .await
                 {
-                    warn!("Failed to push Disconnected event to connection event handler. Probably in shutdown mode. Error: {:?}", err);
+                    warn!(
+                        error = err.to_string(),
+                        "Failed to push Disconnected event to connection event handler. Probably in shutdown mode. Error: {:?}",
+                        err
+                    );
+                }
+            }
+            PeerNotification::RecvDirectSend(message) => {
+                let protocol_id = message.protocol_id;
+                let notif = NetworkNotification::RecvMessage(message);
+                if let Err(e) = inbound_notifs_tx.push(protocol_id, notif) {
+                    warn!(
+                        error = e.to_string(),
+                        "Failed to push RecvDirectSend to PeerManager. Error: {:?}", e
+                    );
+                }
+            }
+            PeerNotification::RecvRpc(request) => {
+                let protocol_id = request.protocol_id;
+                let notif = NetworkNotification::RecvRpc(request);
+                if let Err(e) = inbound_notifs_tx.push(protocol_id, notif) {
+                    warn!(
+                        error = e.to_string(),
+                        "Failed to push RecvRpc to PeerManager. Error: {:?}", e
+                    );
                 }
             }
             _ => {
-                unreachable!("Unexpected notification received from Peer actor");
+                warn!(
+                    "Unexpected notification received from Peer actor: {:?}",
+                    notif
+                );
             }
         }
     }

@@ -1,29 +1,42 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
     Capability, CryptoStorage, Error, GetResponse, Identity, KVStorage, Policy, PublicKeyResponse,
-    Value,
 };
 use chrono::DateTime;
-use libra_crypto::{
+use diem_crypto::{
     ed25519::{Ed25519PrivateKey, Ed25519PublicKey, Ed25519Signature},
-    HashValue,
+    hash::CryptoHash,
 };
-use libra_vault_client::{self as vault, Client};
+use diem_infallible::RwLock;
+use diem_secure_time::{RealTimeService, TimeService};
+use diem_vault_client::{self as vault, Client};
+use serde::{de::DeserializeOwned, Serialize};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-const LIBRA_DEFAULT: &str = "libra_default";
+#[cfg(any(test, feature = "testing"))]
+use diem_vault_client::ReadResponse;
 
-/// VaultStorage utilizes Vault for maintaining encrypted, authenticated data for Libra. This
+const DIEM_DEFAULT: &str = "diem_default";
+
+/// VaultStorage utilizes Vault for maintaining encrypted, authenticated data for Diem. This
 /// version currently matches the behavior of OnDiskStorage and InMemoryStorage. In the future,
 /// Vault will be able to create keys, sign messages, and handle permissions across different
 /// services. The specific vault service leveraged herein is called KV (Key Value) Secrets Engine -
-/// Version 2 (https://www.vaultproject.io/api/secret/kv/kv-v2.html). So while Libra Secure Storage
+/// Version 2 (https://www.vaultproject.io/api/secret/kv/kv-v2.html). So while Diem Secure Storage
 /// calls pointers to data keys, Vault has actually a secret that contains multiple key value
 /// pairs.
 pub struct VaultStorage {
-    pub client: Client,
+    client: Client,
     namespace: Option<String>,
+    renew_ttl_secs: Option<u32>,
+    next_renewal: AtomicU64,
+    use_cas: bool,
+    secret_versions: RwLock<HashMap<String, u32>>,
 }
 
 impl VaultStorage {
@@ -32,21 +45,46 @@ impl VaultStorage {
         token: String,
         namespace: Option<String>,
         certificate: Option<String>,
+        renew_ttl_secs: Option<u32>,
+        use_cas: bool,
     ) -> Self {
         Self {
             client: Client::new(host, token, certificate),
             namespace,
+            renew_ttl_secs,
+            next_renewal: AtomicU64::new(0),
+            use_cas,
+            secret_versions: RwLock::new(HashMap::new()),
         }
+    }
+
+    // Made into an accessor so we can get auto-renewal
+    fn client(&self) -> &Client {
+        if self.renew_ttl_secs.is_some() {
+            let now = RealTimeService::new().now();
+            let next_renewal = self.next_renewal.load(Ordering::Relaxed);
+            if now >= next_renewal {
+                let result = self.client.renew_token_self(self.renew_ttl_secs);
+                if let Ok(ttl) = result {
+                    let next_renewal = now + (ttl as u64) / 2;
+                    self.next_renewal.store(next_renewal, Ordering::Relaxed);
+                } else if let Err(e) = result {
+                    diem_logger::error!("Unable to renew lease: {}", e.to_string());
+                }
+            }
+        }
+        &self.client
     }
 
     #[cfg(any(test, feature = "testing"))]
     fn reset_kv(&self, path: &str) -> Result<(), Error> {
-        let secrets = self.client.list_secrets(path)?;
+        let secrets = self.client().list_secrets(path)?;
         for secret in secrets {
             if secret.ends_with('/') {
                 self.reset_kv(&secret)?;
             } else {
-                self.client.delete_secret(&format!("{}{}", path, secret))?;
+                self.client()
+                    .delete_secret(&format!("{}{}", path, secret))?;
             }
         }
         Ok(())
@@ -54,23 +92,23 @@ impl VaultStorage {
 
     #[cfg(any(test, feature = "testing"))]
     fn reset_crypto(&self) -> Result<(), Error> {
-        let keys = match self.client.list_keys() {
+        let keys = match self.client().list_keys() {
             Ok(keys) => keys,
             // No keys were found, so there's no need to reset.
-            Err(libra_vault_client::Error::NotFound(_, _)) => return Ok(()),
+            Err(diem_vault_client::Error::NotFound(_, _)) => return Ok(()),
             Err(e) => return Err(e.into()),
         };
         for key in keys {
-            self.client.delete_key(&key)?;
+            self.client().delete_key(&key)?;
         }
         Ok(())
     }
 
     #[cfg(any(test, feature = "testing"))]
     fn reset_policies(&self) -> Result<(), Error> {
-        let policies = match self.client.list_policies() {
+        let policies = match self.client().list_policies() {
             Ok(policies) => policies,
-            Err(libra_vault_client::Error::NotFound(_, _)) => return Ok(()),
+            Err(diem_vault_client::Error::NotFound(_, _)) => return Ok(()),
             Err(e) => return Err(e.into()),
         };
 
@@ -80,20 +118,33 @@ impl VaultStorage {
                 continue;
             }
 
-            self.client.delete_policy(&policy)?;
+            self.client().delete_policy(&policy)?;
         }
         Ok(())
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    pub fn revoke_token_self(&self) -> Result<(), Error> {
+        Ok(self.client.revoke_token_self()?)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn get_all_key_versions(
+        &self,
+        name: &str,
+    ) -> Result<Vec<ReadResponse<Ed25519PublicKey>>, Error> {
+        Ok(self.client().read_ed25519_key(name)?)
+    }
+
     /// Creates a token but uses the namespace for policies
     pub fn create_token(&self, mut policies: Vec<&str>) -> Result<String, Error> {
-        policies.push(LIBRA_DEFAULT);
+        policies.push(DIEM_DEFAULT);
         let result = if let Some(ns) = &self.namespace {
             let policies: Vec<_> = policies.iter().map(|p| format!("{}/{}", ns, p)).collect();
-            self.client
+            self.client()
                 .create_token(policies.iter().map(|p| &**p).collect())?
         } else {
-            self.client.create_token(policies)?
+            self.client().create_token(policies)?
         };
         Ok(result)
     }
@@ -110,7 +161,7 @@ impl VaultStorage {
     ) -> Result<(), Error> {
         let policy_name = self.name(policy_name, engine);
 
-        let mut vault_policy = self.client.read_policy(&policy_name).unwrap_or_default();
+        let mut vault_policy = self.client().read_policy(&policy_name).unwrap_or_default();
         let mut core_capabilities = Vec::new();
         for capability in capabilities {
             match capability {
@@ -136,15 +187,15 @@ impl VaultStorage {
 
         let path = format!("{}/{}", engine.to_policy_path(), self.name(key, engine));
         vault_policy.add_policy(&path, core_capabilities);
-        self.client.set_policy(&policy_name, &vault_policy)?;
+        self.client().set_policy(&policy_name, &vault_policy)?;
         Ok(())
     }
 
     fn key_version(&self, name: &str, version: &Ed25519PublicKey) -> Result<u32, Error> {
-        let pubkeys = self.client.read_ed25519_key(name)?;
+        let pubkeys = self.client().read_ed25519_key(name)?;
         let pubkey = pubkeys.iter().find(|pubkey| version == &pubkey.value);
         Ok(pubkey
-            .ok_or_else(|| Error::KeyVersionNotFound(name.into()))?
+            .ok_or_else(|| Error::KeyVersionNotFound(name.into(), version.to_string()))?
             .version)
     }
 
@@ -158,7 +209,7 @@ impl VaultStorage {
             match &perm.id {
                 Identity::User(id) => self.set_policy(id, engine, name, &perm.capabilities)?,
                 Identity::Anyone => {
-                    self.set_policy(LIBRA_DEFAULT, engine, name, &perm.capabilities)?
+                    self.set_policy(DIEM_DEFAULT, engine, name, &perm.capabilities)?
                 }
                 Identity::NoOne => (),
             };
@@ -185,30 +236,43 @@ impl VaultStorage {
 
 impl KVStorage for VaultStorage {
     fn available(&self) -> Result<(), Error> {
-        if !self.client.unsealed()? {
+        if !self.client().unsealed()? {
             Err(Error::InternalError("Vault is not unsealed".into()))
         } else {
             Ok(())
         }
     }
 
-    fn get(&self, key: &str) -> Result<GetResponse, Error> {
+    fn get<T: DeserializeOwned>(&self, key: &str) -> Result<GetResponse<T>, Error> {
         let secret = self.secret_name(key);
-        let resp = self.client.read_secret(&secret, key)?;
+        let resp = self.client().read_secret(&secret, key)?;
         let last_update = DateTime::parse_from_rfc3339(&resp.creation_time)?.timestamp() as u64;
-        let value: Value = serde_json::from_str(&resp.value)?;
+        let value: T = serde_json::from_value(resp.value)?;
+        self.secret_versions
+            .write()
+            .insert(key.to_string(), resp.version);
         Ok(GetResponse { last_update, value })
     }
 
-    fn set(&mut self, key: &str, value: Value) -> Result<(), Error> {
+    fn set<T: Serialize>(&mut self, key: &str, value: T) -> Result<(), Error> {
         let secret = self.secret_name(key);
-        self.client
-            .write_secret(&secret, key, &serde_json::to_string(&value)?)?;
+        let version = if self.use_cas {
+            self.secret_versions.read().get(key).copied()
+        } else {
+            None
+        };
+        let new_version =
+            self.client()
+                .write_secret(&secret, key, &serde_json::to_value(&value)?, version)?;
+        self.secret_versions
+            .write()
+            .insert(key.to_string(), new_version);
         Ok(())
     }
 
     #[cfg(any(test, feature = "testing"))]
     fn reset_and_clear(&mut self) -> Result<(), Error> {
+        self.secret_versions.write().clear();
         self.reset_kv("")?;
         self.reset_crypto()?;
         self.reset_policies()
@@ -224,13 +288,13 @@ impl CryptoStorage for VaultStorage {
             Err(e) => return Err(e),
         }
 
-        self.client.create_ed25519_key(&ns_name, true)?;
+        self.client().create_ed25519_key(&ns_name, true)?;
         self.get_public_key(name).map(|v| v.public_key)
     }
 
     fn export_private_key(&self, name: &str) -> Result<Ed25519PrivateKey, Error> {
         let name = self.crypto_name(name);
-        Ok(self.client.export_ed25519_key(&name, None)?)
+        Ok(self.client().export_ed25519_key(&name, None)?)
     }
 
     fn export_private_key_for_version(
@@ -240,7 +304,7 @@ impl CryptoStorage for VaultStorage {
     ) -> Result<Ed25519PrivateKey, Error> {
         let name = self.crypto_name(name);
         let vers = self.key_version(&name, &version)?;
-        Ok(self.client.export_ed25519_key(&name, Some(vers))?)
+        Ok(self.client().export_ed25519_key(&name, Some(vers))?)
     }
 
     fn import_private_key(&mut self, name: &str, key: Ed25519PrivateKey) -> Result<(), Error> {
@@ -251,15 +315,15 @@ impl CryptoStorage for VaultStorage {
             Err(e) => return Err(e),
         }
 
-        self.client
+        self.client()
             .import_ed25519_key(&ns_name, &key)
             .map_err(|e| e.into())
     }
 
     fn get_public_key(&self, name: &str) -> Result<PublicKeyResponse, Error> {
         let name = self.crypto_name(name);
-        let resp = self.client.read_ed25519_key(&name)?;
-        let mut last_key = resp.first().ok_or_else(|| Error::KeyNotSet(name))?;
+        let resp = self.client().read_ed25519_key(&name)?;
+        let mut last_key = resp.first().ok_or(Error::KeyNotSet(name))?;
         for key in &resp {
             last_key = if last_key.version > key.version {
                 last_key
@@ -274,28 +338,60 @@ impl CryptoStorage for VaultStorage {
         })
     }
 
+    fn get_public_key_previous_version(&self, name: &str) -> Result<Ed25519PublicKey, Error> {
+        let name = self.crypto_name(name);
+        let pubkeys = self.client().read_ed25519_key(&name)?;
+        let highest_version = pubkeys.iter().map(|pubkey| pubkey.version).max();
+        match highest_version {
+            Some(version) => {
+                let pubkey = pubkeys.iter().find(|pubkey| pubkey.version == version - 1);
+                Ok(pubkey
+                    .ok_or_else(|| Error::KeyVersionNotFound(name, "previous version".into()))?
+                    .value
+                    .clone())
+            }
+            None => Err(Error::KeyVersionNotFound(name, "previous version".into())),
+        }
+    }
+
     fn rotate_key(&mut self, name: &str) -> Result<Ed25519PublicKey, Error> {
         let ns_name = self.crypto_name(name);
-        self.client.rotate_key(&ns_name)?;
-        self.get_public_key(name).map(|v| v.public_key)
+        self.client().rotate_key(&ns_name)?;
+        Ok(self.client().trim_key_versions(&ns_name)?)
     }
 
-    fn sign_message(&mut self, name: &str, message: &HashValue) -> Result<Ed25519Signature, Error> {
+    fn sign<T: CryptoHash + Serialize>(
+        &self,
+        name: &str,
+        message: &T,
+    ) -> Result<Ed25519Signature, Error> {
         let name = self.crypto_name(name);
-        Ok(self.client.sign_ed25519(&name, message.as_ref(), None)?)
+        let mut bytes = <T::Hasher as diem_crypto::hash::CryptoHasher>::seed().to_vec();
+        bcs::serialize_into(&mut bytes, &message).map_err(|e| {
+            Error::InternalError(format!(
+                "Serialization of signable material should not fail, yet returned Error:{}",
+                e
+            ))
+        })?;
+        Ok(self.client().sign_ed25519(&name, &bytes, None)?)
     }
 
-    fn sign_message_using_version(
-        &mut self,
+    fn sign_using_version<T: CryptoHash + Serialize>(
+        &self,
         name: &str,
         version: Ed25519PublicKey,
-        message: &HashValue,
+        message: &T,
     ) -> Result<Ed25519Signature, Error> {
         let name = self.crypto_name(name);
         let vers = self.key_version(&name, &version)?;
-        Ok(self
-            .client
-            .sign_ed25519(&name, message.as_ref(), Some(vers))?)
+        let mut bytes = <T::Hasher as diem_crypto::hash::CryptoHasher>::seed().to_vec();
+        bcs::serialize_into(&mut bytes, &message).map_err(|e| {
+            Error::InternalError(format!(
+                "Serialization of signable material should not fail, yet returned Error:{}",
+                e
+            ))
+        })?;
+        Ok(self.client().sign_ed25519(&name, &bytes, Some(vers))?)
     }
 }
 

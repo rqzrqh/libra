@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -6,7 +6,7 @@ use crate::{
     commands::{subcommand_execute, Command},
 };
 use chrono::{DateTime, Utc};
-use libra_types::waypoint::Waypoint;
+use diem_types::waypoint::Waypoint;
 use std::time::{Duration, UNIX_EPOCH};
 
 /// Major command for account related operations.
@@ -14,7 +14,7 @@ pub struct DevCommand {}
 
 impl Command for DevCommand {
     fn get_aliases(&self) -> Vec<&'static str> {
-        vec!["dev"]
+        vec!["dev", "d"]
     }
     fn get_description(&self) -> &'static str {
         "Local Move development"
@@ -25,10 +25,10 @@ impl Command for DevCommand {
             Box::new(DevCommandPublish {}),
             Box::new(DevCommandExecute {}),
             Box::new(DevCommandUpgradeStdlib {}),
-            Box::new(DevCommandAddValidator {}),
-            Box::new(DevCommandRemoveValidator {}),
             Box::new(DevCommandGenWaypoint {}),
-            Box::new(DevCommandRegisterValidator {}),
+            Box::new(DevCommandChangeDiemVersion {}),
+            Box::new(DevCommandEnableCustomScript {}),
+            Box::new(AddToScriptAllowList {}),
         ];
         subcommand_execute(&params[0], commands, client, &params[1..]);
     }
@@ -125,7 +125,7 @@ pub struct DevCommandEnableCustomScript {}
 
 impl Command for DevCommandEnableCustomScript {
     fn get_aliases(&self) -> Vec<&'static str> {
-        vec!["enable_custom_script"]
+        vec!["enable_custom_script", "s"]
     }
 
     fn get_params_help(&self) -> &'static str {
@@ -133,7 +133,7 @@ impl Command for DevCommandEnableCustomScript {
     }
 
     fn get_description(&self) -> &'static str {
-        "Allow executing arbitrary script in the network."
+        "Allow executing arbitrary script in the network. This disables script hash verification."
     }
 
     fn execute(&self, client: &mut ClientProxy, params: &[&str]) {
@@ -148,27 +148,54 @@ impl Command for DevCommandEnableCustomScript {
     }
 }
 
-pub struct DevCommandDisableCustomScript {}
+pub struct AddToScriptAllowList {}
 
-impl Command for DevCommandDisableCustomScript {
+impl Command for AddToScriptAllowList {
     fn get_aliases(&self) -> Vec<&'static str> {
-        vec!["disable_custom_script"]
+        vec!["add_to_script_allow_list", "a"]
     }
 
     fn get_params_help(&self) -> &'static str {
-        ""
+        "<hash>"
     }
 
     fn get_description(&self) -> &'static str {
-        "Only allow executing predefined stdlib script in the network."
+        "Add a script hash to the allow list. This enables script hash verification."
     }
 
     fn execute(&self, client: &mut ClientProxy, params: &[&str]) {
-        if params.len() != 1 {
+        if params.len() != 2 {
             println!("Invalid number of arguments");
             return;
         }
-        match client.disable_custom_script(params, true) {
+        match client.add_to_script_allow_list(params, true) {
+            Ok(_) => println!("Successfully finished execution"),
+            Err(e) => println!("{}", e),
+        }
+    }
+}
+
+pub struct DevCommandChangeDiemVersion {}
+
+impl Command for DevCommandChangeDiemVersion {
+    fn get_aliases(&self) -> Vec<&'static str> {
+        vec!["change_diem_version", "v"]
+    }
+
+    fn get_params_help(&self) -> &'static str {
+        "<new_diem_version>"
+    }
+
+    fn get_description(&self) -> &'static str {
+        "Change the diem_version stored on chain"
+    }
+
+    fn execute(&self, client: &mut ClientProxy, params: &[&str]) {
+        if params.len() != 2 {
+            println!("Invalid number of arguments");
+            return;
+        }
+        match client.change_diem_version(params, true) {
             Ok(_) => println!("Successfully finished execution"),
             Err(e) => println!("{}", e),
         }
@@ -179,7 +206,7 @@ pub struct DevCommandUpgradeStdlib {}
 
 impl Command for DevCommandUpgradeStdlib {
     fn get_aliases(&self) -> Vec<&'static str> {
-        vec!["upgrade_stdlib"]
+        vec!["upgrade_stdlib", "u"]
     }
 
     fn get_params_help(&self) -> &'static str {
@@ -202,65 +229,11 @@ impl Command for DevCommandUpgradeStdlib {
     }
 }
 
-pub struct DevCommandAddValidator {}
-
-impl Command for DevCommandAddValidator {
-    fn get_aliases(&self) -> Vec<&'static str> {
-        vec!["add_validator"]
-    }
-
-    fn get_params_help(&self) -> &'static str {
-        "<validator_account_address>"
-    }
-
-    fn get_description(&self) -> &'static str {
-        "Add an account address to the validator set"
-    }
-
-    fn execute(&self, client: &mut ClientProxy, params: &[&str]) {
-        if params.len() != 2 {
-            println!("Invalid number of arguments to add validator");
-            return;
-        }
-        match client.add_validator(params, true) {
-            Ok(_) => println!("Successfully finished execution"),
-            Err(e) => println!("{}", e),
-        }
-    }
-}
-
-pub struct DevCommandRemoveValidator {}
-
-impl Command for DevCommandRemoveValidator {
-    fn get_aliases(&self) -> Vec<&'static str> {
-        vec!["remove_validator"]
-    }
-
-    fn get_params_help(&self) -> &'static str {
-        "<validator_account_address>"
-    }
-
-    fn get_description(&self) -> &'static str {
-        "Remove an existing account address from the validator set"
-    }
-
-    fn execute(&self, client: &mut ClientProxy, params: &[&str]) {
-        if params.len() != 2 {
-            println!("Invalid number of arguments to remove validator");
-            return;
-        }
-        match client.remove_validator(params, true) {
-            Ok(_) => println!("Successfully finished execution"),
-            Err(e) => println!("{}", e),
-        }
-    }
-}
-
 pub struct DevCommandGenWaypoint {}
 
 impl Command for DevCommandGenWaypoint {
     fn get_aliases(&self) -> Vec<&'static str> {
-        vec!["gen_waypoint"]
+        vec!["gen_waypoint", "g"]
     }
 
     fn get_params_help(&self) -> &'static str {
@@ -301,32 +274,6 @@ impl Command for DevCommandGenWaypoint {
                 li_time_str,
                 waypoint
             ),
-        }
-    }
-}
-
-pub struct DevCommandRegisterValidator {}
-
-impl Command for DevCommandRegisterValidator {
-    fn get_aliases(&self) -> Vec<&'static str> {
-        vec!["register_validator"]
-    }
-    fn get_params_help(&self) -> &'static str {
-        "<validator_account_address> <validator_account_private_key> <consensus_public_key> <network_signing_key> <network_identity_key> <network_address> <fullnode_identity_key> <fullnode_network_address>"
-    }
-
-    fn get_description(&self) -> &'static str {
-        "Register an account address as validator candidate with necessary data, it's up to association to add them to the network"
-    }
-
-    fn execute(&self, client: &mut ClientProxy, params: &[&str]) {
-        if params.len() != 9 {
-            println!("Invalid number of arguments to register validator");
-            return;
-        }
-        match client.register_validator(params, true) {
-            Ok(_) => println!("Successfully finished execution"),
-            Err(e) => println!("{}", e),
         }
     }
 }

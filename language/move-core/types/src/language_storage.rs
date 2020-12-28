@@ -1,12 +1,11 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
     account_address::AccountAddress,
     identifier::{IdentStr, Identifier},
 };
-use libra_crypto::hash::CryptoHash;
-use libra_crypto_derive::{CryptoHasher, LCSCryptoHash};
+use diem_crypto_derive::{BCSCryptoHash, CryptoHasher};
 #[cfg(any(test, feature = "fuzzing"))]
 use proptest_derive::Arbitrary;
 use serde::{Deserialize, Serialize};
@@ -42,7 +41,7 @@ pub enum TypeTag {
     PartialOrd,
     Ord,
     CryptoHasher,
-    LCSCryptoHash,
+    BCSCryptoHash,
 )]
 pub struct StructTag {
     pub address: AccountAddress,
@@ -57,8 +56,12 @@ impl StructTag {
         let mut key = vec![];
         key.push(RESOURCE_TAG);
 
-        key.append(&mut self.hash().to_vec());
+        key.append(&mut bcs::to_bytes(self).unwrap());
         key
+    }
+
+    pub fn module_id(&self) -> ModuleId {
+        ModuleId::new(self.address, self.module.to_owned())
     }
 }
 
@@ -66,8 +69,8 @@ impl StructTag {
 /// the struct tag
 #[derive(Serialize, Deserialize, Debug, PartialEq, Hash, Eq, Clone, PartialOrd, Ord)]
 pub struct ResourceKey {
-    address: AccountAddress,
-    type_: StructTag,
+    pub address: AccountAddress,
+    pub type_: StructTag,
 }
 
 impl ResourceKey {
@@ -99,13 +102,19 @@ impl ResourceKey {
     PartialOrd,
     Ord,
     CryptoHasher,
-    LCSCryptoHash,
+    BCSCryptoHash,
 )]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
 pub struct ModuleId {
     address: AccountAddress,
     name: Identifier,
+}
+
+impl From<ModuleId> for (AccountAddress, Identifier) {
+    fn from(module_id: ModuleId) -> Self {
+        (module_id.address, module_id.name)
+    }
 }
 
 impl ModuleId {
@@ -125,8 +134,14 @@ impl ModuleId {
         let mut key = vec![];
         key.push(CODE_TAG);
 
-        key.append(&mut self.hash().to_vec());
+        key.append(&mut bcs::to_bytes(self).unwrap());
         key
+    }
+}
+
+impl Display for ModuleId {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "{}::{}", self.address, self.name)
     }
 }
 
@@ -134,8 +149,8 @@ impl Display for StructTag {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         write!(
             f,
-            "{}::{}::{}",
-            self.address.short_str(),
+            "0x{}::{}::{}",
+            self.address.short_str_lossless(),
             self.module,
             self.name
         )?;

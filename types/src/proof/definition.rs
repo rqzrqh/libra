@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! This module has definition of various proofs.
@@ -14,8 +14,8 @@ use crate::{
 };
 use anyhow::{bail, ensure, format_err, Result};
 #[cfg(any(test, feature = "fuzzing"))]
-use libra_crypto::hash::TestOnlyHasher;
-use libra_crypto::{
+use diem_crypto::hash::TestOnlyHasher;
+use diem_crypto::{
     hash::{
         CryptoHash, CryptoHasher, EventAccumulatorHasher, TransactionAccumulatorHasher,
         SPARSE_MERKLE_PLACEHOLDER_HASH,
@@ -702,6 +702,13 @@ impl TransactionListProof {
         self.ledger_info_to_transaction_infos_proof.left_siblings()
     }
 
+    pub fn unpack(self) -> (TransactionAccumulatorRangeProof, Vec<TransactionInfo>) {
+        (
+            self.ledger_info_to_transaction_infos_proof,
+            self.transaction_infos,
+        )
+    }
+
     /// Verifies the list of transactions are correct using the proof. The verifier needs to have
     /// the ledger info and the version of the first transaction in possession.
     pub fn verify(
@@ -746,9 +753,8 @@ impl TransactionListProof {
 }
 
 /// A proof that first verifies that establishes correct computation of the root and then
-/// returns the new tree to acquire a new root and version. Note: this is used internally by
-/// VoteProposal hence why it exists within consensus-types andd not libra-types.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// returns the new tree to acquire a new root and version.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AccumulatorExtensionProof<H> {
     /// Represents the roots of all the full subtrees from left to right in the original accumulator.
     frozen_subtree_roots: Vec<HashValue>,

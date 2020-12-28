@@ -9,12 +9,12 @@ The command to run is:
 ```
 cargo run -p diagen
 ```
-Note that this command can be run anywhere in the `libra` repo because it will automatically locate `language/stdlib/modules` (i.e., input directory) and `language/move-prover/diagen/diagrams` (i.e., output directory).
+Note that this command can be run anywhere in the `diem` repo because it will automatically locate `language/stdlib/modules` (i.e., input directory) and `language/move-prover/diagen/diagrams` (i.e., output directory).
 
 To convert `.dot` into `.pdf`, run the following command:
 ```
 brew install graphviz
 cd diagrams
-chmod +x convert_all.sh
-./convert_all.sh
+chmod +x convert_all_dot_to_pdf.sh
+./convert_all_dot_to_pdf.sh
 ```

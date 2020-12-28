@@ -1,10 +1,10 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::vote_data::VoteData;
 use anyhow::{ensure, Context};
-use libra_crypto::{hash::CryptoHash, HashValue};
-use libra_types::{
+use diem_crypto::{hash::CryptoHash, HashValue};
+use diem_types::{
     block_info::BlockInfo,
     ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
     validator_verifier::ValidatorVerifier,
@@ -63,10 +63,7 @@ impl QuorumCert {
 
     /// If the QC commits reconfiguration and starts a new epoch
     pub fn ends_epoch(&self) -> bool {
-        self.signed_ledger_info
-            .ledger_info()
-            .next_epoch_state()
-            .is_some()
+        self.signed_ledger_info.ledger_info().ends_epoch()
     }
 
     /// QuorumCert for the genesis block deterministically generated from end-epoch LedgerInfo:

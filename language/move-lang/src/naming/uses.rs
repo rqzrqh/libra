@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -229,10 +229,12 @@ fn exp(context: &mut Context, sp!(loc, e_): &N::Exp) {
         | E::Spec(_, _)
         | E::InferredNum(_)
         | E::Value(_)
+        | E::Constant(None, _)
         | E::Move(_)
         | E::Copy(_)
         | E::Use(_) => (),
 
+        E::Constant(Some(m), _c) => context.add_usage(m, *loc),
         E::ModuleCall(m, _, bs_opt, sp!(_, es_)) => {
             context.add_usage(m, *loc);
             types_opt(context, bs_opt);
@@ -296,8 +298,7 @@ fn exp_dotted(context: &mut Context, sp!(_, ed_): &N::ExpDotted) {
 fn builtin_function(context: &mut Context, sp!(_, bf_): &N::BuiltinFunction) {
     use N::BuiltinFunction_ as B;
     match bf_ {
-        B::MoveToSender(bt_opt)
-        | B::MoveTo(bt_opt)
+        B::MoveTo(bt_opt)
         | B::MoveFrom(bt_opt)
         | B::BorrowGlobal(_, bt_opt)
         | B::Exists(bt_opt)

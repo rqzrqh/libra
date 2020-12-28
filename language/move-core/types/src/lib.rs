@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! Core types for Move.
@@ -15,3 +15,4 @@ pub mod transaction_argument;
 #[cfg(test)]
 mod unit_tests;
 pub mod value;
+pub mod vm_status;

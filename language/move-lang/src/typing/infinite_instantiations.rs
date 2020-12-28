@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use super::core::{self, Subst, TParamSubst};
@@ -209,6 +209,7 @@ fn exp(context: &mut Context, e: &T::Exp) {
 
         E::Unit { .. }
         | E::Value(_)
+        | E::Constant(_, _)
         | E::Move { .. }
         | E::Copy { .. }
         | E::BorrowLocal(_, _)

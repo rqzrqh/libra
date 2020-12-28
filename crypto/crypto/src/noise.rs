@@ -1,7 +1,7 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Noise is a [protocol framework](https://noiseprotocol.org/) which we use in Libra to
+//! Noise is a [protocol framework](https://noiseprotocol.org/) which we use in Diem to
 //! encrypt and authenticate communications between nodes of the network.
 //!
 //! This file implements a stripped-down version of Noise_IK_25519_AESGCM_SHA256.
@@ -13,10 +13,10 @@
 //! Usage example:
 //!
 //! ```
-//! use libra_crypto::{noise, x25519, traits::*};
+//! use diem_crypto::{noise, x25519, traits::*};
 //! use rand::prelude::*;
 //!
-//! # fn main() -> Result<(), libra_crypto::noise::NoiseError> {
+//! # fn main() -> Result<(), diem_crypto::noise::NoiseError> {
 //! let mut rng = rand::thread_rng();
 //! let initiator_static = x25519::PrivateKey::generate(&mut rng);
 //! let responder_static = x25519::PrivateKey::generate(&mut rng);
@@ -56,18 +56,16 @@
 //! ```
 //!
 
-use std::{
-    convert::TryFrom as _,
-    io::{Cursor, Read as _, Write as _},
-};
-
 use crate::{hash::HashValue, hkdf::Hkdf, traits::Uniform as _, x25519};
-
 use aes_gcm::{
     aead::{generic_array::GenericArray, Aead, AeadInPlace, NewAead, Payload},
     Aes256Gcm,
 };
 use sha2::Digest;
+use std::{
+    convert::TryFrom as _,
+    io::{Cursor, Read as _, Write as _},
+};
 use thiserror::Error;
 
 //
@@ -121,7 +119,7 @@ pub const fn handshake_resp_msg_len(payload_len: usize) -> usize {
 
 /// This implementation relies on the fact that the hash function used has a 256-bit output
 #[rustfmt::skip]
-const _: [(); 0 - !{ const ASSERT: bool = HashValue::LENGTH == 32; ASSERT } as usize] = [];
+const _: [(); 32] = [(); HashValue::LENGTH];
 
 //
 // Errors
@@ -166,6 +164,10 @@ pub enum NoiseError {
     /// the response buffer passed as argument is too small
     #[error("noise: the response buffer passed as argument is too small")]
     ResponseBufferTooSmall,
+
+    /// the nonce exceeds the maximum u64 value (in practice this should not happen)
+    #[error("noise: the nonce exceeds the maximum u64 value")]
+    NonceOverflow,
 }
 
 //
@@ -616,6 +618,16 @@ impl NoiseSession {
         }
     }
 
+    /// create a dummy session with 0 keys
+    #[cfg(any(test, feature = "fuzzing"))]
+    pub fn new_for_testing() -> Self {
+        Self::new(
+            vec![0u8; 32],
+            vec![0u8; 32],
+            [0u8; x25519::PUBLIC_KEY_SIZE].into(),
+        )
+    }
+
     /// obtain remote static public key
     pub fn get_remote_static(&self) -> x25519::PublicKey {
         self.remote_public_key
@@ -646,7 +658,10 @@ impl NoiseSession {
             .map_err(|_| NoiseError::Encrypt)?;
 
         // increment nonce
-        self.write_nonce += 1;
+        self.write_nonce = self
+            .write_nonce
+            .checked_add(1)
+            .ok_or(NoiseError::NonceOverflow)?;
 
         // return a subslice without the authentication tag
         Ok(authentication_tag.to_vec())
@@ -687,7 +702,10 @@ impl NoiseSession {
             })?;
 
         // increment nonce
-        self.read_nonce += 1;
+        self.read_nonce = self
+            .read_nonce
+            .checked_add(1)
+            .ok_or(NoiseError::NonceOverflow)?;
 
         // return a subslice of the buffer representing the decrypted plaintext
         Ok(buffer)

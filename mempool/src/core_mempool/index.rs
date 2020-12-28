@@ -1,12 +1,18 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 /// This module provides various indexes used by Mempool
 use crate::core_mempool::transaction::{MempoolTransaction, TimelineState};
-use libra_types::account_address::AccountAddress;
+use crate::{
+    counters,
+    logging::{LogEntry, LogSchema},
+};
+use diem_logger::prelude::*;
+use diem_types::{account_address::AccountAddress, transaction::GovernanceRole};
+use rand::seq::SliceRandom;
 use std::{
     cmp::Ordering,
-    collections::{btree_set::Iter, BTreeMap, BTreeSet},
+    collections::{btree_set::Iter, BTreeMap, BTreeSet, HashMap},
     iter::Rev,
     ops::Bound,
     time::Duration,
@@ -53,7 +59,7 @@ impl PriorityIndex {
             expiration_time: txn.expiration_time,
             address: txn.get_sender(),
             sequence_number: txn.get_sequence_number(),
-            is_governance_txn: txn.is_governance_txn,
+            governance_role: txn.governance_role,
         }
     }
 
@@ -73,7 +79,7 @@ pub struct OrderedQueueKey {
     pub expiration_time: Duration,
     pub address: AccountAddress,
     pub sequence_number: u64,
-    pub is_governance_txn: bool,
+    pub governance_role: GovernanceRole,
 }
 
 impl PartialOrd for OrderedQueueKey {
@@ -84,7 +90,11 @@ impl PartialOrd for OrderedQueueKey {
 
 impl Ord for OrderedQueueKey {
     fn cmp(&self, other: &OrderedQueueKey) -> Ordering {
-        match self.is_governance_txn.cmp(&other.is_governance_txn) {
+        match self
+            .governance_role
+            .priority()
+            .cmp(&other.governance_role.priority())
+        {
             Ordering::Equal => {}
             ordering => return ordering,
         }
@@ -163,6 +173,7 @@ impl TTLIndex {
     }
 }
 
+#[allow(clippy::derive_ord_xor_partial_ord)]
 #[derive(Eq, PartialEq, PartialOrd, Clone, Debug)]
 pub struct TTLOrderingKey {
     pub expiration_time: Duration,
@@ -170,6 +181,9 @@ pub struct TTLOrderingKey {
     pub sequence_number: u64,
 }
 
+/// Be very careful with this, to not break the partial ordering.
+/// See:  https://rust-lang.github.io/rust-clippy/master/index.html#derive_ord_xor_partial_ord
+#[allow(clippy::derive_ord_xor_partial_ord)]
 impl Ord for TTLOrderingKey {
     fn cmp(&self, other: &TTLOrderingKey) -> Ordering {
         match self.expiration_time.cmp(&other.expiration_time) {
@@ -201,28 +215,36 @@ impl TimelineIndex {
         }
     }
 
-    /// get transaction at `timeline_id`
-    pub(crate) fn get_timeline_entry(&mut self, timeline_id: u64) -> Option<(AccountAddress, u64)> {
-        self.timeline.get(&timeline_id).cloned()
-    }
-
     /// read all transactions from timeline since <timeline_id>
     pub(crate) fn read_timeline(
         &mut self,
         timeline_id: u64,
         count: usize,
-    ) -> Vec<(u64, (AccountAddress, u64))> {
+    ) -> Vec<(AccountAddress, u64)> {
         let mut batch = vec![];
-        for (timeline_id, &(address, sequence_number)) in self
+        for (_id, &(address, sequence_number)) in self
             .timeline
             .range((Bound::Excluded(timeline_id), Bound::Unbounded))
         {
-            batch.push((*timeline_id, (address, sequence_number)));
+            batch.push((address, sequence_number));
             if batch.len() == count {
                 break;
             }
         }
         batch
+    }
+
+    /// read transactions from timeline from `start_id` (exclusive) to `end_id` (inclusive)
+    pub(crate) fn timeline_range(
+        &mut self,
+        start_id: u64,
+        end_id: u64,
+    ) -> Vec<(AccountAddress, u64)> {
+        self.timeline
+            .range((Bound::Excluded(start_id), Bound::Included(end_id)))
+            .map(|(_idx, txn)| txn)
+            .cloned()
+            .collect()
     }
 
     /// add transaction to index
@@ -241,6 +263,10 @@ impl TimelineIndex {
             self.timeline.remove(&timeline_id);
         }
     }
+
+    pub(crate) fn size(&self) -> usize {
+        self.timeline.len()
+    }
 }
 
 /// ParkingLotIndex keeps track of "not_ready" transactions
@@ -248,33 +274,94 @@ impl TimelineIndex {
 /// (because their sequence number is too high)
 /// we keep separate index to be able to efficiently evict them when Mempool is full
 pub struct ParkingLotIndex {
-    data: BTreeSet<TxnPointer>,
+    // DS invariants:
+    // 1. for each entry (account, txns) in `data`, `txns` is never empty
+    // 2. for all accounts, data.get(account_indices.get(`account`)) == (account, sequence numbers of account's txns)
+    data: Vec<(AccountAddress, BTreeSet<u64>)>,
+    account_indices: HashMap<AccountAddress, usize>,
+    size: usize,
 }
 
 impl ParkingLotIndex {
     pub(crate) fn new() -> Self {
         Self {
-            data: BTreeSet::new(),
+            data: vec![],
+            account_indices: HashMap::new(),
+            size: 0,
         }
     }
 
     /// add transaction to index
     pub(crate) fn insert(&mut self, txn: &MempoolTransaction) {
-        self.data.insert(TxnPointer::from(txn));
+        let sender = &txn.txn.sender();
+        let sequence_number = txn.txn.sequence_number();
+        let is_new_entry = match self.account_indices.get(sender) {
+            Some(index) => {
+                if let Some((_account, seq_nums)) = self.data.get_mut(*index) {
+                    seq_nums.insert(sequence_number)
+                } else {
+                    counters::CORE_MEMPOOL_INVARIANT_VIOLATION_COUNT.inc();
+                    error!(
+                        LogSchema::new(LogEntry::InvariantViolated),
+                        "Parking lot invariant violated: for account {}, account index exists but missing entry in data",
+                        sender
+                    );
+                    return;
+                }
+            }
+            None => {
+                let seq_nums = [sequence_number].iter().cloned().collect::<BTreeSet<_>>();
+                self.data.push((*sender, seq_nums));
+                self.account_indices.insert(*sender, self.data.len() - 1);
+                true
+            }
+        };
+        if is_new_entry {
+            self.size += 1;
+        }
     }
 
     /// remove transaction from index
     pub(crate) fn remove(&mut self, txn: &MempoolTransaction) {
-        self.data.remove(&TxnPointer::from(txn));
+        let sender = &txn.txn.sender();
+        if let Some(index) = self.account_indices.get(sender).cloned() {
+            if let Some((_account, txns)) = self.data.get_mut(index) {
+                if txns.remove(&txn.txn.sequence_number()) {
+                    self.size -= 1;
+                }
+
+                // maintain DS invariant
+                if txns.is_empty() {
+                    // remove account with no more txns
+                    self.data.swap_remove(index);
+                    self.account_indices.remove(sender);
+
+                    // update DS for account that was swapped in `swap_remove`
+                    if let Some((swapped_account, _)) = self.data.get(index) {
+                        self.account_indices.insert(*swapped_account, index);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn contains(&self, account: &AccountAddress, seq_num: &u64) -> bool {
+        self.account_indices
+            .get(&account)
+            .and_then(|idx| self.data.get(*idx))
+            .map_or(false, |(_account, txns)| txns.contains(seq_num))
     }
 
     /// returns random "non-ready" transaction (with highest sequence number for that account)
-    pub(crate) fn pop(&mut self) -> Option<TxnPointer> {
-        self.data.iter().rev().next().cloned()
+    pub(crate) fn get_poppable(&mut self) -> Option<TxnPointer> {
+        let mut rng = rand::thread_rng();
+        self.data
+            .choose(&mut rng)
+            .and_then(|(sender, txns)| txns.iter().rev().next().map(|seq_num| (*sender, *seq_num)))
     }
 
     pub(crate) fn size(&self) -> usize {
-        self.data.len()
+        self.size
     }
 }
 

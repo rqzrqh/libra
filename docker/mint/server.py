@@ -13,7 +13,7 @@ import flask
 import pexpect
 
 
-MAX_MINT = 10 ** 19  # 10 trillion libras
+MAX_MINT = 10 ** 19  # 10 trillion diems
 
 
 def create_client():
@@ -23,16 +23,18 @@ def create_client():
         ac_host = random.choice(ac_hosts)
         ac_port = os.environ['AC_PORT']
         url = "http://{}:{}".format(ac_host, ac_port)
-        waypoint = open("/opt/libra/etc/waypoint.txt", "r").readline()
+        waypoint = open("/opt/diem/etc/waypoint.txt", "r").readline()
+        chain_id = os.environ['CFG_CHAIN_ID']
 
         print("Connecting to ac on: {}".format(url))
-        cmd = "/opt/libra/bin/cli --url {} -m {} --waypoint {}".format(
+        cmd = "/opt/diem/bin/cli --url {} -m {} --waypoint {} --chain-id {}".format(
             url,
-            "/opt/libra/etc/mint.key",
-            waypoint)
+            "/opt/diem/etc/mint.key",
+            waypoint,
+            chain_id)
 
         application.client = pexpect.spawn(cmd)
-        application.client.delaybeforesend = 0.1
+        application.client.delaybeforesend = 1.0
         application.client.expect("Please, input commands")
 
 
@@ -43,6 +45,7 @@ create_client()
 
 
 @application.route("/", methods=('POST',))
+@application.route("/mint", methods=('POST',))
 def send_transaction():
     auth_key = flask.request.args['auth_key']
 
@@ -62,15 +65,23 @@ def send_transaction():
 
     try:
         create_client()
+        application.client.sendline("q as 000000000000000000000000000000dd")
+        application.client.expect(r"sequence_number: ([0-9]+)", timeout=2)
+        if application.client.match:
+            next_dd_seq = int(application.client.match.groups()[0]) + 1
+        else:
+            raise Exception('DD sequence number not found')
+
         application.client.sendline(
             "a m {} {} {} use_base_units".format(auth_key, amount, currency_code))
-        application.client.expect("Mint request submitted", timeout=2)
-
-        application.client.sendline("a la")
-        application.client.expect(r"sequence_number: ([0-9]+)", timeout=1)
-        application.client.terminate(True)
-    except pexpect.exceptions.ExceptionPexpect:
+        application.client.expect("Request submitted to faucet", timeout=10)
+    except Exception:
         application.client.terminate(True)
         raise
 
-    return application.client.match.groups()[0]
+    return str(next_dd_seq)
+
+
+@application.route("/-/healthy", methods=('GET',))
+def health_check():
+    return "diem-faucet:ok"

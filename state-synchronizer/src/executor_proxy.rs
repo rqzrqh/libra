@@ -1,11 +1,14 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::SynchronizerState;
+use crate::{
+    counters,
+    logging::{LogEntry, LogEvent, LogSchema},
+    state_synchronizer::SynchronizationState,
+};
 use anyhow::{format_err, Result};
-use executor_types::{ChunkExecutor, ExecutedTrees};
-use itertools::Itertools;
-use libra_types::{
+use diem_logger::prelude::*;
+use diem_types::{
     account_state::AccountState,
     contract_event::ContractEvent,
     ledger_info::LedgerInfoWithSignatures,
@@ -13,6 +16,8 @@ use libra_types::{
     on_chain_config::{config_address, OnChainConfigPayload, ON_CHAIN_CONFIG_REGISTRY},
     transaction::TransactionListWithProof,
 };
+use executor_types::{ChunkExecutor, ExecutedTrees};
+use itertools::Itertools;
 use std::{collections::HashSet, convert::TryFrom, sync::Arc};
 use storage_interface::DbReader;
 use subscription_service::ReconfigSubscription;
@@ -20,7 +25,7 @@ use subscription_service::ReconfigSubscription;
 /// Proxies interactions with execution and storage for state synchronization
 pub trait ExecutorProxyTrait: Send {
     /// Sync the local state with the latest in storage.
-    fn get_local_storage_state(&self) -> Result<SynchronizerState>;
+    fn get_local_storage_state(&self) -> Result<SynchronizationState>;
 
     /// Execute and commit a batch of transactions
     fn execute_chunk(
@@ -28,7 +33,6 @@ pub trait ExecutorProxyTrait: Send {
         txn_list_with_proof: TransactionListWithProof,
         verified_target_li: LedgerInfoWithSignatures,
         intermediate_end_of_epoch_li: Option<LedgerInfoWithSignatures>,
-        synced_trees: &mut ExecutedTrees,
     ) -> Result<()>;
 
     /// Gets chunk of transactions given the known version, target version and the max limit.
@@ -45,10 +49,13 @@ pub trait ExecutorProxyTrait: Send {
     /// Get ledger info at an epoch boundary version.
     fn get_epoch_ending_ledger_info(&self, version: u64) -> Result<LedgerInfoWithSignatures>;
 
+    /// Returns the ledger's timestamp for the given version in microseconds
+    fn get_version_timestamp(&self, version: u64) -> Result<u64>;
+
     /// Load all on-chain configs from storage
     /// Note: this method is being exposed as executor proxy trait temporarily because storage read is currently
     /// using the tonic storage read client, which needs the tokio runtime to block on with no runtime/async issues
-    /// Once we make storage reads sync (by replacing the storage read client with direct LibraDB),
+    /// Once we make storage reads sync (by replacing the storage read client with direct DiemDB),
     /// we can make this entirely internal to `ExecutorProxy`'s initialization procedure
     fn load_on_chain_configs(&mut self) -> Result<()>;
 
@@ -93,7 +100,11 @@ impl ExecutorProxy {
             .collect();
         let configs = storage.batch_fetch_resources(access_paths)?;
         let epoch = storage
-            .get_latest_account_state(config_address())?
+            .get_account_state_with_proof_by_version(
+                config_address(),
+                storage.fetch_synced_version()?,
+            )?
+            .0
             .map(|blob| {
                 AccountState::try_from(&blob).and_then(|state| {
                     Ok(state
@@ -118,11 +129,11 @@ impl ExecutorProxy {
 }
 
 impl ExecutorProxyTrait for ExecutorProxy {
-    fn get_local_storage_state(&self) -> Result<SynchronizerState> {
+    fn get_local_storage_state(&self) -> Result<SynchronizationState> {
         let storage_info = self
             .storage
             .get_startup_info()?
-            .ok_or_else(|| format_err!("[state sync] Failed to access storage info"))?;
+            .ok_or_else(|| format_err!("[state sync] Missing storage info"))?;
 
         let current_epoch_state = storage_info.get_epoch_state().clone();
 
@@ -132,7 +143,7 @@ impl ExecutorProxyTrait for ExecutorProxy {
             ExecutedTrees::from(storage_info.committed_tree_state)
         };
 
-        Ok(SynchronizerState::new(
+        Ok(SynchronizationState::new(
             storage_info.latest_ledger_info,
             synced_trees,
             current_epoch_state,
@@ -144,14 +155,25 @@ impl ExecutorProxyTrait for ExecutorProxy {
         txn_list_with_proof: TransactionListWithProof,
         verified_target_li: LedgerInfoWithSignatures,
         intermediate_end_of_epoch_li: Option<LedgerInfoWithSignatures>,
-        _synced_trees: &mut ExecutedTrees,
     ) -> Result<()> {
+        // track chunk execution time
+        let timer = counters::EXECUTE_CHUNK_DURATION.start_timer();
         let reconfig_events = self.executor.execute_and_commit_chunk(
             txn_list_with_proof,
             verified_target_li,
             intermediate_end_of_epoch_li,
         )?;
-        self.publish_on_chain_config_updates(reconfig_events)
+        timer.stop_and_record();
+        if let Err(e) = self.publish_on_chain_config_updates(reconfig_events) {
+            error!(
+                LogSchema::event_log(LogEntry::Reconfig, LogEvent::Fail).error(&e),
+                "Failed to publish reconfig updates in execute_chunk"
+            );
+            counters::RECONFIG_PUBLISH_COUNT
+                .with_label_values(&[counters::FAIL_LABEL])
+                .inc();
+        }
+        Ok(())
     }
 
     fn get_chunk(
@@ -176,6 +198,10 @@ impl ExecutorProxyTrait for ExecutorProxy {
         self.storage.get_epoch_ending_ledger_info(version)
     }
 
+    fn get_version_timestamp(&self, version: u64) -> Result<u64> {
+        self.storage.get_block_timestamp(version)
+    }
+
     fn load_on_chain_configs(&mut self) -> Result<()> {
         self.on_chain_configs = Self::fetch_all_configs(&*self.storage)?;
         Ok(())
@@ -185,6 +211,10 @@ impl ExecutorProxyTrait for ExecutorProxy {
         if events.is_empty() {
             return Ok(());
         }
+        info!(LogSchema::new(LogEntry::Reconfig)
+            .count(events.len())
+            .reconfig_events(events.clone()));
+
         let event_keys = events
             .iter()
             .map(|event| *event.key())
@@ -207,6 +237,7 @@ impl ExecutorProxyTrait for ExecutorProxy {
             .collect::<HashSet<_>>();
 
         // notify subscribers
+        let mut publish_success = true;
         for subscription in self.reconfig_subscriptions.iter_mut() {
             // publish updates if *any* of the subscribed configs changed
             // or any of the subscribed events were emitted
@@ -214,11 +245,34 @@ impl ExecutorProxyTrait for ExecutorProxy {
             if !changed_configs.is_disjoint(&subscribed_items.configs)
                 || !event_keys.is_disjoint(&subscribed_items.events)
             {
-                subscription.publish(new_configs.clone())?;
+                if let Err(e) = subscription.publish(new_configs.clone()) {
+                    publish_success = false;
+                    error!(
+                        LogSchema::event_log(LogEntry::Reconfig, LogEvent::PublishError)
+                            .subscription_name(subscription.name.clone())
+                            .error(&e),
+                        "Failed to publish reconfig notification to subscription {}",
+                        subscription.name
+                    );
+                } else {
+                    debug!(
+                        LogSchema::event_log(LogEntry::Reconfig, LogEvent::Success)
+                            .subscription_name(subscription.name.clone()),
+                        "Successfully published reconfig notification to subscription {}",
+                        subscription.name
+                    );
+                }
             }
         }
 
         self.on_chain_configs = new_configs;
-        Ok(())
+        if publish_success {
+            counters::RECONFIG_PUBLISH_COUNT
+                .with_label_values(&[counters::SUCCESS_LABEL])
+                .inc();
+            Ok(())
+        } else {
+            Err(format_err!("failed to publish at least one subscription"))
+        }
     }
 }

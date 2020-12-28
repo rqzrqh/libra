@@ -1,40 +1,40 @@
-FROM debian:buster AS toolchain
+FROM debian:buster-20201209@sha256:5b5fa7e155b1f19dffb996ea64e55520b80d5bd7a8fdb5aed1acabd217e9ed59 AS toolchain
 
 # To use http/https proxy while building, use:
 # docker build --build-arg https_proxy=http://fwdproxy:8080 --build-arg http_proxy=http://fwdproxy:8080
 
-RUN apt-get update && apt-get install -y cmake curl clang git
+RUN apt-get update && apt-get install -y cmake curl clang git pkg-config libssl-dev
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
 ENV PATH "$PATH:/root/.cargo/bin"
 
-WORKDIR /libra
-COPY rust-toolchain /libra/rust-toolchain
+WORKDIR /diem
+COPY rust-toolchain /diem/rust-toolchain
 RUN rustup install $(cat rust-toolchain)
+
+COPY cargo-toolchain /diem/cargo-toolchain
+RUN rustup install $(cat cargo-toolchain)
 
 FROM toolchain AS builder
 
-COPY . /libra
+ARG ENABLE_FAILPOINTS
+COPY . /diem
 
-ENV RUSTFLAGS "-Ctarget-cpu=skylake -Ctarget-feature=+aes,+sse2,+sse4.1,+ssse3"
-RUN cargo build --release -p libra-node -p cli -p config-builder -p libra-key-manager -p safety-rules -p db-bootstrapper -p backup-cli && cd target/release && rm -r build deps incremental
-RUN strip /libra/target/release/config-builder
-RUN strip /libra/target/release/db-backup
-RUN strip /libra/target/release/db-bootstrapper
-RUN strip /libra/target/release/db-restore
+RUN ./docker/build-common.sh
 
 ### Production Image ###
-FROM debian:buster AS prod
+FROM debian:buster-20201209@sha256:5b5fa7e155b1f19dffb996ea64e55520b80d5bd7a8fdb5aed1acabd217e9ed59 AS prod
 
-RUN addgroup --system --gid 6180 libra && adduser --system --ingroup libra --no-create-home --uid 6180 libra
+RUN apt-get update && apt-get install -y libssl1.1 && apt-get clean && rm -r /var/lib/apt/lists/*
 
-RUN mkdir -p /opt/libra/bin /opt/libra/etc
+RUN addgroup --system --gid 6180 diem && adduser --system --ingroup diem --no-create-home --uid 6180 diem
+
+RUN mkdir -p /opt/diem/bin /opt/diem/etc
 COPY docker/install-tools.sh /root
-COPY --from=builder /libra/target/release/libra-node /opt/libra/bin
-COPY --from=builder /libra/target/release/config-builder /opt/libra/bin
-COPY --from=builder /libra/target/release/db-backup /opt/libra/bin
-COPY --from=builder /libra/target/release/db-bootstrapper /opt/libra/bin
-COPY --from=builder /libra/target/release/db-restore /opt/libra/bin
+COPY --from=builder /diem/target/release/diem-node /opt/diem/bin
+COPY --from=builder /diem/target/release/db-backup /opt/diem/bin
+COPY --from=builder /diem/target/release/db-bootstrapper /opt/diem/bin
+COPY --from=builder /diem/target/release/db-restore /opt/diem/bin
 
 # Admission control
 EXPOSE 8000
@@ -42,13 +42,11 @@ EXPOSE 8000
 EXPOSE 6180
 # Metrics
 EXPOSE 9101
+# Backup
+EXPOSE 6186
 
 # Capture backtrace on error
 ENV RUST_BACKTRACE 1
-
-# Define SEED_PEERS, NODE_CONFIG, NETWORK_KEYPAIRS, CONSENSUS_KEYPAIR, GENESIS_BLOB and PEER_ID environment variables when running
-COPY docker/validator/docker-run.sh /
-CMD /docker-run.sh
 
 ARG BUILD_DATE
 ARG GIT_REV

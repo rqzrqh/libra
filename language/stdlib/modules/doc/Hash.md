@@ -3,10 +3,17 @@
 
 # Module `0x1::Hash`
 
-### Table of Contents
+Module which defines SHA hashes for byte vectors.
+
+The functions in this module are natively declared both in the Move runtime
+as in the Move prover's prelude.
+
 
 -  [Function `sha2_256`](#0x1_Hash_sha2_256)
 -  [Function `sha3_256`](#0x1_Hash_sha3_256)
+
+
+<pre><code></code></pre>
 
 
 
@@ -16,7 +23,7 @@
 
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Hash_sha2_256">sha2_256</a>(data: vector&lt;u8&gt;): vector&lt;u8&gt;
+<pre><code><b>public</b> <b>fun</b> <a href="Hash.md#0x1_Hash_sha2_256">sha2_256</a>(data: vector&lt;u8&gt;): vector&lt;u8&gt;
 </code></pre>
 
 
@@ -25,7 +32,7 @@
 <summary>Implementation</summary>
 
 
-<pre><code><b>native</b> <b>public</b> <b>fun</b> <a href="#0x1_Hash_sha2_256">sha2_256</a>(data: vector&lt;u8&gt;): vector&lt;u8&gt;;
+<pre><code><b>native</b> <b>public</b> <b>fun</b> <a href="Hash.md#0x1_Hash_sha2_256">sha2_256</a>(data: vector&lt;u8&gt;): vector&lt;u8&gt;;
 </code></pre>
 
 
@@ -38,7 +45,7 @@
 
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Hash_sha3_256">sha3_256</a>(data: vector&lt;u8&gt;): vector&lt;u8&gt;
+<pre><code><b>public</b> <b>fun</b> <a href="Hash.md#0x1_Hash_sha3_256">sha3_256</a>(data: vector&lt;u8&gt;): vector&lt;u8&gt;
 </code></pre>
 
 
@@ -47,9 +54,15 @@
 <summary>Implementation</summary>
 
 
-<pre><code><b>native</b> <b>public</b> <b>fun</b> <a href="#0x1_Hash_sha3_256">sha3_256</a>(data: vector&lt;u8&gt;): vector&lt;u8&gt;;
+<pre><code><b>native</b> <b>public</b> <b>fun</b> <a href="Hash.md#0x1_Hash_sha3_256">sha3_256</a>(data: vector&lt;u8&gt;): vector&lt;u8&gt;;
 </code></pre>
 
 
 
 </details>
+
+
+[//]: # ("File containing references which can be used from documentation")
+[ACCESS_CONTROL]: https://github.com/diem/dip/blob/master/dips/dip-2.md
+[ROLE]: https://github.com/diem/dip/blob/master/dips/dip-2.md#roles
+[PERMISSION]: https://github.com/diem/dip/blob/master/dips/dip-2.md#permissions

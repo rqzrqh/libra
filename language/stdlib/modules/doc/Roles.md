@@ -3,99 +3,67 @@
 
 # Module `0x1::Roles`
 
-### Table of Contents
+This module defines role-based access control for the Diem framework.
 
--  [Struct `RoleId`](#0x1_Roles_RoleId)
--  [Struct `Capability`](#0x1_Roles_Capability)
--  [Struct `Privilege`](#0x1_Roles_Privilege)
--  [Struct `AssociationRootRole`](#0x1_Roles_AssociationRootRole)
--  [Struct `TreasuryComplianceRole`](#0x1_Roles_TreasuryComplianceRole)
--  [Struct `DesignatedDealerRole`](#0x1_Roles_DesignatedDealerRole)
--  [Struct `ValidatorRole`](#0x1_Roles_ValidatorRole)
--  [Struct `ValidatorOperatorRole`](#0x1_Roles_ValidatorOperatorRole)
--  [Struct `ParentVASPRole`](#0x1_Roles_ParentVASPRole)
--  [Struct `ChildVASPRole`](#0x1_Roles_ChildVASPRole)
--  [Struct `UnhostedRole`](#0x1_Roles_UnhostedRole)
--  [Function `ASSOCIATION_ROOT_ROLE_ID`](#0x1_Roles_ASSOCIATION_ROOT_ROLE_ID)
--  [Function `TREASURY_COMPLIANCE_ROLE_ID`](#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID)
--  [Function `DESIGNATED_DEALER_ROLE_ID`](#0x1_Roles_DESIGNATED_DEALER_ROLE_ID)
--  [Function `VALIDATOR_ROLE_ID`](#0x1_Roles_VALIDATOR_ROLE_ID)
--  [Function `VALIDATOR_OPERATOR_ROLE_ID`](#0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID)
--  [Function `PARENT_VASP_ROLE_ID`](#0x1_Roles_PARENT_VASP_ROLE_ID)
--  [Function `CHILD_VASP_ROLE_ID`](#0x1_Roles_CHILD_VASP_ROLE_ID)
--  [Function `UNHOSTED_ROLE_ID`](#0x1_Roles_UNHOSTED_ROLE_ID)
--  [Function `add_privilege_to_account`](#0x1_Roles_add_privilege_to_account)
--  [Function `add_privilege_to_account_association_root_role`](#0x1_Roles_add_privilege_to_account_association_root_role)
--  [Function `add_privilege_to_account_treasury_compliance_role`](#0x1_Roles_add_privilege_to_account_treasury_compliance_role)
--  [Function `add_privilege_to_account_designated_dealer_role`](#0x1_Roles_add_privilege_to_account_designated_dealer_role)
--  [Function `add_privilege_to_account_validator_role`](#0x1_Roles_add_privilege_to_account_validator_role)
--  [Function `add_privilege_to_account_validator_operator_role`](#0x1_Roles_add_privilege_to_account_validator_operator_role)
--  [Function `add_privilege_to_account_parent_vasp_role`](#0x1_Roles_add_privilege_to_account_parent_vasp_role)
--  [Function `add_privilege_to_account_child_vasp_role`](#0x1_Roles_add_privilege_to_account_child_vasp_role)
--  [Function `add_privilege_to_account_unhosted_role`](#0x1_Roles_add_privilege_to_account_unhosted_role)
--  [Function `grant_root_association_role`](#0x1_Roles_grant_root_association_role)
+Roles are associated with accounts and govern what operations are permitted by those accounts. A role
+is typically asserted on function entry using a statement like <code><a href="Roles.md#0x1_Roles_assert_diem_root">Self::assert_diem_root</a>(account)</code>. This
+module provides multiple assertion functions like this one, as well as the functions to setup roles.
+
+For a conceptual discussion of roles, see the [DIP-2 document][ACCESS_CONTROL].
+
+
+-  [Resource `RoleId`](#0x1_Roles_RoleId)
+-  [Constants](#@Constants_0)
+-  [Function `grant_diem_root_role`](#0x1_Roles_grant_diem_root_role)
 -  [Function `grant_treasury_compliance_role`](#0x1_Roles_grant_treasury_compliance_role)
 -  [Function `new_designated_dealer_role`](#0x1_Roles_new_designated_dealer_role)
 -  [Function `new_validator_role`](#0x1_Roles_new_validator_role)
 -  [Function `new_validator_operator_role`](#0x1_Roles_new_validator_operator_role)
 -  [Function `new_parent_vasp_role`](#0x1_Roles_new_parent_vasp_role)
 -  [Function `new_child_vasp_role`](#0x1_Roles_new_child_vasp_role)
--  [Function `new_unhosted_role`](#0x1_Roles_new_unhosted_role)
--  [Function `extract_privilege_to_capability`](#0x1_Roles_extract_privilege_to_capability)
--  [Function `restore_capability_to_privilege`](#0x1_Roles_restore_capability_to_privilege)
+-  [Function `grant_role`](#0x1_Roles_grant_role)
+-  [Function `has_role`](#0x1_Roles_has_role)
+-  [Function `has_diem_root_role`](#0x1_Roles_has_diem_root_role)
+-  [Function `has_treasury_compliance_role`](#0x1_Roles_has_treasury_compliance_role)
+-  [Function `has_designated_dealer_role`](#0x1_Roles_has_designated_dealer_role)
+-  [Function `has_validator_role`](#0x1_Roles_has_validator_role)
+-  [Function `has_validator_operator_role`](#0x1_Roles_has_validator_operator_role)
+-  [Function `has_parent_VASP_role`](#0x1_Roles_has_parent_VASP_role)
+-  [Function `has_child_VASP_role`](#0x1_Roles_has_child_VASP_role)
+-  [Function `get_role_id`](#0x1_Roles_get_role_id)
+-  [Function `can_hold_balance`](#0x1_Roles_can_hold_balance)
+-  [Function `assert_diem_root`](#0x1_Roles_assert_diem_root)
+-  [Function `assert_treasury_compliance`](#0x1_Roles_assert_treasury_compliance)
+-  [Function `assert_parent_vasp_role`](#0x1_Roles_assert_parent_vasp_role)
+-  [Function `assert_child_vasp_role`](#0x1_Roles_assert_child_vasp_role)
+-  [Function `assert_designated_dealer`](#0x1_Roles_assert_designated_dealer)
+-  [Function `assert_validator`](#0x1_Roles_assert_validator)
+-  [Function `assert_validator_operator`](#0x1_Roles_assert_validator_operator)
+-  [Function `assert_parent_vasp_or_designated_dealer`](#0x1_Roles_assert_parent_vasp_or_designated_dealer)
+-  [Function `assert_parent_vasp_or_child_vasp`](#0x1_Roles_assert_parent_vasp_or_child_vasp)
+-  [Module Specification](#@Module_Specification_1)
+    -  [Persistence of Roles](#@Persistence_of_Roles_2)
+    -  [Access Control](#@Access_Control_3)
+    -  [Helper Functions and Schemas](#@Helper_Functions_and_Schemas_4)
 
-This module describes two things:
-1. The relationship between roles, e.g. Role_A can creates accounts of Role_B
-2. The granting of privileges to an account with a specific role
-It is important to note here that this module _does not_ describe the
-privileges that a specific role can have. This is a property of each of
-the modules that declares a privilege.
 
-It also defines functions for extracting capabilities from an
-account, and ensuring that they can only be "restored" back to the
-account that they were extracted from.
+<pre><code><b>use</b> <a href="CoreAddresses.md#0x1_CoreAddresses">0x1::CoreAddresses</a>;
+<b>use</b> <a href="DiemTimestamp.md#0x1_DiemTimestamp">0x1::DiemTimestamp</a>;
+<b>use</b> <a href="Errors.md#0x1_Errors">0x1::Errors</a>;
+<b>use</b> <a href="Signer.md#0x1_Signer">0x1::Signer</a>;
+</code></pre>
 
-Roles are defined to be completely opaque outside of this module --
-all operations should be guarded by privilege checks, and not by role
-checks. Each role comes with a default privilege.
-
-Terminology:
-There are three main types of resources that we deal with in this
-module. These are:
-1. *Privilege Witnesses*
-<code>P</code>: are resources that are declared in other
-modules (with the exception of the default role-based privileges
-defined in this module). The declaring module is responsible for
-guarding the creation of resources of this type.
-2. *Privileges*
-<code><a href="#0x1_Roles_Privilege">Privilege</a>&lt;P&gt;</code>: where
-<code>P</code> is a privilege witness is a
-resource published under an account signifying that it can perform
-operations that require
-<code>P</code> permissions.
-3. *Capabilities*
-<code><a href="#0x1_Roles_Capability">Capability</a>&lt;P&gt;</code>: where
-<code>P</code> is a privilege witness is
-an object that represents the authority to perform actions requiring
-<code>P</code> permission. These can only be extracted from accounts that hold
-a
-<code><a href="#0x1_Roles_Privilege">Privilege</a>&lt;P&gt;</code> resource.
 
 
 <a name="0x1_Roles_RoleId"></a>
 
-## Struct `RoleId`
+## Resource `RoleId`
 
 The roleId contains the role id for the account. This is only moved
 to an account as a top-level resource, and is otherwise immovable.
-INVARIANT: Once an account at address
-<code>A</code> is granted a role
-<code>R</code> it
-will remain an account with role
-<code>R</code> for all time.
 
 
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Roles_RoleId">RoleId</a>
+<pre><code><b>resource</b> <b>struct</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a>
 </code></pre>
 
 
@@ -106,7 +74,6 @@ will remain an account with role
 
 <dl>
 <dt>
-
 <code>role_id: u64</code>
 </dt>
 <dd>
@@ -117,443 +84,182 @@ will remain an account with role
 
 </details>
 
-<a name="0x1_Roles_Capability"></a>
+<a name="@Constants_0"></a>
 
-## Struct `Capability`
-
-Privileges are extracted in to capabilities. Capabilities hold /
-the account address that they were extracted from (i.e. tagged or
-"tainted"). Capabilities can then only be restored to the account
-where they were extracted from.
+## Constants
 
 
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Roles_Capability">Capability</a>&lt;<a href="#0x1_Roles_Privilege">Privilege</a>: <b>resource</b>&gt;
+<a name="0x1_Roles_EDIEM_ROOT"></a>
+
+The signer didn't have the required Diem Root role
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_EDIEM_ROOT">EDIEM_ROOT</a>: u64 = 1;
 </code></pre>
 
 
 
-<details>
-<summary>Fields</summary>
+<a name="0x1_Roles_ETREASURY_COMPLIANCE"></a>
+
+The signer didn't have the required Treasury & Compliance role
 
 
-<dl>
-<dt>
-
-<code>owner_address: address</code>
-</dt>
-<dd>
-
-</dd>
-</dl>
-
-
-</details>
-
-<a name="0x1_Roles_Privilege"></a>
-
-## Struct `Privilege`
-
-The internal representation of of a privilege. We wrap every
-privilege witness resource here to avoid having to write extractors/restorers
-for each privilege, but can instead write this generically.
-
-
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Roles_Privilege">Privilege</a>&lt;Priv: <b>resource</b>&gt;
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_ETREASURY_COMPLIANCE">ETREASURY_COMPLIANCE</a>: u64 = 2;
 </code></pre>
 
 
-
-<details>
-<summary>Fields</summary>
-
-
-<dl>
-<dt>
-
-<code>witness: Priv</code>
-</dt>
-<dd>
-
-</dd>
-<dt>
-
-<code>is_extracted: bool</code>
-</dt>
-<dd>
-
-</dd>
-</dl>
-
-
-</details>
-
-<a name="0x1_Roles_AssociationRootRole"></a>
-
-## Struct `AssociationRootRole`
-
-Every role is granted a "default privilege" for that role. This can
-be seen as a base-permission for every account of that role type.
-INVARIANT: Every account has exactly one of these, and these
-correspond precisely to the RoleId.
-
-
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Roles_AssociationRootRole">AssociationRootRole</a>
-</code></pre>
-
-
-
-<details>
-<summary>Fields</summary>
-
-
-<dl>
-<dt>
-
-<code>dummy_field: bool</code>
-</dt>
-<dd>
-
-</dd>
-</dl>
-
-
-</details>
-
-<a name="0x1_Roles_TreasuryComplianceRole"></a>
-
-## Struct `TreasuryComplianceRole`
-
-
-
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Roles_TreasuryComplianceRole">TreasuryComplianceRole</a>
-</code></pre>
-
-
-
-<details>
-<summary>Fields</summary>
-
-
-<dl>
-<dt>
-
-<code>dummy_field: bool</code>
-</dt>
-<dd>
-
-</dd>
-</dl>
-
-
-</details>
-
-<a name="0x1_Roles_DesignatedDealerRole"></a>
-
-## Struct `DesignatedDealerRole`
-
-
-
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Roles_DesignatedDealerRole">DesignatedDealerRole</a>
-</code></pre>
-
-
-
-<details>
-<summary>Fields</summary>
-
-
-<dl>
-<dt>
-
-<code>dummy_field: bool</code>
-</dt>
-<dd>
-
-</dd>
-</dl>
-
-
-</details>
-
-<a name="0x1_Roles_ValidatorRole"></a>
-
-## Struct `ValidatorRole`
-
-
-
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Roles_ValidatorRole">ValidatorRole</a>
-</code></pre>
-
-
-
-<details>
-<summary>Fields</summary>
-
-
-<dl>
-<dt>
-
-<code>dummy_field: bool</code>
-</dt>
-<dd>
-
-</dd>
-</dl>
-
-
-</details>
-
-<a name="0x1_Roles_ValidatorOperatorRole"></a>
-
-## Struct `ValidatorOperatorRole`
-
-
-
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Roles_ValidatorOperatorRole">ValidatorOperatorRole</a>
-</code></pre>
-
-
-
-<details>
-<summary>Fields</summary>
-
-
-<dl>
-<dt>
-
-<code>dummy_field: bool</code>
-</dt>
-<dd>
-
-</dd>
-</dl>
-
-
-</details>
-
-<a name="0x1_Roles_ParentVASPRole"></a>
-
-## Struct `ParentVASPRole`
-
-
-
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Roles_ParentVASPRole">ParentVASPRole</a>
-</code></pre>
-
-
-
-<details>
-<summary>Fields</summary>
-
-
-<dl>
-<dt>
-
-<code>dummy_field: bool</code>
-</dt>
-<dd>
-
-</dd>
-</dl>
-
-
-</details>
-
-<a name="0x1_Roles_ChildVASPRole"></a>
-
-## Struct `ChildVASPRole`
-
-
-
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Roles_ChildVASPRole">ChildVASPRole</a>
-</code></pre>
-
-
-
-<details>
-<summary>Fields</summary>
-
-
-<dl>
-<dt>
-
-<code>dummy_field: bool</code>
-</dt>
-<dd>
-
-</dd>
-</dl>
-
-
-</details>
-
-<a name="0x1_Roles_UnhostedRole"></a>
-
-## Struct `UnhostedRole`
-
-
-
-<pre><code><b>resource</b> <b>struct</b> <a href="#0x1_Roles_UnhostedRole">UnhostedRole</a>
-</code></pre>
-
-
-
-<details>
-<summary>Fields</summary>
-
-
-<dl>
-<dt>
-
-<code>dummy_field: bool</code>
-</dt>
-<dd>
-
-</dd>
-</dl>
-
-
-</details>
-
-<a name="0x1_Roles_ASSOCIATION_ROOT_ROLE_ID"></a>
-
-## Function `ASSOCIATION_ROOT_ROLE_ID`
-
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_ASSOCIATION_ROOT_ROLE_ID">ASSOCIATION_ROOT_ROLE_ID</a>(): u64
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_ASSOCIATION_ROOT_ROLE_ID">ASSOCIATION_ROOT_ROLE_ID</a>(): u64 { 0 }
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID"></a>
-
-## Function `TREASURY_COMPLIANCE_ROLE_ID`
-
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a>(): u64
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a>(): u64 { 1 }
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_DESIGNATED_DEALER_ROLE_ID"></a>
-
-## Function `DESIGNATED_DEALER_ROLE_ID`
-
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a>(): u64
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a>(): u64 { 2 }
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_VALIDATOR_ROLE_ID"></a>
-
-## Function `VALIDATOR_ROLE_ID`
-
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_VALIDATOR_ROLE_ID">VALIDATOR_ROLE_ID</a>(): u64
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_VALIDATOR_ROLE_ID">VALIDATOR_ROLE_ID</a>(): u64 { 3 }
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID"></a>
-
-## Function `VALIDATOR_OPERATOR_ROLE_ID`
-
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID">VALIDATOR_OPERATOR_ROLE_ID</a>(): u64
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID">VALIDATOR_OPERATOR_ROLE_ID</a>(): u64 { 4 }
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_PARENT_VASP_ROLE_ID"></a>
-
-## Function `PARENT_VASP_ROLE_ID`
-
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a>(): u64
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a>(): u64 { 5 }
-</code></pre>
-
-
-
-</details>
 
 <a name="0x1_Roles_CHILD_VASP_ROLE_ID"></a>
 
-## Function `CHILD_VASP_ROLE_ID`
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a>: u64 = 6;
+</code></pre>
 
 
 
-<pre><code><b>fun</b> <a href="#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a>(): u64
+<a name="0x1_Roles_DESIGNATED_DEALER_ROLE_ID"></a>
+
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a>: u64 = 2;
+</code></pre>
+
+
+
+<a name="0x1_Roles_DIEM_ROOT_ROLE_ID"></a>
+
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_DIEM_ROOT_ROLE_ID">DIEM_ROOT_ROLE_ID</a>: u64 = 0;
+</code></pre>
+
+
+
+<a name="0x1_Roles_ECHILD_VASP"></a>
+
+The signer didn't have the required Child VASP role
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_ECHILD_VASP">ECHILD_VASP</a>: u64 = 9;
+</code></pre>
+
+
+
+<a name="0x1_Roles_EDESIGNATED_DEALER"></a>
+
+The signer didn't have the required Designated Dealer role
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_EDESIGNATED_DEALER">EDESIGNATED_DEALER</a>: u64 = 6;
+</code></pre>
+
+
+
+<a name="0x1_Roles_EPARENT_VASP"></a>
+
+The signer didn't have the required Parent VASP role
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_EPARENT_VASP">EPARENT_VASP</a>: u64 = 3;
+</code></pre>
+
+
+
+<a name="0x1_Roles_EPARENT_VASP_OR_CHILD_VASP"></a>
+
+The signer didn't have the required ParentVASP or ChildVASP role
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_EPARENT_VASP_OR_CHILD_VASP">EPARENT_VASP_OR_CHILD_VASP</a>: u64 = 4;
+</code></pre>
+
+
+
+<a name="0x1_Roles_EPARENT_VASP_OR_DESIGNATED_DEALER"></a>
+
+The signer didn't have the required Parent VASP or Designated Dealer role
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_EPARENT_VASP_OR_DESIGNATED_DEALER">EPARENT_VASP_OR_DESIGNATED_DEALER</a>: u64 = 5;
+</code></pre>
+
+
+
+<a name="0x1_Roles_EROLE_ID"></a>
+
+A <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> resource was in an unexpected state
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_EROLE_ID">EROLE_ID</a>: u64 = 0;
+</code></pre>
+
+
+
+<a name="0x1_Roles_EVALIDATOR"></a>
+
+The signer didn't have the required Validator role
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_EVALIDATOR">EVALIDATOR</a>: u64 = 7;
+</code></pre>
+
+
+
+<a name="0x1_Roles_EVALIDATOR_OPERATOR"></a>
+
+The signer didn't have the required Validator Operator role
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_EVALIDATOR_OPERATOR">EVALIDATOR_OPERATOR</a>: u64 = 8;
+</code></pre>
+
+
+
+<a name="0x1_Roles_PARENT_VASP_ROLE_ID"></a>
+
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a>: u64 = 5;
+</code></pre>
+
+
+
+<a name="0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID"></a>
+
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a>: u64 = 1;
+</code></pre>
+
+
+
+<a name="0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID"></a>
+
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID">VALIDATOR_OPERATOR_ROLE_ID</a>: u64 = 4;
+</code></pre>
+
+
+
+<a name="0x1_Roles_VALIDATOR_ROLE_ID"></a>
+
+
+
+<pre><code><b>const</b> <a href="Roles.md#0x1_Roles_VALIDATOR_ROLE_ID">VALIDATOR_ROLE_ID</a>: u64 = 3;
+</code></pre>
+
+
+
+<a name="0x1_Roles_grant_diem_root_role"></a>
+
+## Function `grant_diem_root_role`
+
+Publishes diem root role. Granted only in genesis.
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_grant_diem_root_role">grant_diem_root_role</a>(dr_account: &signer)
 </code></pre>
 
 
@@ -562,307 +268,30 @@ correspond precisely to the RoleId.
 <summary>Implementation</summary>
 
 
-<pre><code><b>fun</b> <a href="#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a>(): u64 { 6 }
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_UNHOSTED_ROLE_ID"></a>
-
-## Function `UNHOSTED_ROLE_ID`
-
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_UNHOSTED_ROLE_ID">UNHOSTED_ROLE_ID</a>(): u64
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_UNHOSTED_ROLE_ID">UNHOSTED_ROLE_ID</a>(): u64 { 7 }
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_add_privilege_to_account"></a>
-
-## Function `add_privilege_to_account`
-
-The privilege
-<code>witness: Priv</code> is granted to
-<code>account</code> as long as
-<code>account</code> has a
-<code>role</code> with
-<code>role.role_id == role_id</code>.
-INVARIANT: Once a privilege witness
-<code>Priv</code> has been granted to an
-account it remains at that account.
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_add_privilege_to_account">add_privilege_to_account</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv, role_id: u64)
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>fun</b> <a href="#0x1_Roles_add_privilege_to_account">add_privilege_to_account</a>&lt;Priv: <b>resource</b>&gt;(
-    account: &signer,
-    witness: Priv,
-    role_id: u64,
-) <b>acquires</b> <a href="#0x1_Roles_RoleId">RoleId</a> {
-    <b>let</b> account_role = borrow_global&lt;<a href="#0x1_Roles_RoleId">RoleId</a>&gt;(<a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account));
-    <b>assert</b>(account_role.role_id == role_id, 0);
-    move_to(account, <a href="#0x1_Roles_Privilege">Privilege</a>&lt;Priv&gt;{ witness, is_extracted: <b>false</b> })
-}
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_add_privilege_to_account_association_root_role"></a>
-
-## Function `add_privilege_to_account_association_root_role`
-
-Public wrappers to the
-<code>add_privilege_to_account</code> function that sets the
-correct role_id for the role. This way the role that a privilege is
-being assigned to outside of the module is statically determinable.
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_association_root_role">add_privilege_to_account_association_root_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_association_root_role">add_privilege_to_account_association_root_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-<b>acquires</b> <a href="#0x1_Roles_RoleId">RoleId</a> {
-    <a href="#0x1_Roles_add_privilege_to_account">add_privilege_to_account</a>(account, witness, <a href="#0x1_Roles_ASSOCIATION_ROOT_ROLE_ID">ASSOCIATION_ROOT_ROLE_ID</a>());
-}
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_add_privilege_to_account_treasury_compliance_role"></a>
-
-## Function `add_privilege_to_account_treasury_compliance_role`
-
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_treasury_compliance_role">add_privilege_to_account_treasury_compliance_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_treasury_compliance_role">add_privilege_to_account_treasury_compliance_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-<b>acquires</b> <a href="#0x1_Roles_RoleId">RoleId</a> {
-    <a href="#0x1_Roles_add_privilege_to_account">add_privilege_to_account</a>(account, witness, <a href="#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a>());
-}
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_add_privilege_to_account_designated_dealer_role"></a>
-
-## Function `add_privilege_to_account_designated_dealer_role`
-
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_designated_dealer_role">add_privilege_to_account_designated_dealer_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_designated_dealer_role">add_privilege_to_account_designated_dealer_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-<b>acquires</b> <a href="#0x1_Roles_RoleId">RoleId</a> {
-    <a href="#0x1_Roles_add_privilege_to_account">add_privilege_to_account</a>(account, witness, <a href="#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a>());
-}
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_add_privilege_to_account_validator_role"></a>
-
-## Function `add_privilege_to_account_validator_role`
-
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_validator_role">add_privilege_to_account_validator_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_validator_role">add_privilege_to_account_validator_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-<b>acquires</b> <a href="#0x1_Roles_RoleId">RoleId</a> {
-    <a href="#0x1_Roles_add_privilege_to_account">add_privilege_to_account</a>(account, witness, <a href="#0x1_Roles_VALIDATOR_ROLE_ID">VALIDATOR_ROLE_ID</a>());
-}
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_add_privilege_to_account_validator_operator_role"></a>
-
-## Function `add_privilege_to_account_validator_operator_role`
-
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_validator_operator_role">add_privilege_to_account_validator_operator_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_validator_operator_role">add_privilege_to_account_validator_operator_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-<b>acquires</b> <a href="#0x1_Roles_RoleId">RoleId</a> {
-    <a href="#0x1_Roles_add_privilege_to_account">add_privilege_to_account</a>(account, witness, <a href="#0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID">VALIDATOR_OPERATOR_ROLE_ID</a>());
-}
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_add_privilege_to_account_parent_vasp_role"></a>
-
-## Function `add_privilege_to_account_parent_vasp_role`
-
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_parent_vasp_role">add_privilege_to_account_parent_vasp_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_parent_vasp_role">add_privilege_to_account_parent_vasp_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-<b>acquires</b> <a href="#0x1_Roles_RoleId">RoleId</a> {
-    <a href="#0x1_Roles_add_privilege_to_account">add_privilege_to_account</a>(account, witness, <a href="#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a>());
-}
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_add_privilege_to_account_child_vasp_role"></a>
-
-## Function `add_privilege_to_account_child_vasp_role`
-
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_child_vasp_role">add_privilege_to_account_child_vasp_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_child_vasp_role">add_privilege_to_account_child_vasp_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-<b>acquires</b> <a href="#0x1_Roles_RoleId">RoleId</a> {
-    <a href="#0x1_Roles_add_privilege_to_account">add_privilege_to_account</a>(account, witness, <a href="#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a>());
-}
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_add_privilege_to_account_unhosted_role"></a>
-
-## Function `add_privilege_to_account_unhosted_role`
-
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_unhosted_role">add_privilege_to_account_unhosted_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_add_privilege_to_account_unhosted_role">add_privilege_to_account_unhosted_role</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, witness: Priv)
-<b>acquires</b> <a href="#0x1_Roles_RoleId">RoleId</a> {
-    <a href="#0x1_Roles_add_privilege_to_account">add_privilege_to_account</a>(account, witness, <a href="#0x1_Roles_UNHOSTED_ROLE_ID">UNHOSTED_ROLE_ID</a>());
-}
-</code></pre>
-
-
-
-</details>
-
-<a name="0x1_Roles_grant_root_association_role"></a>
-
-## Function `grant_root_association_role`
-
-Granted in genesis. So there cannot be any pre-existing privileges
-and roles. This is _not_ called from within LibraAccount -- these
-privileges need to be created before accounts can be made
-(specifically, initialization of currency)
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_grant_root_association_role">grant_root_association_role</a>(association: &signer)
-</code></pre>
-
-
-
-<details>
-<summary>Implementation</summary>
-
-
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_grant_root_association_role">grant_root_association_role</a>(
-    association: &signer,
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_grant_diem_root_role">grant_diem_root_role</a>(
+    dr_account: &signer,
 ) {
-    <b>assert</b>(<a href="LibraTimestamp.md#0x1_LibraTimestamp_is_genesis">LibraTimestamp::is_genesis</a>(), 0);
-    <b>let</b> owner_address = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(association);
-    <b>assert</b>(owner_address == <a href="CoreAddresses.md#0x1_CoreAddresses_ASSOCIATION_ROOT_ADDRESS">CoreAddresses::ASSOCIATION_ROOT_ADDRESS</a>(), 0);
-    // Grant the role <b>to</b> the association root account
-    move_to(association, <a href="#0x1_Roles_RoleId">RoleId</a> { role_id: <a href="#0x1_Roles_ASSOCIATION_ROOT_ROLE_ID">ASSOCIATION_ROOT_ROLE_ID</a>() });
-    move_to(association, <a href="#0x1_Roles_Privilege">Privilege</a>&lt;<a href="#0x1_Roles_AssociationRootRole">AssociationRootRole</a>&gt;{ witness: <a href="#0x1_Roles_AssociationRootRole">AssociationRootRole</a>{}, is_extracted: <b>false</b>})
+    <a href="DiemTimestamp.md#0x1_DiemTimestamp_assert_genesis">DiemTimestamp::assert_genesis</a>();
+    // Checks actual <a href="Diem.md#0x1_Diem">Diem</a> root because <a href="Diem.md#0x1_Diem">Diem</a> root role is not set
+    // until next line of code.
+    <a href="CoreAddresses.md#0x1_CoreAddresses_assert_diem_root">CoreAddresses::assert_diem_root</a>(dr_account);
+    // Grant the role <b>to</b> the diem root account
+    <a href="Roles.md#0x1_Roles_grant_role">grant_role</a>(dr_account, <a href="Roles.md#0x1_Roles_DIEM_ROOT_ROLE_ID">DIEM_ROOT_ROLE_ID</a>);
 }
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>include</b> <a href="DiemTimestamp.md#0x1_DiemTimestamp_AbortsIfNotGenesis">DiemTimestamp::AbortsIfNotGenesis</a>;
+<b>include</b> <a href="CoreAddresses.md#0x1_CoreAddresses_AbortsIfNotDiemRoot">CoreAddresses::AbortsIfNotDiemRoot</a>{account: dr_account};
+<b>include</b> <a href="Roles.md#0x1_Roles_GrantRole">GrantRole</a>{addr: <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(dr_account), role_id: <a href="Roles.md#0x1_Roles_DIEM_ROOT_ROLE_ID">DIEM_ROOT_ROLE_ID</a>};
 </code></pre>
 
 
@@ -873,13 +302,10 @@ privileges need to be created before accounts can be made
 
 ## Function `grant_treasury_compliance_role`
 
-NB: currency-related privileges are defined in the
-<code><a href="Libra.md#0x1_Libra">Libra</a></code> module.
-Granted in genesis. So there cannot be any pre-existing privileges
-and roles.
+Publishes treasury compliance role. Granted only in genesis.
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_grant_treasury_compliance_role">grant_treasury_compliance_role</a>(treasury_compliance_account: &signer, _: &<a href="#0x1_Roles_Capability">Roles::Capability</a>&lt;<a href="#0x1_Roles_AssociationRootRole">Roles::AssociationRootRole</a>&gt;)
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_grant_treasury_compliance_role">grant_treasury_compliance_role</a>(treasury_compliance_account: &signer, dr_account: &signer)
 </code></pre>
 
 
@@ -888,21 +314,31 @@ and roles.
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_grant_treasury_compliance_role">grant_treasury_compliance_role</a>(
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_grant_treasury_compliance_role">grant_treasury_compliance_role</a>(
     treasury_compliance_account: &signer,
-    _: &<a href="#0x1_Roles_Capability">Capability</a>&lt;<a href="#0x1_Roles_AssociationRootRole">AssociationRootRole</a>&gt;,
-) {
-    <b>assert</b>(<a href="LibraTimestamp.md#0x1_LibraTimestamp_is_genesis">LibraTimestamp::is_genesis</a>(), 0);
-    <b>let</b> owner_address = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(treasury_compliance_account);
-    <b>assert</b>(owner_address == <a href="CoreAddresses.md#0x1_CoreAddresses_TREASURY_COMPLIANCE_ADDRESS">CoreAddresses::TREASURY_COMPLIANCE_ADDRESS</a>(), 0);
+    dr_account: &signer,
+) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="DiemTimestamp.md#0x1_DiemTimestamp_assert_genesis">DiemTimestamp::assert_genesis</a>();
+    <a href="CoreAddresses.md#0x1_CoreAddresses_assert_treasury_compliance">CoreAddresses::assert_treasury_compliance</a>(treasury_compliance_account);
+    <a href="Roles.md#0x1_Roles_assert_diem_root">assert_diem_root</a>(dr_account);
     // Grant the TC role <b>to</b> the treasury_compliance_account
-    move_to(treasury_compliance_account, <a href="#0x1_Roles_RoleId">RoleId</a> { role_id: <a href="#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a>() });
-    move_to(treasury_compliance_account, <a href="#0x1_Roles_Privilege">Privilege</a>&lt;<a href="#0x1_Roles_TreasuryComplianceRole">TreasuryComplianceRole</a>&gt;{ witness: <a href="#0x1_Roles_TreasuryComplianceRole">TreasuryComplianceRole</a>{}, is_extracted: <b>false</b>});
-
-    // &gt; XXX/TODO/HACK/REMOVE (tzakian): This is a _HACK_ for right now
-    // so that we can allow minting <b>to</b> create an account. THIS NEEDS TO BE REMOVED.
-    move_to(treasury_compliance_account, <a href="#0x1_Roles_Privilege">Privilege</a>&lt;<a href="#0x1_Roles_AssociationRootRole">AssociationRootRole</a>&gt;{ witness: <a href="#0x1_Roles_AssociationRootRole">AssociationRootRole</a>{}, is_extracted: <b>false</b>})
+    <a href="Roles.md#0x1_Roles_grant_role">grant_role</a>(treasury_compliance_account, <a href="Roles.md#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a>);
 }
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>include</b> <a href="DiemTimestamp.md#0x1_DiemTimestamp_AbortsIfNotGenesis">DiemTimestamp::AbortsIfNotGenesis</a>;
+<b>include</b> <a href="CoreAddresses.md#0x1_CoreAddresses_AbortsIfNotTreasuryCompliance">CoreAddresses::AbortsIfNotTreasuryCompliance</a>{account: treasury_compliance_account};
+<b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotDiemRoot">AbortsIfNotDiemRoot</a>{account: dr_account};
+<b>include</b> <a href="Roles.md#0x1_Roles_GrantRole">GrantRole</a>{addr: <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(treasury_compliance_account), role_id: <a href="Roles.md#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a>};
 </code></pre>
 
 
@@ -913,37 +349,11 @@ and roles.
 
 ## Function `new_designated_dealer_role`
 
-Generic new role creation (for role ids != ASSOCIATION_ROOT_ROLE_ID
-and TREASURY_COMPLIANCE_ROLE_ID).
-We take a
-<code>&signer</code> here and link it with the account address so
-that we link the
-<code>signer</code> and
-<code>owner_address</code> together in this
-module. This should hopefully make proofs easier.
-
-Additionally, a role comes with a default privilege for its role. This can allow
-extensibility later on if a new module introduces a privilege for a role
-<code>R</code>.
-The new module can use a capability for the role
-<code>R</code>;
-<code>&<a href="#0x1_Roles_Capability">Capability</a>&lt;R&gt;</code> to guard the  granting of the privilege in order
-to ensure that only those with appropriate permissions are granted
-the new permission. e.g.
-```
-public fun publish_new_privilege(account: &signer, _: &Capability<R>) {
-Roles::add_privilege_to_account(account, Roles::R_ROLE_ID());
-}
-``
-<code>
-
-Publish a <a href="DesignatedDealer.md#0x1_DesignatedDealer">DesignatedDealer</a> </code>RoleId
-<code> under </code>new_account
-<code>.
-The </code>creating_account` must be TreasuryCompliance
+Publishes a DesignatedDealer <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> under <code>new_account</code>.
+The <code>creating_account</code> must be treasury compliance.
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_new_designated_dealer_role">new_designated_dealer_role</a>(creating_account: &signer, new_account: &signer)
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_new_designated_dealer_role">new_designated_dealer_role</a>(creating_account: &signer, new_account: &signer)
 </code></pre>
 
 
@@ -952,18 +362,26 @@ The </code>creating_account` must be TreasuryCompliance
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_new_designated_dealer_role">new_designated_dealer_role</a>(
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_new_designated_dealer_role">new_designated_dealer_role</a>(
     creating_account: &signer,
     new_account: &signer,
-) <b>acquires</b> <a href="#0x1_Roles_RoleId">RoleId</a> {
-    <b>let</b> calling_role = borrow_global&lt;<a href="#0x1_Roles_RoleId">RoleId</a>&gt;(<a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(creating_account));
-    // A role cannot have previously been assigned <b>to</b> `new_account`.
-    <b>assert</b>(!exists&lt;<a href="#0x1_Roles_RoleId">RoleId</a>&gt;(<a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(new_account)), 1);
-    //<b>assert</b>(calling_role.role_id == <a href="#0x1_Roles_ASSOCIATION_ROOT_ROLE_ID">ASSOCIATION_ROOT_ROLE_ID</a>(), 0);
-    <b>assert</b>(calling_role.role_id == <a href="#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a>(), 0);
-    move_to(new_account, <a href="#0x1_Roles_RoleId">RoleId</a> { role_id: <a href="#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a>() });
-    move_to(new_account, <a href="#0x1_Roles_Privilege">Privilege</a>&lt;<a href="#0x1_Roles_DesignatedDealerRole">DesignatedDealerRole</a>&gt;{ witness: <a href="#0x1_Roles_DesignatedDealerRole">DesignatedDealerRole</a>{}, is_extracted: <b>false</b> })
+) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="Roles.md#0x1_Roles_assert_treasury_compliance">assert_treasury_compliance</a>(creating_account);
+    <a href="Roles.md#0x1_Roles_grant_role">grant_role</a>(new_account, <a href="Roles.md#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a>);
 }
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotTreasuryCompliance">AbortsIfNotTreasuryCompliance</a>{account: creating_account};
+<b>include</b> <a href="Roles.md#0x1_Roles_GrantRole">GrantRole</a>{addr: <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(new_account), role_id: <a href="Roles.md#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a>};
 </code></pre>
 
 
@@ -974,14 +392,11 @@ The </code>creating_account` must be TreasuryCompliance
 
 ## Function `new_validator_role`
 
-Publish a Validator
-<code><a href="#0x1_Roles_RoleId">RoleId</a></code> under
-<code>new_account</code>.
-The
-<code>creating_account</code> must be LibraRoot
+Publish a Validator <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> under <code>new_account</code>.
+The <code>creating_account</code> must be diem root.
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_new_validator_role">new_validator_role</a>(creating_account: &signer, new_account: &signer)
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_new_validator_role">new_validator_role</a>(creating_account: &signer, new_account: &signer)
 </code></pre>
 
 
@@ -990,17 +405,26 @@ The
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_new_validator_role">new_validator_role</a>(
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_new_validator_role">new_validator_role</a>(
     creating_account: &signer,
     new_account: &signer
-) <b>acquires</b> <a href="#0x1_Roles_RoleId">RoleId</a> {
-    <b>let</b> calling_role = borrow_global&lt;<a href="#0x1_Roles_RoleId">RoleId</a>&gt;(<a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(creating_account));
-    // A role cannot have previously been assigned <b>to</b> `new_account`.
-    <b>assert</b>(!exists&lt;<a href="#0x1_Roles_RoleId">RoleId</a>&gt;(<a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(new_account)), 1);
-    <b>assert</b>(calling_role.role_id == <a href="#0x1_Roles_ASSOCIATION_ROOT_ROLE_ID">ASSOCIATION_ROOT_ROLE_ID</a>(), 0);
-    move_to(new_account, <a href="#0x1_Roles_RoleId">RoleId</a> { role_id: <a href="#0x1_Roles_VALIDATOR_ROLE_ID">VALIDATOR_ROLE_ID</a>() });
-    move_to(new_account, <a href="#0x1_Roles_Privilege">Privilege</a>&lt;<a href="#0x1_Roles_ValidatorRole">ValidatorRole</a>&gt;{ witness: <a href="#0x1_Roles_ValidatorRole">ValidatorRole</a>{}, is_extracted: <b>false</b> })
+) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="Roles.md#0x1_Roles_assert_diem_root">assert_diem_root</a>(creating_account);
+    <a href="Roles.md#0x1_Roles_grant_role">grant_role</a>(new_account, <a href="Roles.md#0x1_Roles_VALIDATOR_ROLE_ID">VALIDATOR_ROLE_ID</a>);
 }
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotDiemRoot">AbortsIfNotDiemRoot</a>{account: creating_account};
+<b>include</b> <a href="Roles.md#0x1_Roles_GrantRole">GrantRole</a>{addr: <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(new_account), role_id: <a href="Roles.md#0x1_Roles_VALIDATOR_ROLE_ID">VALIDATOR_ROLE_ID</a>};
 </code></pre>
 
 
@@ -1011,14 +435,11 @@ The
 
 ## Function `new_validator_operator_role`
 
-Publish a ValidatorOperator
-<code><a href="#0x1_Roles_RoleId">RoleId</a></code> under
-<code>new_account</code>.
-The
-<code>creating_account</code> must be LibraRoot
+Publish a ValidatorOperator <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> under <code>new_account</code>.
+The <code>creating_account</code> must be DiemRoot
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_new_validator_operator_role">new_validator_operator_role</a>(creating_account: &signer, new_account: &signer)
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_new_validator_operator_role">new_validator_operator_role</a>(creating_account: &signer, new_account: &signer)
 </code></pre>
 
 
@@ -1027,17 +448,26 @@ The
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_new_validator_operator_role">new_validator_operator_role</a>(
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_new_validator_operator_role">new_validator_operator_role</a>(
     creating_account: &signer,
     new_account: &signer,
-) <b>acquires</b> <a href="#0x1_Roles_RoleId">RoleId</a> {
-    <b>let</b> calling_role = borrow_global&lt;<a href="#0x1_Roles_RoleId">RoleId</a>&gt;(<a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(creating_account));
-    // A role cannot have previously been assigned <b>to</b> `new_account`.
-    <b>assert</b>(!exists&lt;<a href="#0x1_Roles_RoleId">RoleId</a>&gt;(<a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(new_account)), 1);
-    <b>assert</b>(calling_role.role_id == <a href="#0x1_Roles_ASSOCIATION_ROOT_ROLE_ID">ASSOCIATION_ROOT_ROLE_ID</a>(), 0);
-    move_to(new_account, <a href="#0x1_Roles_RoleId">RoleId</a> { role_id: <a href="#0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID">VALIDATOR_OPERATOR_ROLE_ID</a>() });
-    move_to(new_account, <a href="#0x1_Roles_Privilege">Privilege</a>&lt;<a href="#0x1_Roles_ValidatorOperatorRole">ValidatorOperatorRole</a>&gt;{ witness: <a href="#0x1_Roles_ValidatorOperatorRole">ValidatorOperatorRole</a>{}, is_extracted: <b>false</b> })
+) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="Roles.md#0x1_Roles_assert_diem_root">assert_diem_root</a>(creating_account);
+    <a href="Roles.md#0x1_Roles_grant_role">grant_role</a>(new_account, <a href="Roles.md#0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID">VALIDATOR_OPERATOR_ROLE_ID</a>);
 }
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotDiemRoot">AbortsIfNotDiemRoot</a>{account: creating_account};
+<b>include</b> <a href="Roles.md#0x1_Roles_GrantRole">GrantRole</a>{addr: <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(new_account), role_id: <a href="Roles.md#0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID">VALIDATOR_OPERATOR_ROLE_ID</a>};
 </code></pre>
 
 
@@ -1048,14 +478,11 @@ The
 
 ## Function `new_parent_vasp_role`
 
-Publish a ParentVASP
-<code><a href="#0x1_Roles_RoleId">RoleId</a></code> under
-<code>new_account</code>.
-The
-<code>creating_account</code> must be TreasuryCompliance
+Publish a ParentVASP <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> under <code>new_account</code>.
+The <code>creating_account</code> must be TreasuryCompliance
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_new_parent_vasp_role">new_parent_vasp_role</a>(creating_account: &signer, new_account: &signer)
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_new_parent_vasp_role">new_parent_vasp_role</a>(creating_account: &signer, new_account: &signer)
 </code></pre>
 
 
@@ -1064,23 +491,26 @@ The
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_new_parent_vasp_role">new_parent_vasp_role</a>(
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_new_parent_vasp_role">new_parent_vasp_role</a>(
     creating_account: &signer,
     new_account: &signer,
-) <b>acquires</b> <a href="#0x1_Roles_RoleId">RoleId</a> {
-    <b>let</b> calling_role = borrow_global&lt;<a href="#0x1_Roles_RoleId">RoleId</a>&gt;(<a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(creating_account));
-    // A role cannot have previously been assigned <b>to</b> `new_account`.
-    <b>assert</b>(!exists&lt;<a href="#0x1_Roles_RoleId">RoleId</a>&gt;(<a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(new_account)), 1);
-    <b>assert</b>(
-            calling_role.role_id == <a href="#0x1_Roles_ASSOCIATION_ROOT_ROLE_ID">ASSOCIATION_ROOT_ROLE_ID</a>()
-            // XXX/HACK/REMOVE(tzakian): This is for testnet semantics
-            // only. THIS NEEDS TO BE REMOVED.
-            || calling_role.role_id == <a href="#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a>(),
-            0
-        );
-        move_to(new_account, <a href="#0x1_Roles_RoleId">RoleId</a> { role_id: <a href="#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a>() });
-        move_to(new_account, <a href="#0x1_Roles_Privilege">Privilege</a>&lt;<a href="#0x1_Roles_ParentVASPRole">ParentVASPRole</a>&gt;{ witness: <a href="#0x1_Roles_ParentVASPRole">ParentVASPRole</a>{}, is_extracted: <b>false</b> })
+) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="Roles.md#0x1_Roles_assert_treasury_compliance">assert_treasury_compliance</a>(creating_account);
+    <a href="Roles.md#0x1_Roles_grant_role">grant_role</a>(new_account, <a href="Roles.md#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a>);
 }
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotTreasuryCompliance">AbortsIfNotTreasuryCompliance</a>{account: creating_account};
+<b>include</b> <a href="Roles.md#0x1_Roles_GrantRole">GrantRole</a>{addr: <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(new_account), role_id: <a href="Roles.md#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a>};
 </code></pre>
 
 
@@ -1091,14 +521,11 @@ The
 
 ## Function `new_child_vasp_role`
 
-Publish a ChildVASP
-<code><a href="#0x1_Roles_RoleId">RoleId</a></code> under
-<code>new_account</code>.
-The
-<code>creating_account</code> must be a ParentVASP
+Publish a ChildVASP <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> under <code>new_account</code>.
+The <code>creating_account</code> must be a ParentVASP
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_new_child_vasp_role">new_child_vasp_role</a>(creating_account: &signer, new_account: &signer)
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_new_child_vasp_role">new_child_vasp_role</a>(creating_account: &signer, new_account: &signer)
 </code></pre>
 
 
@@ -1107,16 +534,12 @@ The
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_new_child_vasp_role">new_child_vasp_role</a>(
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_new_child_vasp_role">new_child_vasp_role</a>(
     creating_account: &signer,
     new_account: &signer,
-) <b>acquires</b> <a href="#0x1_Roles_RoleId">RoleId</a> {
-    <b>let</b> calling_role = borrow_global&lt;<a href="#0x1_Roles_RoleId">RoleId</a>&gt;(<a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(creating_account));
-    // A role cannot have previously been assigned <b>to</b> `new_account`.
-    <b>assert</b>(!exists&lt;<a href="#0x1_Roles_RoleId">RoleId</a>&gt;(<a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(new_account)), 1);
-    <b>assert</b>(calling_role.role_id == <a href="#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a>(), 0);
-    move_to(new_account, <a href="#0x1_Roles_RoleId">RoleId</a> { role_id: <a href="#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a>() });
-    move_to(new_account, <a href="#0x1_Roles_Privilege">Privilege</a>&lt;<a href="#0x1_Roles_ChildVASPRole">ChildVASPRole</a>&gt;{ witness: <a href="#0x1_Roles_ChildVASPRole">ChildVASPRole</a>{}, is_extracted: <b>false</b> })
+) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="Roles.md#0x1_Roles_assert_parent_vasp_role">assert_parent_vasp_role</a>(creating_account);
+    <a href="Roles.md#0x1_Roles_grant_role">grant_role</a>(new_account, <a href="Roles.md#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a>);
 }
 </code></pre>
 
@@ -1124,16 +547,27 @@ The
 
 </details>
 
-<a name="0x1_Roles_new_unhosted_role"></a>
-
-## Function `new_unhosted_role`
-
-Publish an Unhosted
-<code><a href="#0x1_Roles_RoleId">RoleId</a></code> under
-<code>new_account</code>.
+<details>
+<summary>Specification</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_new_unhosted_role">new_unhosted_role</a>(_creating_account: &signer, new_account: &signer)
+
+<pre><code><b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotParentVasp">AbortsIfNotParentVasp</a>{account: creating_account};
+<b>include</b> <a href="Roles.md#0x1_Roles_GrantRole">GrantRole</a>{addr: <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(new_account), role_id: <a href="Roles.md#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a>};
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_grant_role"></a>
+
+## Function `grant_role`
+
+Helper function to grant a role.
+
+
+<pre><code><b>fun</b> <a href="Roles.md#0x1_Roles_grant_role">grant_role</a>(account: &signer, role_id: u64)
 </code></pre>
 
 
@@ -1142,11 +576,9 @@ Publish an Unhosted
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_new_unhosted_role">new_unhosted_role</a>(_creating_account: &signer, new_account: &signer) {
-    // A role cannot have previously been assigned <b>to</b> `new_account`.
-    <b>assert</b>(!exists&lt;<a href="#0x1_Roles_RoleId">RoleId</a>&gt;(<a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(new_account)), 1);
-    move_to(new_account, <a href="#0x1_Roles_RoleId">RoleId</a> { role_id: <a href="#0x1_Roles_UNHOSTED_ROLE_ID">UNHOSTED_ROLE_ID</a>() });
-    move_to(new_account, <a href="#0x1_Roles_Privilege">Privilege</a>&lt;<a href="#0x1_Roles_UnhostedRole">UnhostedRole</a>&gt;{ witness: <a href="#0x1_Roles_UnhostedRole">UnhostedRole</a>{}, is_extracted: <b>false</b> })
+<pre><code><b>fun</b> <a href="Roles.md#0x1_Roles_grant_role">grant_role</a>(account: &signer, role_id: u64) {
+    <b>assert</b>(!<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(<a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account)), <a href="Errors.md#0x1_Errors_already_published">Errors::already_published</a>(<a href="Roles.md#0x1_Roles_EROLE_ID">EROLE_ID</a>));
+    move_to(account, <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> { role_id });
 }
 </code></pre>
 
@@ -1154,49 +586,46 @@ Publish an Unhosted
 
 </details>
 
-<a name="0x1_Roles_extract_privilege_to_capability"></a>
-
-## Function `extract_privilege_to_capability`
-
-Some specs we may want to say about privileges and roles:
-1. For all roles
-<code>R = R1, ..., Rn</code> the privilege witness
-<code>P</code> is only
-granted to accounts with roles
-<code>Ri1, Ri2, ...</code> where
-<code>Rik \in R</code>.
-This is a property of the module in which the privilege witness
-resource
-<code>P</code> is declared. (should be provable on a per-module basis)
-2. For all privilege witnesses
-<code>P</code>, and  instances
-<code>p: Privileges&lt;P&gt;</code>, the
-account at address
-<code>A</code> can hold
-<code>p</code> iff
-<code>p.owner_address == A</code>. (should be provable)
-3. Once a privilege is granted to an account
-<code>A</code>, that account
-holds that permission for all time.
-4. Every account has one, and only one, role. The role of the
-account does not change after creation.
-We don't need to check for roles now, because the only way you can
-get the correct capability is if you had that privilege, which can
-only be granted if you have the correct role. When a capability
-leaves the module we tag it with the account where it was held. You
-can only put the capability back if the
-<code>account</code> address you are
-storing it back under and the
-<code>owner_address</code> if the incoming capability agree.
-INVARIANT: Once a privilege witness is created and stored under
-a Privilege<PrivWitness> resource at an address A there are only two states:
-1. The resource Privilege<PrivWitness> is stored at A;
-2. The privilege witness is held in a Capability<PrivWitness> and
-the
-<code>owner_address == A</code>.
+<details>
+<summary>Specification</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_extract_privilege_to_capability">extract_privilege_to_capability</a>&lt;Priv: <b>resource</b>&gt;(account: &signer): <a href="#0x1_Roles_Capability">Roles::Capability</a>&lt;Priv&gt;
+
+<pre><code><b>pragma</b> opaque;
+<b>include</b> <a href="Roles.md#0x1_Roles_GrantRole">GrantRole</a>{addr: <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account)};
+<a name="0x1_Roles_addr$45"></a>
+<b>let</b> addr = <a href="Signer.md#0x1_Signer_spec_address_of">Signer::spec_address_of</a>(account);
+<b>requires</b> role_id == <a href="Roles.md#0x1_Roles_DIEM_ROOT_ROLE_ID">DIEM_ROOT_ROLE_ID</a> ==&gt; addr == <a href="CoreAddresses.md#0x1_CoreAddresses_DIEM_ROOT_ADDRESS">CoreAddresses::DIEM_ROOT_ADDRESS</a>();
+<b>requires</b> role_id == <a href="Roles.md#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a> ==&gt; addr == <a href="CoreAddresses.md#0x1_CoreAddresses_TREASURY_COMPLIANCE_ADDRESS">CoreAddresses::TREASURY_COMPLIANCE_ADDRESS</a>();
+</code></pre>
+
+
+
+
+<a name="0x1_Roles_GrantRole"></a>
+
+
+<pre><code><b>schema</b> <a href="Roles.md#0x1_Roles_GrantRole">GrantRole</a> {
+    addr: address;
+    role_id: num;
+    <b>aborts_if</b> <b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr) <b>with</b> <a href="Errors.md#0x1_Errors_ALREADY_PUBLISHED">Errors::ALREADY_PUBLISHED</a>;
+    <b>ensures</b> <b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr);
+    <b>ensures</b> <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id == role_id;
+    <b>modifies</b> <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr);
+}
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_has_role"></a>
+
+## Function `has_role`
+
+
+
+<pre><code><b>fun</b> <a href="Roles.md#0x1_Roles_has_role">has_role</a>(account: &signer, role_id: u64): bool
 </code></pre>
 
 
@@ -1205,17 +634,10 @@ the
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_extract_privilege_to_capability">extract_privilege_to_capability</a>&lt;Priv: <b>resource</b>&gt;(account: &signer): <a href="#0x1_Roles_Capability">Capability</a>&lt;Priv&gt;
-<b>acquires</b> <a href="#0x1_Roles_Privilege">Privilege</a> {
-    <b>let</b> owner_address = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account);
-    // <a href="#0x1_Roles_Privilege">Privilege</a> doesn't exist
-    <b>assert</b>(exists&lt;<a href="#0x1_Roles_Privilege">Privilege</a>&lt;Priv&gt;&gt;(owner_address), 3);
-    <b>let</b> priv = borrow_global_mut&lt;<a href="#0x1_Roles_Privilege">Privilege</a>&lt;Priv&gt;&gt;(owner_address);
-    // Make sure this privilege was not previously extracted
-    <b>assert</b>(!priv.is_extracted, 4);
-    // Set that the privilege is now extracted
-    priv.is_extracted = <b>true</b>;
-    <a href="#0x1_Roles_Capability">Capability</a>&lt;Priv&gt; { owner_address }
+<pre><code><b>fun</b> <a href="Roles.md#0x1_Roles_has_role">has_role</a>(account: &signer, role_id: u64): bool <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+   <b>let</b> addr = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account);
+   <b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr)
+       && borrow_global&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id == role_id
 }
 </code></pre>
 
@@ -1223,20 +645,13 @@ the
 
 </details>
 
-<a name="0x1_Roles_restore_capability_to_privilege"></a>
+<a name="0x1_Roles_has_diem_root_role"></a>
 
-## Function `restore_capability_to_privilege`
-
-When the capability is restored back to a privilege, we make sure
-that the underlying privilege cannot be stored under a different
-account than it was extracted from. Once we ensure that we then
-store the privilege witness back under the account.
-INVARIANT: Only a capability extracted from an account A can be
-restored back to A. i.e. \forall (cap: Capability<P>),
-(cap.owner_address != B).  restore_capability_to_privilege<P>(B, cap) fails
+## Function `has_diem_root_role`
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_restore_capability_to_privilege">restore_capability_to_privilege</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, cap: <a href="#0x1_Roles_Capability">Roles::Capability</a>&lt;Priv&gt;)
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_has_diem_root_role">has_diem_root_role</a>(account: &signer): bool
 </code></pre>
 
 
@@ -1245,18 +660,984 @@ restored back to A. i.e. \forall (cap: Capability<P>),
 <summary>Implementation</summary>
 
 
-<pre><code><b>public</b> <b>fun</b> <a href="#0x1_Roles_restore_capability_to_privilege">restore_capability_to_privilege</a>&lt;Priv: <b>resource</b>&gt;(account: &signer, cap: <a href="#0x1_Roles_Capability">Capability</a>&lt;Priv&gt;)
-<b>acquires</b> <a href="#0x1_Roles_Privilege">Privilege</a> {
-    <b>let</b> account_address = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account);
-    <b>let</b> <a href="#0x1_Roles_Capability">Capability</a>&lt;Priv&gt;{ owner_address } = cap;
-    // Make sure the owner of the privilege when we extracted it is the
-    // same <b>as</b> the address we're putting it back under.
-    <b>assert</b>(owner_address == account_address, 4);
-    // Set that the privilege is now put back
-    borrow_global_mut&lt;<a href="#0x1_Roles_Privilege">Privilege</a>&lt;Priv&gt;&gt;(owner_address).is_extracted = <b>false</b>;
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_has_diem_root_role">has_diem_root_role</a>(account: &signer): bool <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="Roles.md#0x1_Roles_has_role">has_role</a>(account, <a href="Roles.md#0x1_Roles_DIEM_ROOT_ROLE_ID">DIEM_ROOT_ROLE_ID</a>)
 }
 </code></pre>
 
 
 
 </details>
+
+<a name="0x1_Roles_has_treasury_compliance_role"></a>
+
+## Function `has_treasury_compliance_role`
+
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_has_treasury_compliance_role">has_treasury_compliance_role</a>(account: &signer): bool
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_has_treasury_compliance_role">has_treasury_compliance_role</a>(account: &signer): bool <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="Roles.md#0x1_Roles_has_role">has_role</a>(account, <a href="Roles.md#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a>)
+}
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_has_designated_dealer_role"></a>
+
+## Function `has_designated_dealer_role`
+
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_has_designated_dealer_role">has_designated_dealer_role</a>(account: &signer): bool
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_has_designated_dealer_role">has_designated_dealer_role</a>(account: &signer): bool <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="Roles.md#0x1_Roles_has_role">has_role</a>(account, <a href="Roles.md#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a>)
+}
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_has_validator_role"></a>
+
+## Function `has_validator_role`
+
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_has_validator_role">has_validator_role</a>(account: &signer): bool
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_has_validator_role">has_validator_role</a>(account: &signer): bool <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="Roles.md#0x1_Roles_has_role">has_role</a>(account, <a href="Roles.md#0x1_Roles_VALIDATOR_ROLE_ID">VALIDATOR_ROLE_ID</a>)
+}
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_has_validator_operator_role"></a>
+
+## Function `has_validator_operator_role`
+
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_has_validator_operator_role">has_validator_operator_role</a>(account: &signer): bool
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_has_validator_operator_role">has_validator_operator_role</a>(account: &signer): bool <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="Roles.md#0x1_Roles_has_role">has_role</a>(account, <a href="Roles.md#0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID">VALIDATOR_OPERATOR_ROLE_ID</a>)
+}
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_has_parent_VASP_role"></a>
+
+## Function `has_parent_VASP_role`
+
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_has_parent_VASP_role">has_parent_VASP_role</a>(account: &signer): bool
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_has_parent_VASP_role">has_parent_VASP_role</a>(account: &signer): bool <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="Roles.md#0x1_Roles_has_role">has_role</a>(account, <a href="Roles.md#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a>)
+}
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_has_child_VASP_role"></a>
+
+## Function `has_child_VASP_role`
+
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_has_child_VASP_role">has_child_VASP_role</a>(account: &signer): bool
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_has_child_VASP_role">has_child_VASP_role</a>(account: &signer): bool <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="Roles.md#0x1_Roles_has_role">has_role</a>(account, <a href="Roles.md#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a>)
+}
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_get_role_id"></a>
+
+## Function `get_role_id`
+
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_get_role_id">get_role_id</a>(a: address): u64
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_get_role_id">get_role_id</a>(a: address): u64 <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <b>assert</b>(<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(a), <a href="Errors.md#0x1_Errors_not_published">Errors::not_published</a>(<a href="Roles.md#0x1_Roles_EROLE_ID">EROLE_ID</a>));
+    borrow_global&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(a).role_id
+}
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_can_hold_balance"></a>
+
+## Function `can_hold_balance`
+
+Return true if <code>addr</code> is allowed to receive and send <code><a href="Diem.md#0x1_Diem">Diem</a>&lt;T&gt;</code> for any T
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_can_hold_balance">can_hold_balance</a>(account: &signer): bool
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_can_hold_balance">can_hold_balance</a>(account: &signer): bool <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    // <a href="VASP.md#0x1_VASP">VASP</a> accounts and designated_dealers can hold balances.
+    // Administrative accounts (`Validator`, `ValidatorOperator`, `TreasuryCompliance`, and
+    // `DiemRoot`) cannot.
+    <a href="Roles.md#0x1_Roles_has_parent_VASP_role">has_parent_VASP_role</a>(account) ||
+    <a href="Roles.md#0x1_Roles_has_child_VASP_role">has_child_VASP_role</a>(account) ||
+    <a href="Roles.md#0x1_Roles_has_designated_dealer_role">has_designated_dealer_role</a>(account)
+}
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_assert_diem_root"></a>
+
+## Function `assert_diem_root`
+
+Assert that the account is diem root.
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_diem_root">assert_diem_root</a>(account: &signer)
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_diem_root">assert_diem_root</a>(account: &signer) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="CoreAddresses.md#0x1_CoreAddresses_assert_diem_root">CoreAddresses::assert_diem_root</a>(account);
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account);
+    <b>assert</b>(<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr), <a href="Errors.md#0x1_Errors_not_published">Errors::not_published</a>(<a href="Roles.md#0x1_Roles_EROLE_ID">EROLE_ID</a>));
+    <b>assert</b>(borrow_global&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id == <a href="Roles.md#0x1_Roles_DIEM_ROOT_ROLE_ID">DIEM_ROOT_ROLE_ID</a>, <a href="Errors.md#0x1_Errors_requires_role">Errors::requires_role</a>(<a href="Roles.md#0x1_Roles_EDIEM_ROOT">EDIEM_ROOT</a>));
+}
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>pragma</b> opaque;
+<b>include</b> <a href="CoreAddresses.md#0x1_CoreAddresses_AbortsIfNotDiemRoot">CoreAddresses::AbortsIfNotDiemRoot</a>;
+<b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotDiemRoot">AbortsIfNotDiemRoot</a>;
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_assert_treasury_compliance"></a>
+
+## Function `assert_treasury_compliance`
+
+Assert that the account is treasury compliance.
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_treasury_compliance">assert_treasury_compliance</a>(account: &signer)
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_treasury_compliance">assert_treasury_compliance</a>(account: &signer) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <a href="CoreAddresses.md#0x1_CoreAddresses_assert_treasury_compliance">CoreAddresses::assert_treasury_compliance</a>(account);
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account);
+    <b>assert</b>(<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr), <a href="Errors.md#0x1_Errors_not_published">Errors::not_published</a>(<a href="Roles.md#0x1_Roles_EROLE_ID">EROLE_ID</a>));
+    <b>assert</b>(
+        borrow_global&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id == <a href="Roles.md#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a>,
+        <a href="Errors.md#0x1_Errors_requires_role">Errors::requires_role</a>(<a href="Roles.md#0x1_Roles_ETREASURY_COMPLIANCE">ETREASURY_COMPLIANCE</a>)
+    )
+}
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>pragma</b> opaque;
+<b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotTreasuryCompliance">AbortsIfNotTreasuryCompliance</a>;
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_assert_parent_vasp_role"></a>
+
+## Function `assert_parent_vasp_role`
+
+Assert that the account has the parent vasp role.
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_parent_vasp_role">assert_parent_vasp_role</a>(account: &signer)
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_parent_vasp_role">assert_parent_vasp_role</a>(account: &signer) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account);
+    <b>assert</b>(<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr), <a href="Errors.md#0x1_Errors_not_published">Errors::not_published</a>(<a href="Roles.md#0x1_Roles_EROLE_ID">EROLE_ID</a>));
+    <b>assert</b>(
+        borrow_global&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id == <a href="Roles.md#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a>,
+        <a href="Errors.md#0x1_Errors_requires_role">Errors::requires_role</a>(<a href="Roles.md#0x1_Roles_EPARENT_VASP">EPARENT_VASP</a>)
+    )
+}
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>pragma</b> opaque;
+<b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotParentVasp">AbortsIfNotParentVasp</a>;
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_assert_child_vasp_role"></a>
+
+## Function `assert_child_vasp_role`
+
+Assert that the account has the child vasp role.
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_child_vasp_role">assert_child_vasp_role</a>(account: &signer)
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_child_vasp_role">assert_child_vasp_role</a>(account: &signer) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account);
+    <b>assert</b>(<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr), <a href="Errors.md#0x1_Errors_not_published">Errors::not_published</a>(<a href="Roles.md#0x1_Roles_EROLE_ID">EROLE_ID</a>));
+    <b>assert</b>(
+        borrow_global&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id == <a href="Roles.md#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a>,
+        <a href="Errors.md#0x1_Errors_requires_role">Errors::requires_role</a>(<a href="Roles.md#0x1_Roles_ECHILD_VASP">ECHILD_VASP</a>)
+    )
+}
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>pragma</b> opaque;
+<b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotChildVasp">AbortsIfNotChildVasp</a>{account: <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account)};
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_assert_designated_dealer"></a>
+
+## Function `assert_designated_dealer`
+
+Assert that the account has the designated dealer role.
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_designated_dealer">assert_designated_dealer</a>(account: &signer)
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_designated_dealer">assert_designated_dealer</a>(account: &signer) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account);
+    <b>assert</b>(<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr), <a href="Errors.md#0x1_Errors_not_published">Errors::not_published</a>(<a href="Roles.md#0x1_Roles_EROLE_ID">EROLE_ID</a>));
+    <b>assert</b>(
+        borrow_global&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id == <a href="Roles.md#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a>,
+        <a href="Errors.md#0x1_Errors_requires_role">Errors::requires_role</a>(<a href="Roles.md#0x1_Roles_EDESIGNATED_DEALER">EDESIGNATED_DEALER</a>)
+    )
+}
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>pragma</b> opaque;
+<b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotDesignatedDealer">AbortsIfNotDesignatedDealer</a>;
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_assert_validator"></a>
+
+## Function `assert_validator`
+
+Assert that the account has the validator role.
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_validator">assert_validator</a>(validator_account: &signer)
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_validator">assert_validator</a>(validator_account: &signer) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <b>let</b> validator_addr = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(validator_account);
+    <b>assert</b>(<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(validator_addr), <a href="Errors.md#0x1_Errors_not_published">Errors::not_published</a>(<a href="Roles.md#0x1_Roles_EROLE_ID">EROLE_ID</a>));
+    <b>assert</b>(
+        borrow_global&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(validator_addr).role_id == <a href="Roles.md#0x1_Roles_VALIDATOR_ROLE_ID">VALIDATOR_ROLE_ID</a>,
+        <a href="Errors.md#0x1_Errors_requires_role">Errors::requires_role</a>(<a href="Roles.md#0x1_Roles_EVALIDATOR">EVALIDATOR</a>)
+    )
+}
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>pragma</b> opaque;
+<b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotValidator">AbortsIfNotValidator</a>{validator_addr: <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(validator_account)};
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_assert_validator_operator"></a>
+
+## Function `assert_validator_operator`
+
+Assert that the account has the validator operator role.
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_validator_operator">assert_validator_operator</a>(validator_operator_account: &signer)
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_validator_operator">assert_validator_operator</a>(validator_operator_account: &signer) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <b>let</b> validator_operator_addr = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(validator_operator_account);
+    <b>assert</b>(<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(validator_operator_addr), <a href="Errors.md#0x1_Errors_not_published">Errors::not_published</a>(<a href="Roles.md#0x1_Roles_EROLE_ID">EROLE_ID</a>));
+    <b>assert</b>(
+        borrow_global&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(validator_operator_addr).role_id == <a href="Roles.md#0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID">VALIDATOR_OPERATOR_ROLE_ID</a>,
+        <a href="Errors.md#0x1_Errors_requires_role">Errors::requires_role</a>(<a href="Roles.md#0x1_Roles_EVALIDATOR_OPERATOR">EVALIDATOR_OPERATOR</a>)
+    )
+}
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>pragma</b> opaque;
+<b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotValidatorOperator">AbortsIfNotValidatorOperator</a>{validator_operator_addr: <a href="Signer.md#0x1_Signer_spec_address_of">Signer::spec_address_of</a>(validator_operator_account)};
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_assert_parent_vasp_or_designated_dealer"></a>
+
+## Function `assert_parent_vasp_or_designated_dealer`
+
+Assert that the account has either the parent vasp or designated dealer role.
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_parent_vasp_or_designated_dealer">assert_parent_vasp_or_designated_dealer</a>(account: &signer)
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_parent_vasp_or_designated_dealer">assert_parent_vasp_or_designated_dealer</a>(account: &signer) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account);
+    <b>assert</b>(<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr), <a href="Errors.md#0x1_Errors_not_published">Errors::not_published</a>(<a href="Roles.md#0x1_Roles_EROLE_ID">EROLE_ID</a>));
+    <b>let</b> role_id = borrow_global&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id;
+    <b>assert</b>(
+        role_id == <a href="Roles.md#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a> || role_id == <a href="Roles.md#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a>,
+        <a href="Errors.md#0x1_Errors_requires_role">Errors::requires_role</a>(<a href="Roles.md#0x1_Roles_EPARENT_VASP_OR_DESIGNATED_DEALER">EPARENT_VASP_OR_DESIGNATED_DEALER</a>)
+    );
+}
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>pragma</b> opaque;
+<b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotParentVaspOrDesignatedDealer">AbortsIfNotParentVaspOrDesignatedDealer</a>;
+</code></pre>
+
+
+
+</details>
+
+<a name="0x1_Roles_assert_parent_vasp_or_child_vasp"></a>
+
+## Function `assert_parent_vasp_or_child_vasp`
+
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_parent_vasp_or_child_vasp">assert_parent_vasp_or_child_vasp</a>(account: &signer)
+</code></pre>
+
+
+
+<details>
+<summary>Implementation</summary>
+
+
+<pre><code><b>public</b> <b>fun</b> <a href="Roles.md#0x1_Roles_assert_parent_vasp_or_child_vasp">assert_parent_vasp_or_child_vasp</a>(account: &signer) <b>acquires</b> <a href="Roles.md#0x1_Roles_RoleId">RoleId</a> {
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(account);
+    <b>assert</b>(<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr), <a href="Errors.md#0x1_Errors_not_published">Errors::not_published</a>(<a href="Roles.md#0x1_Roles_EROLE_ID">EROLE_ID</a>));
+    <b>let</b> role_id = borrow_global&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id;
+    <b>assert</b>(
+        role_id == <a href="Roles.md#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a> || role_id == <a href="Roles.md#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a>,
+        <a href="Errors.md#0x1_Errors_requires_role">Errors::requires_role</a>(<a href="Roles.md#0x1_Roles_EPARENT_VASP_OR_CHILD_VASP">EPARENT_VASP_OR_CHILD_VASP</a>)
+    );
+}
+</code></pre>
+
+
+
+</details>
+
+<details>
+<summary>Specification</summary>
+
+
+
+<pre><code><b>pragma</b> opaque;
+<b>include</b> <a href="Roles.md#0x1_Roles_AbortsIfNotParentVaspOrChildVasp">AbortsIfNotParentVaspOrChildVasp</a>;
+</code></pre>
+
+
+
+</details>
+
+<a name="@Module_Specification_1"></a>
+
+## Module Specification
+
+
+
+<a name="@Persistence_of_Roles_2"></a>
+
+### Persistence of Roles
+
+Once an account at an address is granted a role it will remain an account role for all time.
+
+
+<pre><code><b>invariant</b> <b>update</b> [<b>global</b>]
+    <b>forall</b> addr: address <b>where</b> <b>old</b>(<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr)):
+        <b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr) && <b>old</b>(<b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id) == <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id;
+</code></pre>
+
+
+
+<a name="@Access_Control_3"></a>
+
+### Access Control
+
+In this section, the conditions from the [requirements for access control][ACCESS_CONTROL] are systematically
+applied to the functions in this module. While some of those conditions have already been
+included in individual function specifications, listing them here again gives additional
+assurance that that all requirements are covered.
+
+The DiemRoot role is only granted in genesis [[A1]][ROLE]. A new <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> with <code><a href="Roles.md#0x1_Roles_DIEM_ROOT_ROLE_ID">DIEM_ROOT_ROLE_ID</a></code> is only
+published through <code>grant_diem_root_role</code> which aborts if it is not invoked in genesis.
+
+
+<pre><code><b>apply</b> <a href="Roles.md#0x1_Roles_ThisRoleIsNotNewlyPublished">ThisRoleIsNotNewlyPublished</a>{this: <a href="Roles.md#0x1_Roles_DIEM_ROOT_ROLE_ID">DIEM_ROOT_ROLE_ID</a>} <b>to</b> * <b>except</b> grant_diem_root_role, grant_role;
+<b>apply</b> <a href="DiemTimestamp.md#0x1_DiemTimestamp_AbortsIfNotGenesis">DiemTimestamp::AbortsIfNotGenesis</a> <b>to</b> grant_diem_root_role;
+</code></pre>
+
+
+TreasuryCompliance role is only granted in genesis [[A2]][ROLE]. A new <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> with <code><a href="Roles.md#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a></code> is only
+published through <code>grant_treasury_compliance_role</code> which aborts if it is not invoked in genesis.
+
+
+<pre><code><b>apply</b> <a href="Roles.md#0x1_Roles_ThisRoleIsNotNewlyPublished">ThisRoleIsNotNewlyPublished</a>{this: <a href="Roles.md#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a>} <b>to</b> *
+    <b>except</b> grant_treasury_compliance_role, grant_role;
+<b>apply</b> <a href="DiemTimestamp.md#0x1_DiemTimestamp_AbortsIfNotGenesis">DiemTimestamp::AbortsIfNotGenesis</a> <b>to</b> grant_treasury_compliance_role;
+</code></pre>
+
+
+Validator roles are only granted by DiemRoot [[A3]][ROLE]. A new <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> with <code><a href="Roles.md#0x1_Roles_VALIDATOR_ROLE_ID">VALIDATOR_ROLE_ID</a></code> is only
+published through <code>new_validator_role</code> which aborts if <code>creating_account</code> does not have the DiemRoot role.
+
+
+<pre><code><b>apply</b> <a href="Roles.md#0x1_Roles_ThisRoleIsNotNewlyPublished">ThisRoleIsNotNewlyPublished</a>{this: <a href="Roles.md#0x1_Roles_VALIDATOR_ROLE_ID">VALIDATOR_ROLE_ID</a>} <b>to</b> * <b>except</b> new_validator_role, grant_role;
+<b>apply</b> <a href="Roles.md#0x1_Roles_AbortsIfNotDiemRoot">AbortsIfNotDiemRoot</a>{account: creating_account} <b>to</b> new_validator_role;
+</code></pre>
+
+
+ValidatorOperator roles are only granted by DiemRoot [[A4]][ROLE]. A new <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> with <code><a href="Roles.md#0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID">VALIDATOR_OPERATOR_ROLE_ID</a></code> is only
+published through <code>new_validator_operator_role</code> which aborts if <code>creating_account</code> does not have the DiemRoot role.
+
+
+<pre><code><b>apply</b> <a href="Roles.md#0x1_Roles_ThisRoleIsNotNewlyPublished">ThisRoleIsNotNewlyPublished</a>{this: <a href="Roles.md#0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID">VALIDATOR_OPERATOR_ROLE_ID</a>} <b>to</b> *
+    <b>except</b> new_validator_operator_role, grant_role;
+<b>apply</b> <a href="Roles.md#0x1_Roles_AbortsIfNotDiemRoot">AbortsIfNotDiemRoot</a>{account: creating_account} <b>to</b> new_validator_operator_role;
+</code></pre>
+
+
+DesignatedDealer roles are only granted by TreasuryCompliance [[A5]][ROLE]. A new <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> with <code><a href="Roles.md#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a>()</code>
+is only published through <code>new_designated_dealer_role</code> which aborts if <code>creating_account</code> does not have the
+TreasuryCompliance role.
+
+
+<pre><code><b>apply</b> <a href="Roles.md#0x1_Roles_ThisRoleIsNotNewlyPublished">ThisRoleIsNotNewlyPublished</a>{this: <a href="Roles.md#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a>} <b>to</b> *
+    <b>except</b> new_designated_dealer_role, grant_role;
+<b>apply</b> <a href="Roles.md#0x1_Roles_AbortsIfNotTreasuryCompliance">AbortsIfNotTreasuryCompliance</a>{account: creating_account} <b>to</b> new_designated_dealer_role;
+</code></pre>
+
+
+ParentVASP roles are only granted by TreasuryCompliance [[A6]][ROLE]. A new <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> with <code><a href="Roles.md#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a>()</code> is only
+published through <code>new_parent_vasp_role</code> which aborts if <code>creating_account</code> does not have the TreasuryCompliance role.
+
+
+<pre><code><b>apply</b> <a href="Roles.md#0x1_Roles_ThisRoleIsNotNewlyPublished">ThisRoleIsNotNewlyPublished</a>{this: <a href="Roles.md#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a>} <b>to</b> * <b>except</b> new_parent_vasp_role, grant_role;
+<b>apply</b> <a href="Roles.md#0x1_Roles_AbortsIfNotTreasuryCompliance">AbortsIfNotTreasuryCompliance</a>{account: creating_account} <b>to</b> new_parent_vasp_role;
+</code></pre>
+
+
+ChildVASP roles are only granted by ParentVASP [[A7]][ROLE]. A new <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> with <code><a href="Roles.md#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a></code> is only
+published through <code>new_child_vasp_role</code> which aborts if <code>creating_account</code> does not have the ParentVASP role.
+
+
+<pre><code><b>apply</b> <a href="Roles.md#0x1_Roles_ThisRoleIsNotNewlyPublished">ThisRoleIsNotNewlyPublished</a>{this: <a href="Roles.md#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a>} <b>to</b> * <b>except</b> new_child_vasp_role, grant_role;
+<b>apply</b> <a href="Roles.md#0x1_Roles_AbortsIfNotParentVasp">AbortsIfNotParentVasp</a>{account: creating_account} <b>to</b> new_child_vasp_role;
+</code></pre>
+
+
+The DiemRoot role is globally unique [[B1]][ROLE], and is published at DIEM_ROOT_ADDRESS [[C1]][ROLE].
+In other words, a <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> with <code><a href="Roles.md#0x1_Roles_DIEM_ROOT_ROLE_ID">DIEM_ROOT_ROLE_ID</a></code> uniquely exists at <code>DIEM_ROOT_ADDRESS</code>.
+
+
+<pre><code><b>invariant</b> [<b>global</b>, isolated] <b>forall</b> addr: address <b>where</b> <a href="Roles.md#0x1_Roles_spec_has_diem_root_role_addr">spec_has_diem_root_role_addr</a>(addr):
+  addr == <a href="CoreAddresses.md#0x1_CoreAddresses_DIEM_ROOT_ADDRESS">CoreAddresses::DIEM_ROOT_ADDRESS</a>();
+<b>invariant</b> [<b>global</b>, isolated]
+    <a href="DiemTimestamp.md#0x1_DiemTimestamp_is_operating">DiemTimestamp::is_operating</a>() ==&gt; <a href="Roles.md#0x1_Roles_spec_has_diem_root_role_addr">spec_has_diem_root_role_addr</a>(<a href="CoreAddresses.md#0x1_CoreAddresses_DIEM_ROOT_ADDRESS">CoreAddresses::DIEM_ROOT_ADDRESS</a>());
+</code></pre>
+
+
+The TreasuryCompliance role is globally unique [[B2]][ROLE], and is published at TREASURY_COMPLIANCE_ADDRESS [[C2]][ROLE].
+In other words, a <code><a href="Roles.md#0x1_Roles_RoleId">RoleId</a></code> with <code><a href="Roles.md#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a></code> uniquely exists at <code>TREASURY_COMPLIANCE_ADDRESS</code>.
+
+
+<pre><code><b>invariant</b> [<b>global</b>, isolated] <b>forall</b> addr: address <b>where</b> <a href="Roles.md#0x1_Roles_spec_has_treasury_compliance_role_addr">spec_has_treasury_compliance_role_addr</a>(addr):
+  addr == <a href="CoreAddresses.md#0x1_CoreAddresses_TREASURY_COMPLIANCE_ADDRESS">CoreAddresses::TREASURY_COMPLIANCE_ADDRESS</a>();
+<b>invariant</b> [<b>global</b>, isolated]
+    <a href="DiemTimestamp.md#0x1_DiemTimestamp_is_operating">DiemTimestamp::is_operating</a>() ==&gt;
+        <a href="Roles.md#0x1_Roles_spec_has_treasury_compliance_role_addr">spec_has_treasury_compliance_role_addr</a>(<a href="CoreAddresses.md#0x1_CoreAddresses_TREASURY_COMPLIANCE_ADDRESS">CoreAddresses::TREASURY_COMPLIANCE_ADDRESS</a>());
+</code></pre>
+
+
+DiemRoot cannot have balances [[D1]][ROLE].
+
+
+<pre><code><b>invariant</b> [<b>global</b>, isolated] <b>forall</b> addr: address <b>where</b> <a href="Roles.md#0x1_Roles_spec_has_diem_root_role_addr">spec_has_diem_root_role_addr</a>(addr):
+    !<a href="Roles.md#0x1_Roles_spec_can_hold_balance_addr">spec_can_hold_balance_addr</a>(addr);
+</code></pre>
+
+
+TreasuryCompliance cannot have balances [[D2]][ROLE].
+
+
+<pre><code><b>invariant</b> [<b>global</b>, isolated] <b>forall</b> addr: address <b>where</b> <a href="Roles.md#0x1_Roles_spec_has_treasury_compliance_role_addr">spec_has_treasury_compliance_role_addr</a>(addr):
+    !<a href="Roles.md#0x1_Roles_spec_can_hold_balance_addr">spec_can_hold_balance_addr</a>(addr);
+</code></pre>
+
+
+Validator cannot have balances [[D3]][ROLE].
+
+
+<pre><code><b>invariant</b> [<b>global</b>, isolated] <b>forall</b> addr: address <b>where</b> <a href="Roles.md#0x1_Roles_spec_has_validator_role_addr">spec_has_validator_role_addr</a>(addr):
+    !<a href="Roles.md#0x1_Roles_spec_can_hold_balance_addr">spec_can_hold_balance_addr</a>(addr);
+</code></pre>
+
+
+ValidatorOperator cannot have balances [[D4]][ROLE].
+
+
+<pre><code><b>invariant</b> [<b>global</b>, isolated] <b>forall</b> addr: address <b>where</b> <a href="Roles.md#0x1_Roles_spec_has_validator_operator_role_addr">spec_has_validator_operator_role_addr</a>(addr):
+    !<a href="Roles.md#0x1_Roles_spec_can_hold_balance_addr">spec_can_hold_balance_addr</a>(addr);
+</code></pre>
+
+
+DesignatedDealer have balances [[D5]][ROLE].
+
+
+<pre><code><b>invariant</b> [<b>global</b>, isolated] <b>forall</b> addr: address <b>where</b> <a href="Roles.md#0x1_Roles_spec_has_designated_dealer_role_addr">spec_has_designated_dealer_role_addr</a>(addr):
+    <a href="Roles.md#0x1_Roles_spec_can_hold_balance_addr">spec_can_hold_balance_addr</a>(addr);
+</code></pre>
+
+
+ParentVASP have balances [[D6]][ROLE].
+
+
+<pre><code><b>invariant</b> [<b>global</b>, isolated] <b>forall</b> addr: address <b>where</b> <a href="Roles.md#0x1_Roles_spec_has_parent_VASP_role_addr">spec_has_parent_VASP_role_addr</a>(addr):
+    <a href="Roles.md#0x1_Roles_spec_can_hold_balance_addr">spec_can_hold_balance_addr</a>(addr);
+</code></pre>
+
+
+ChildVASP have balances [[D7]][ROLE].
+
+
+<pre><code><b>invariant</b> [<b>global</b>, isolated] <b>forall</b> addr: address <b>where</b> <a href="Roles.md#0x1_Roles_spec_has_child_VASP_role_addr">spec_has_child_VASP_role_addr</a>(addr):
+    <a href="Roles.md#0x1_Roles_spec_can_hold_balance_addr">spec_can_hold_balance_addr</a>(addr);
+</code></pre>
+
+
+
+<a name="@Helper_Functions_and_Schemas_4"></a>
+
+### Helper Functions and Schemas
+
+
+
+<a name="0x1_Roles_spec_get_role_id"></a>
+
+
+<pre><code><b>define</b> <a href="Roles.md#0x1_Roles_spec_get_role_id">spec_get_role_id</a>(account: signer): u64 {
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_spec_address_of">Signer::spec_address_of</a>(account);
+    <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id
+}
+<a name="0x1_Roles_spec_has_role_id_addr"></a>
+<b>define</b> <a href="Roles.md#0x1_Roles_spec_has_role_id_addr">spec_has_role_id_addr</a>(addr: address, role_id: u64): bool {
+    <b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr) && <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id == role_id
+}
+<a name="0x1_Roles_spec_has_diem_root_role_addr"></a>
+<b>define</b> <a href="Roles.md#0x1_Roles_spec_has_diem_root_role_addr">spec_has_diem_root_role_addr</a>(addr: address): bool {
+    <a href="Roles.md#0x1_Roles_spec_has_role_id_addr">spec_has_role_id_addr</a>(addr, <a href="Roles.md#0x1_Roles_DIEM_ROOT_ROLE_ID">DIEM_ROOT_ROLE_ID</a>)
+}
+<a name="0x1_Roles_spec_has_treasury_compliance_role_addr"></a>
+<b>define</b> <a href="Roles.md#0x1_Roles_spec_has_treasury_compliance_role_addr">spec_has_treasury_compliance_role_addr</a>(addr: address): bool {
+    <a href="Roles.md#0x1_Roles_spec_has_role_id_addr">spec_has_role_id_addr</a>(addr, <a href="Roles.md#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a>)
+}
+<a name="0x1_Roles_spec_has_designated_dealer_role_addr"></a>
+<b>define</b> <a href="Roles.md#0x1_Roles_spec_has_designated_dealer_role_addr">spec_has_designated_dealer_role_addr</a>(addr: address): bool {
+    <a href="Roles.md#0x1_Roles_spec_has_role_id_addr">spec_has_role_id_addr</a>(addr, <a href="Roles.md#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a>)
+}
+<a name="0x1_Roles_spec_has_validator_role_addr"></a>
+<b>define</b> <a href="Roles.md#0x1_Roles_spec_has_validator_role_addr">spec_has_validator_role_addr</a>(addr: address): bool {
+    <a href="Roles.md#0x1_Roles_spec_has_role_id_addr">spec_has_role_id_addr</a>(addr, <a href="Roles.md#0x1_Roles_VALIDATOR_ROLE_ID">VALIDATOR_ROLE_ID</a>)
+}
+<a name="0x1_Roles_spec_has_validator_operator_role_addr"></a>
+<b>define</b> <a href="Roles.md#0x1_Roles_spec_has_validator_operator_role_addr">spec_has_validator_operator_role_addr</a>(addr: address): bool {
+    <a href="Roles.md#0x1_Roles_spec_has_role_id_addr">spec_has_role_id_addr</a>(addr, <a href="Roles.md#0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID">VALIDATOR_OPERATOR_ROLE_ID</a>)
+}
+<a name="0x1_Roles_spec_has_parent_VASP_role_addr"></a>
+<b>define</b> <a href="Roles.md#0x1_Roles_spec_has_parent_VASP_role_addr">spec_has_parent_VASP_role_addr</a>(addr: address): bool {
+    <a href="Roles.md#0x1_Roles_spec_has_role_id_addr">spec_has_role_id_addr</a>(addr, <a href="Roles.md#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a>)
+}
+<a name="0x1_Roles_spec_has_child_VASP_role_addr"></a>
+<b>define</b> <a href="Roles.md#0x1_Roles_spec_has_child_VASP_role_addr">spec_has_child_VASP_role_addr</a>(addr: address): bool {
+    <a href="Roles.md#0x1_Roles_spec_has_role_id_addr">spec_has_role_id_addr</a>(addr, <a href="Roles.md#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a>)
+}
+<a name="0x1_Roles_spec_can_hold_balance_addr"></a>
+<b>define</b> <a href="Roles.md#0x1_Roles_spec_can_hold_balance_addr">spec_can_hold_balance_addr</a>(addr: address): bool {
+    <a href="Roles.md#0x1_Roles_spec_has_parent_VASP_role_addr">spec_has_parent_VASP_role_addr</a>(addr) ||
+        <a href="Roles.md#0x1_Roles_spec_has_child_VASP_role_addr">spec_has_child_VASP_role_addr</a>(addr) ||
+        <a href="Roles.md#0x1_Roles_spec_has_designated_dealer_role_addr">spec_has_designated_dealer_role_addr</a>(addr)
+}
+</code></pre>
+
+
+
+
+<a name="0x1_Roles_ThisRoleIsNotNewlyPublished"></a>
+
+
+<pre><code><b>schema</b> <a href="Roles.md#0x1_Roles_ThisRoleIsNotNewlyPublished">ThisRoleIsNotNewlyPublished</a> {
+    this: u64;
+    <b>ensures</b> <b>forall</b> addr: address <b>where</b> <b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr) && <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id == this:
+        <b>old</b>(<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr)) && <b>old</b>(<b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id) == this;
+}
+</code></pre>
+
+
+
+
+<a name="0x1_Roles_AbortsIfNotDiemRoot"></a>
+
+
+<pre><code><b>schema</b> <a href="Roles.md#0x1_Roles_AbortsIfNotDiemRoot">AbortsIfNotDiemRoot</a> {
+    account: signer;
+    <b>include</b> <a href="CoreAddresses.md#0x1_CoreAddresses_AbortsIfNotDiemRoot">CoreAddresses::AbortsIfNotDiemRoot</a>;
+    <a name="0x1_Roles_addr$37"></a>
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_spec_address_of">Signer::spec_address_of</a>(account);
+    <b>aborts_if</b> !<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr) <b>with</b> <a href="Errors.md#0x1_Errors_NOT_PUBLISHED">Errors::NOT_PUBLISHED</a>;
+    <b>aborts_if</b> <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id != <a href="Roles.md#0x1_Roles_DIEM_ROOT_ROLE_ID">DIEM_ROOT_ROLE_ID</a> <b>with</b> <a href="Errors.md#0x1_Errors_REQUIRES_ROLE">Errors::REQUIRES_ROLE</a>;
+}
+</code></pre>
+
+
+
+
+<a name="0x1_Roles_AbortsIfNotTreasuryCompliance"></a>
+
+
+<pre><code><b>schema</b> <a href="Roles.md#0x1_Roles_AbortsIfNotTreasuryCompliance">AbortsIfNotTreasuryCompliance</a> {
+    account: signer;
+    <b>include</b> <a href="CoreAddresses.md#0x1_CoreAddresses_AbortsIfNotTreasuryCompliance">CoreAddresses::AbortsIfNotTreasuryCompliance</a>;
+    <a name="0x1_Roles_addr$38"></a>
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_spec_address_of">Signer::spec_address_of</a>(account);
+    <b>aborts_if</b> !<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr) <b>with</b> <a href="Errors.md#0x1_Errors_NOT_PUBLISHED">Errors::NOT_PUBLISHED</a>;
+    <b>aborts_if</b> <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id != <a href="Roles.md#0x1_Roles_TREASURY_COMPLIANCE_ROLE_ID">TREASURY_COMPLIANCE_ROLE_ID</a> <b>with</b> <a href="Errors.md#0x1_Errors_REQUIRES_ROLE">Errors::REQUIRES_ROLE</a>;
+}
+</code></pre>
+
+
+
+
+<a name="0x1_Roles_AbortsIfNotParentVasp"></a>
+
+
+<pre><code><b>schema</b> <a href="Roles.md#0x1_Roles_AbortsIfNotParentVasp">AbortsIfNotParentVasp</a> {
+    account: signer;
+    <a name="0x1_Roles_addr$39"></a>
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_spec_address_of">Signer::spec_address_of</a>(account);
+    <b>aborts_if</b> !<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr) <b>with</b> <a href="Errors.md#0x1_Errors_NOT_PUBLISHED">Errors::NOT_PUBLISHED</a>;
+    <b>aborts_if</b> <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id != <a href="Roles.md#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a> <b>with</b> <a href="Errors.md#0x1_Errors_REQUIRES_ROLE">Errors::REQUIRES_ROLE</a>;
+}
+</code></pre>
+
+
+
+
+<a name="0x1_Roles_AbortsIfNotChildVasp"></a>
+
+
+<pre><code><b>schema</b> <a href="Roles.md#0x1_Roles_AbortsIfNotChildVasp">AbortsIfNotChildVasp</a> {
+    account: address;
+    <b>aborts_if</b> !<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(account) <b>with</b> <a href="Errors.md#0x1_Errors_NOT_PUBLISHED">Errors::NOT_PUBLISHED</a>;
+    <b>aborts_if</b> <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(account).role_id != <a href="Roles.md#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a> <b>with</b> <a href="Errors.md#0x1_Errors_REQUIRES_ROLE">Errors::REQUIRES_ROLE</a>;
+}
+</code></pre>
+
+
+
+
+<a name="0x1_Roles_AbortsIfNotDesignatedDealer"></a>
+
+
+<pre><code><b>schema</b> <a href="Roles.md#0x1_Roles_AbortsIfNotDesignatedDealer">AbortsIfNotDesignatedDealer</a> {
+    account: signer;
+    <a name="0x1_Roles_addr$40"></a>
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_spec_address_of">Signer::spec_address_of</a>(account);
+    <b>aborts_if</b> !<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr) <b>with</b> <a href="Errors.md#0x1_Errors_NOT_PUBLISHED">Errors::NOT_PUBLISHED</a>;
+    <b>aborts_if</b> <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id != <a href="Roles.md#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a> <b>with</b> <a href="Errors.md#0x1_Errors_REQUIRES_ROLE">Errors::REQUIRES_ROLE</a>;
+}
+</code></pre>
+
+
+
+
+<a name="0x1_Roles_AbortsIfNotParentVaspOrDesignatedDealer"></a>
+
+
+<pre><code><b>schema</b> <a href="Roles.md#0x1_Roles_AbortsIfNotParentVaspOrDesignatedDealer">AbortsIfNotParentVaspOrDesignatedDealer</a> {
+    account: signer;
+    <a name="0x1_Roles_addr$41"></a>
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_spec_address_of">Signer::spec_address_of</a>(account);
+    <b>aborts_if</b> !<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr) <b>with</b> <a href="Errors.md#0x1_Errors_NOT_PUBLISHED">Errors::NOT_PUBLISHED</a>;
+    <a name="0x1_Roles_role_id$42"></a>
+    <b>let</b> role_id = <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id;
+    <b>aborts_if</b> role_id != <a href="Roles.md#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a> && role_id != <a href="Roles.md#0x1_Roles_DESIGNATED_DEALER_ROLE_ID">DESIGNATED_DEALER_ROLE_ID</a>
+        <b>with</b> <a href="Errors.md#0x1_Errors_REQUIRES_ROLE">Errors::REQUIRES_ROLE</a>;
+}
+</code></pre>
+
+
+
+
+<a name="0x1_Roles_AbortsIfNotParentVaspOrChildVasp"></a>
+
+
+<pre><code><b>schema</b> <a href="Roles.md#0x1_Roles_AbortsIfNotParentVaspOrChildVasp">AbortsIfNotParentVaspOrChildVasp</a> {
+    account: signer;
+    <a name="0x1_Roles_addr$43"></a>
+    <b>let</b> addr = <a href="Signer.md#0x1_Signer_spec_address_of">Signer::spec_address_of</a>(account);
+    <b>aborts_if</b> !<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr) <b>with</b> <a href="Errors.md#0x1_Errors_NOT_PUBLISHED">Errors::NOT_PUBLISHED</a>;
+    <a name="0x1_Roles_role_id$44"></a>
+    <b>let</b> role_id = <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(addr).role_id;
+    <b>aborts_if</b> role_id != <a href="Roles.md#0x1_Roles_PARENT_VASP_ROLE_ID">PARENT_VASP_ROLE_ID</a> && role_id != <a href="Roles.md#0x1_Roles_CHILD_VASP_ROLE_ID">CHILD_VASP_ROLE_ID</a>
+        <b>with</b> <a href="Errors.md#0x1_Errors_REQUIRES_ROLE">Errors::REQUIRES_ROLE</a>;
+}
+</code></pre>
+
+
+
+
+<a name="0x1_Roles_AbortsIfNotValidator"></a>
+
+
+<pre><code><b>schema</b> <a href="Roles.md#0x1_Roles_AbortsIfNotValidator">AbortsIfNotValidator</a> {
+    validator_addr: address;
+    <b>aborts_if</b> !<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(validator_addr) <b>with</b> <a href="Errors.md#0x1_Errors_NOT_PUBLISHED">Errors::NOT_PUBLISHED</a>;
+    <b>aborts_if</b> <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(validator_addr).role_id != <a href="Roles.md#0x1_Roles_VALIDATOR_ROLE_ID">VALIDATOR_ROLE_ID</a> <b>with</b> <a href="Errors.md#0x1_Errors_REQUIRES_ROLE">Errors::REQUIRES_ROLE</a>;
+}
+</code></pre>
+
+
+
+
+<a name="0x1_Roles_AbortsIfNotValidatorOperator"></a>
+
+
+<pre><code><b>schema</b> <a href="Roles.md#0x1_Roles_AbortsIfNotValidatorOperator">AbortsIfNotValidatorOperator</a> {
+    validator_operator_addr: address;
+    <b>aborts_if</b> !<b>exists</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(validator_operator_addr) <b>with</b> <a href="Errors.md#0x1_Errors_NOT_PUBLISHED">Errors::NOT_PUBLISHED</a>;
+    <b>aborts_if</b> <b>global</b>&lt;<a href="Roles.md#0x1_Roles_RoleId">RoleId</a>&gt;(validator_operator_addr).role_id != <a href="Roles.md#0x1_Roles_VALIDATOR_OPERATOR_ROLE_ID">VALIDATOR_OPERATOR_ROLE_ID</a>
+        <b>with</b> <a href="Errors.md#0x1_Errors_REQUIRES_ROLE">Errors::REQUIRES_ROLE</a>;
+}
+</code></pre>
+
+
+[//]: # ("File containing references which can be used from documentation")
+[ACCESS_CONTROL]: https://github.com/diem/dip/blob/master/dips/dip-2.md
+[ROLE]: https://github.com/diem/dip/blob/master/dips/dip-2.md#roles
+[PERMISSION]: https://github.com/diem/dip/blob/master/dips/dip-2.md#permissions

@@ -1,7 +1,7 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use libra_crypto::HashValue;
+use diem_crypto::HashValue;
 use move_vm_types::{
     gas_schedule::NativeCostIndex,
     loaded_data::runtime_types::Type,
@@ -10,13 +10,13 @@ use move_vm_types::{
 };
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
-use vm::errors::VMResult;
+use vm::errors::PartialVMResult;
 
 pub fn native_sha2_256(
     context: &impl NativeContext,
     _ty_args: Vec<Type>,
     mut arguments: VecDeque<Value>,
-) -> VMResult<NativeResult> {
+) -> PartialVMResult<NativeResult> {
     debug_assert!(_ty_args.is_empty());
     debug_assert!(arguments.len() == 1);
 
@@ -37,7 +37,7 @@ pub fn native_sha3_256(
     context: &impl NativeContext,
     _ty_args: Vec<Type>,
     mut arguments: VecDeque<Value>,
-) -> VMResult<NativeResult> {
+) -> PartialVMResult<NativeResult> {
     debug_assert!(_ty_args.is_empty());
     debug_assert!(arguments.len() == 1);
 

@@ -1,50 +1,155 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
     counters,
-    errors::JsonRpcError,
+    errors::{is_internal_error, JsonRpcError},
     methods::{build_registry, JsonRpcRequest, JsonRpcService, RpcRegistry},
+    response::{JsonRpcResponse, X_DIEM_CHAIN_ID, X_DIEM_TIMESTAMP_USEC_ID, X_DIEM_VERSION_ID},
 };
+use diem_config::config::{NodeConfig, RoleType};
+use diem_logger::{debug, Schema};
+use diem_mempool::MempoolClientSender;
+use diem_types::{chain_id::ChainId, ledger_info::LedgerInfoWithSignatures};
 use futures::future::join_all;
-use libra_config::config::{NodeConfig, RoleType};
-use libra_mempool::MempoolClientSender;
-use libra_types::ledger_info::LedgerInfoWithSignatures;
+use rand::{rngs::OsRng, RngCore};
 use serde_json::{map::Map, Value};
 use std::{net::SocketAddr, sync::Arc};
 use storage_interface::DbReader;
 use tokio::runtime::{Builder, Runtime};
 use warp::{
+    http::header,
     reject::{self, Reject},
-    Filter,
+    Filter, Reply,
 };
+
+// Counter labels for runtime metrics
+const LABEL_FAIL: &str = "fail";
+const LABEL_SUCCESS: &str = "success";
+const LABEL_BATCH: &str = "batch";
+const LABEL_SINGLE: &str = "single";
+
+#[derive(Schema)]
+struct HttpRequestLog<'a> {
+    #[schema(display)]
+    remote_addr: Option<std::net::SocketAddr>,
+    method: String,
+    path: String,
+    status: u16,
+    referer: Option<&'a str>,
+    user_agent: Option<&'a str>,
+    #[schema(debug)]
+    elapsed: std::time::Duration,
+    forwarded: Option<&'a str>,
+}
+
+#[derive(Schema)]
+struct RpcRequestLog {
+    trace_id: String,
+    request: Value,
+}
+
+#[derive(Schema)]
+struct RpcResponseLog<'a> {
+    trace_id: String,
+    is_batch: bool,
+    response_error: bool,
+    response: &'a JsonRpcResponse,
+}
+
+#[macro_export]
+macro_rules! log_response {
+    ($trace_id: expr, $resp: expr, $is_batch: expr) => {
+        let log = RpcResponseLog {
+            trace_id: $trace_id,
+            is_batch: $is_batch,
+            response_error: $resp.error.is_some(),
+            response: $resp,
+        };
+        match &$resp.error {
+            Some(error) if is_internal_error(&error.code) => {
+                diem_logger::error!(log)
+            }
+            _ => diem_logger::trace!(log),
+        }
+    };
+}
 
 /// Creates HTTP server (warp-based) that serves JSON RPC requests
 /// Returns handle to corresponding Tokio runtime
 pub fn bootstrap(
     address: SocketAddr,
-    libra_db: Arc<dyn DbReader>,
+    batch_size_limit: u16,
+    page_size_limit: u16,
+    content_len_limit: usize,
+    diem_db: Arc<dyn DbReader>,
     mp_sender: MempoolClientSender,
     role: RoleType,
+    chain_id: ChainId,
 ) -> Runtime {
     let runtime = Builder::new()
-        .thread_name("rpc-")
+        .thread_name("json-rpc")
         .threaded_scheduler()
         .enable_all()
         .build()
-        .expect("[rpc] failed to create runtime");
+        .expect("[json-rpc] failed to create runtime");
 
     let registry = Arc::new(build_registry());
-    let service = JsonRpcService::new(libra_db, mp_sender, role);
+    let service = JsonRpcService::new(
+        diem_db,
+        mp_sender,
+        role,
+        chain_id,
+        batch_size_limit,
+        page_size_limit,
+    );
 
-    let handler = warp::any()
-        .and(warp::path::end())
+    let base_route = warp::any()
         .and(warp::post())
         .and(warp::header::exact("content-type", "application/json"))
+        .and(warp::body::content_length_limit(content_len_limit as u64))
         .and(warp::body::json())
         .and(warp::any().map(move || service.clone()))
         .and(warp::any().map(move || Arc::clone(&registry)))
-        .and_then(rpc_endpoint);
+        .and_then(rpc_endpoint)
+        .with(warp::log::custom(|info| {
+            debug!(HttpRequestLog {
+                remote_addr: info.remote_addr(),
+                method: info.method().to_string(),
+                path: info.path().to_string(),
+                status: info.status().as_u16(),
+                referer: info.referer(),
+                user_agent: info.user_agent(),
+                elapsed: info.elapsed(),
+                forwarded: info
+                    .request_headers()
+                    .get(header::FORWARDED)
+                    .and_then(|v| v.to_str().ok())
+            })
+        }))
+        // CORS is required for full node server to accept requests from different domain web pages.
+        // It needs to be configured for the json-rpc request accepting method and headers.
+        // Technically it's fine for any headers, but for simplicity we only set must have header
+        // content-type.
+        .with(
+            warp::cors()
+                .allow_any_origin()
+                .allow_methods(vec!["POST"])
+                .allow_headers(vec![header::CONTENT_TYPE]),
+        );
+
+    // For now we still allow user to use "/", but user should start to move to "/v1" soon
+    let route_root = warp::path::end().and(base_route.clone());
+
+    let route_v1 = warp::path::path("v1")
+        .and(warp::path::end())
+        .and(base_route);
+
+    let health_route = warp::path!("-" / "healthy")
+        .and(warp::path::end())
+        .map(|| "diem-node:ok");
+
+    let full_route = health_route.or(route_v1.or(route_root));
 
     // Ensure that we actually bind to the socket first before spawning the
     // server tasks. This helps in tests to prevent races where a client attempts
@@ -53,7 +158,7 @@ pub fn bootstrap(
     //
     // Note: we need to enter the runtime context first to actually bind, since
     //       tokio TcpListener can only be bound inside a tokio context.
-    let server = runtime.enter(move || warp::serve(handler).bind(address));
+    let server = runtime.enter(move || warp::serve(full_route).bind(address));
     runtime.handle().spawn(server);
     runtime
 }
@@ -61,41 +166,128 @@ pub fn bootstrap(
 /// Creates JSON RPC endpoint by given node config
 pub fn bootstrap_from_config(
     config: &NodeConfig,
-    libra_db: Arc<dyn DbReader>,
+    chain_id: ChainId,
+    diem_db: Arc<dyn DbReader>,
     mp_sender: MempoolClientSender,
 ) -> Runtime {
-    bootstrap(config.rpc.address, libra_db, mp_sender, config.base.role)
+    bootstrap(
+        config.json_rpc.address,
+        config.json_rpc.batch_size_limit,
+        config.json_rpc.page_size_limit,
+        config.json_rpc.content_length_limit,
+        diem_db,
+        mp_sender,
+        config.base.role,
+        chain_id,
+    )
 }
 
 /// JSON RPC entry point
 /// Handles all incoming rpc requests
 /// Performs routing based on methods defined in `registry`
-async fn rpc_endpoint(
+pub(crate) async fn rpc_endpoint(
     data: Value,
     service: JsonRpcService,
     registry: Arc<RpcRegistry>,
-) -> Result<Box<dyn warp::Reply>, warp::Rejection> {
+) -> Result<warp::reply::Response, warp::Rejection> {
+    let label = match data {
+        Value::Array(_) => LABEL_BATCH,
+        _ => LABEL_SINGLE,
+    };
+    counters::RPC_REQUESTS.with_label_values(&[label]).inc();
+    let timer = counters::RPC_REQUEST_LATENCY
+        .with_label_values(&[label])
+        .start_timer();
+    let ret = rpc_endpoint_without_metrics(data, service, registry).await;
+    timer.stop_and_record();
+    ret
+}
+
+async fn rpc_endpoint_without_metrics(
+    data: Value,
+    service: JsonRpcService,
+    registry: Arc<RpcRegistry>,
+) -> Result<warp::reply::Response, warp::Rejection> {
     // take snapshot of latest version of DB to be used across all requests, especially for batched requests
     let ledger_info = service
         .get_latest_ledger_info()
         .map_err(|_| reject::custom(DatabaseError))?;
-    if let Value::Array(requests) = data {
-        // batch API call
-        let futures = requests.into_iter().map(|req| {
-            rpc_request_handler(
-                req,
-                service.clone(),
-                Arc::clone(&registry),
-                ledger_info.clone(),
-            )
-        });
-        let responses = join_all(futures).await;
-        Ok(Box::new(warp::reply::json(&Value::Array(responses))))
+
+    let mut rng = OsRng;
+    let trace_id = format!("{:x}", rng.next_u64());
+    debug!(RpcRequestLog {
+        trace_id: trace_id.clone(),
+        request: data.clone(),
+    });
+    let chain_id = service.chain_id();
+    let latest_ledger_version = ledger_info.ledger_info().version();
+    let latest_ledger_timestamp_usecs = ledger_info.ledger_info().timestamp_usecs();
+
+    let resp = Ok(if let Value::Array(requests) = data {
+        match service.validate_batch_size_limit(requests.len()) {
+            Ok(_) => {
+                // batch API call
+                let futures = requests.into_iter().map(|req| {
+                    rpc_request_handler(
+                        req,
+                        service.clone(),
+                        Arc::clone(&registry),
+                        ledger_info.clone(),
+                        LABEL_BATCH,
+                        trace_id.clone(),
+                    )
+                });
+                let responses = join_all(futures).await;
+                for resp in &responses {
+                    log_response!(trace_id.clone(), &resp, true);
+                }
+                warp::reply::json(&responses)
+            }
+            Err(err) => {
+                let mut resp = JsonRpcResponse::new(
+                    chain_id,
+                    latest_ledger_version,
+                    latest_ledger_timestamp_usecs,
+                );
+                set_response_error(&mut resp, err, LABEL_BATCH, "unknown");
+                log_response!(trace_id.clone(), &resp, true);
+
+                warp::reply::json(&resp)
+            }
+        }
     } else {
         // single API call
-        let resp = rpc_request_handler(data, service, registry, ledger_info).await;
-        Ok(Box::new(warp::reply::json(&resp)))
-    }
+        let resp = rpc_request_handler(
+            data,
+            service,
+            registry,
+            ledger_info,
+            LABEL_SINGLE,
+            trace_id.clone(),
+        )
+        .await;
+        log_response!(trace_id, &resp, false);
+
+        warp::reply::json(&resp)
+    });
+
+    let mut http_response = resp.into_response();
+    let headers = http_response.headers_mut();
+
+    headers.insert(
+        X_DIEM_CHAIN_ID,
+        header::HeaderValue::from_str(&chain_id.id().to_string()).unwrap(),
+    );
+    headers.insert(
+        X_DIEM_VERSION_ID,
+        header::HeaderValue::from_str(&latest_ledger_version.to_string()).unwrap(),
+    );
+    headers.insert(
+        X_DIEM_TIMESTAMP_USEC_ID,
+        header::HeaderValue::from_str(&latest_ledger_timestamp_usecs.to_string()).unwrap(),
+    );
+
+    Ok(http_response)
 }
 
 /// Handler of single RPC request
@@ -105,51 +297,46 @@ async fn rpc_request_handler(
     service: JsonRpcService,
     registry: Arc<RpcRegistry>,
     ledger_info: LedgerInfoWithSignatures,
-) -> Value {
+    request_type_label: &str,
+    trace_id: String,
+) -> JsonRpcResponse {
     let request: Map<String, Value>;
-    let mut response = Map::new();
-
-    // set defaults: protocol version to 2.0, request id to null
-    response.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
-    response.insert("id".to_string(), Value::Null);
+    let mut response = JsonRpcResponse::new(
+        service.chain_id(),
+        ledger_info.ledger_info().version(),
+        ledger_info.ledger_info().timestamp_usecs(),
+    );
 
     match req {
         Value::Object(data) => {
             request = data;
         }
         _ => {
-            response.insert(
-                "error".to_string(),
-                JsonRpcError::invalid_request().serialize(),
+            set_response_error(
+                &mut response,
+                JsonRpcError::invalid_format(),
+                request_type_label,
+                "unknown",
             );
-            counters::INVALID_REQUESTS
-                .with_label_values(&["invalid_format"])
-                .inc();
-            return Value::Object(response);
+            return response;
         }
     }
 
     // parse request id
     match parse_request_id(&request) {
         Ok(request_id) => {
-            response.insert("id".to_string(), request_id);
+            response.id = Some(request_id);
         }
         Err(err) => {
-            response.insert("error".to_string(), err.serialize());
-            counters::INVALID_REQUESTS
-                .with_label_values(&["invalid_format"])
-                .inc();
-            return Value::Object(response);
+            set_response_error(&mut response, err, request_type_label, "unknown");
+            return response;
         }
     };
 
     // verify protocol version
     if let Err(err) = verify_protocol(&request) {
-        response.insert("error".to_string(), err.serialize());
-        counters::INVALID_REQUESTS
-            .with_label_values(&["invalid_format"])
-            .inc();
-        return Value::Object(response);
+        set_response_error(&mut response, err, request_type_label, "unknown");
+        return response;
     }
 
     // parse parameters
@@ -159,66 +346,97 @@ async fn rpc_request_handler(
             params = parameters.to_vec();
         }
         _ => {
-            response.insert(
-                "error".to_string(),
-                JsonRpcError::invalid_params().serialize(),
+            set_response_error(
+                &mut response,
+                JsonRpcError::invalid_params(None),
+                request_type_label,
+                "unknown",
             );
-            counters::INVALID_REQUESTS
-                .with_label_values(&["invalid_params"])
-                .inc();
-            return Value::Object(response);
+            return response;
         }
     }
 
     let request_params = JsonRpcRequest {
+        trace_id,
         ledger_info,
         params,
     };
     // get rpc handler
     match request.get("method") {
         Some(Value::String(name)) => match registry.get(name) {
-            Some(handler) => match handler(service, request_params).await {
-                Ok(result) => {
-                    response.insert("result".to_string(), result);
-                    counters::REQUESTS
-                        .with_label_values(&[name, "success"])
-                        .inc();
-                }
-                Err(err) => {
-                    // check for custom error
-                    if let Some(custom_error) = err.downcast_ref::<JsonRpcError>() {
-                        response.insert("error".to_string(), custom_error.clone().serialize());
-                    } else {
-                        response.insert(
-                            "error".to_string(),
-                            JsonRpcError::internal_error(err.to_string()).serialize(),
-                        );
+            Some(handler) => {
+                let timer = counters::METHOD_LATENCY
+                    .with_label_values(&[request_type_label, name])
+                    .start_timer();
+                match handler(service, request_params).await {
+                    Ok(result) => {
+                        response.result = Some(result);
+                        counters::REQUESTS
+                            .with_label_values(&[request_type_label, name, LABEL_SUCCESS])
+                            .inc();
                     }
-                    counters::REQUESTS.with_label_values(&[name, "fail"]).inc();
+                    Err(err) => {
+                        // check for custom error
+                        set_response_error(
+                            &mut response,
+                            err.downcast_ref::<JsonRpcError>()
+                                .cloned()
+                                .unwrap_or_else(|| JsonRpcError::internal_error(err.to_string())),
+                            request_type_label,
+                            &name,
+                        );
+                        counters::REQUESTS
+                            .with_label_values(&[request_type_label, name, LABEL_FAIL])
+                            .inc();
+                    }
                 }
-            },
-            None => {
-                response.insert(
-                    "error".to_string(),
-                    JsonRpcError::method_not_found().serialize(),
-                );
-                counters::INVALID_REQUESTS
-                    .with_label_values(&["method_not_found"])
-                    .inc();
+                timer.stop_and_record();
             }
+            None => set_response_error(
+                &mut response,
+                JsonRpcError::method_not_found(),
+                request_type_label,
+                "not_found",
+            ),
         },
-        _ => {
-            response.insert(
-                "error".to_string(),
-                JsonRpcError::invalid_request().serialize(),
-            );
-            counters::INVALID_REQUESTS
-                .with_label_values(&["invalid_method"])
-                .inc();
-        }
+        _ => set_response_error(
+            &mut response,
+            JsonRpcError::method_not_found(),
+            request_type_label,
+            "not_found",
+        ),
     }
 
-    Value::Object(response)
+    response
+}
+
+// Sets the JSON RPC error value for a given response.
+// If a counter label is supplied, also increments the invalid request counter using the label,
+fn set_response_error(
+    response: &mut JsonRpcResponse,
+    error: JsonRpcError,
+    request_type: &str,
+    method: &str,
+) {
+    let err_code = error.code;
+    if is_internal_error(&error.code) {
+        counters::INTERNAL_ERRORS
+            .with_label_values(&[request_type, method, &err_code.to_string()])
+            .inc();
+    } else {
+        let label = match err_code {
+            -32600 => "invalid_request",
+            -32601 => "method_not_found",
+            -32602 => "invalid_params",
+            -32604 => "invalid_format",
+            _ => "unexpected_code",
+        };
+        counters::INVALID_REQUESTS
+            .with_label_values(&[request_type, method, label])
+            .inc();
+    }
+
+    response.error = Some(error);
 }
 
 fn parse_request_id(request: &Map<String, Value>) -> Result<Value, JsonRpcError> {
@@ -227,7 +445,7 @@ fn parse_request_id(request: &Map<String, Value>) -> Result<Value, JsonRpcError>
             if req_id.is_string() || req_id.is_number() || req_id.is_null() {
                 Ok(req_id.clone())
             } else {
-                Err(JsonRpcError::invalid_request())
+                Err(JsonRpcError::invalid_format())
             }
         }
         None => Ok(Value::Null),

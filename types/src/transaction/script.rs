@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::transaction::transaction_argument::TransactionArgument;
@@ -12,6 +12,7 @@ pub const SCRIPT_HASH_LENGTH: usize = 32;
 /// Call a Move script.
 #[derive(Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Script {
+    #[serde(with = "serde_bytes")]
     code: Vec<u8>,
     ty_args: Vec<TypeTag>,
     args: Vec<TransactionArgument>,
@@ -47,6 +48,7 @@ impl fmt::Debug for Script {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Script")
             .field("code", &hex::encode(&self.code))
+            .field("ty_args", &self.ty_args)
             .field("args", &self.args)
             .finish()
     }
@@ -60,6 +62,7 @@ pub struct ScriptABI {
     /// Some text comment.
     doc: String,
     /// The `code` value to set in the `Script` object.
+    #[serde(with = "serde_bytes")]
     code: Vec<u8>,
     /// The names of the type arguments.
     ty_args: Vec<TypeArgumentABI>,

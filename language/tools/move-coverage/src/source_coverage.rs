@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
@@ -33,7 +33,7 @@ pub struct SourceCoverageBuilder {
     uncovered_locations: BTreeMap<Identifier, FunctionSourceCoverage>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Eq, PartialEq, Ord, PartialOrd)]
 pub enum AbstractSegment {
     Bounded { start: u32, end: u32 },
     BoundedRight { end: u32 },
@@ -60,7 +60,8 @@ impl SourceCoverageBuilder {
         source_map: &SourceMap<Loc>,
     ) -> Self {
         let module_name = module.self_id();
-        let module_map = coverage_map
+        let unified_exec_map = coverage_map.to_unified_exec_map();
+        let module_map = unified_exec_map
             .module_maps
             .get(&(*module_name.address(), module_name.name().to_owned()));
 
@@ -80,7 +81,7 @@ impl SourceCoverageBuilder {
                         uncovered_locations: Vec::new(),
                     }),
                     Some(code_unit) => {
-                        module_map.and_then(|fn_map| match fn_map.function_maps.get(&fn_name) {
+                        module_map.map(|fn_map| match fn_map.function_maps.get(&fn_name) {
                             None => {
                                 let function_map = source_map
                                     .get_function_source_map(function_def_idx)
@@ -88,10 +89,10 @@ impl SourceCoverageBuilder {
                                 let mut uncovered_locations = vec![function_map.decl_location];
                                 uncovered_locations.extend(function_map.code_map.values());
 
-                                Some(FunctionSourceCoverage {
+                                FunctionSourceCoverage {
                                     fn_is_native: false,
                                     uncovered_locations,
-                                })
+                                }
                             }
                             Some(function_coverage) => {
                                 let uncovered_locations: Vec<_> = (0..code_unit.code.len())
@@ -110,10 +111,10 @@ impl SourceCoverageBuilder {
                                         }
                                     })
                                     .collect();
-                                Some(FunctionSourceCoverage {
+                                FunctionSourceCoverage {
                                     fn_is_native: false,
                                     uncovered_locations,
-                                })
+                                }
                             }
                         })
                     }
@@ -145,10 +146,15 @@ impl SourceCoverageBuilder {
                     let segments = uncovered_segments
                         .entry(start_line)
                         .or_insert_with(Vec::new);
-                    segments.push(AbstractSegment::Bounded {
+                    let segment = AbstractSegment::Bounded {
                         start: start_loc.column.0,
                         end: end_loc.column.0,
-                    });
+                    };
+                    // TODO: There is some issue with the source map where we have multiple spans
+                    // from different functions. This can be seen in the source map for `Roles.move`
+                    if !segments.contains(&segment) {
+                        segments.push(segment);
+                    }
                 } else {
                     let first_segment = uncovered_segments
                         .entry(start_line)
@@ -221,7 +227,7 @@ impl SourceCoverage {
             for string_segment in line.iter() {
                 match string_segment {
                     StringSegment::Covered(s) => write!(output_writer, "{}", s.green())?,
-                    StringSegment::Uncovered(s) => write!(output_writer, "{}", s.red())?,
+                    StringSegment::Uncovered(s) => write!(output_writer, "{}", s.bold().red())?,
                 }
             }
             writeln!(output_writer)?;

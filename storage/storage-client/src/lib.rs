@@ -1,15 +1,17 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
 
 use anyhow::Result;
-use libra_crypto::HashValue;
-use libra_secure_net::NetworkClient;
-use libra_types::{
+use diem_crypto::HashValue;
+use diem_infallible::Mutex;
+use diem_logger::warn;
+use diem_secure_net::NetworkClient;
+use diem_types::{
     account_address::AccountAddress,
     account_state_blob::{AccountStateBlob, AccountStateWithProof},
-    contract_event::ContractEvent,
+    contract_event::{ContractEvent, EventWithProof},
     epoch_change::EpochChangeProof,
     event::EventKey,
     ledger_info::LedgerInfoWithSignatures,
@@ -17,10 +19,10 @@ use libra_types::{
     transaction::{TransactionListWithProof, TransactionToCommit, TransactionWithProof, Version},
 };
 use serde::de::DeserializeOwned;
-use std::{net::SocketAddr, sync::Mutex};
+use std::net::SocketAddr;
 use storage_interface::{
-    DbReader, DbWriter, Error, GetAccountStateWithProofByVersionRequest, SaveTransactionsRequest,
-    StartupInfo, StorageRequest, TreeState,
+    DbReader, DbWriter, Error, GetAccountStateWithProofByVersionRequest, Order,
+    SaveTransactionsRequest, StartupInfo, StorageRequest, TreeState,
 };
 
 pub struct StorageClient {
@@ -28,18 +30,31 @@ pub struct StorageClient {
 }
 
 impl StorageClient {
-    pub fn new(server_address: &SocketAddr) -> Self {
+    pub fn new(server_address: &SocketAddr, timeout: u64) -> Self {
         Self {
-            network_client: Mutex::new(NetworkClient::new(*server_address)),
+            network_client: Mutex::new(NetworkClient::new("storage", *server_address, timeout)),
         }
     }
 
+    fn process_one_message(&self, input: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut client = self.network_client.lock();
+        client.write(&input)?;
+        client.read().map_err(|e| e.into())
+    }
+
     fn request<T: DeserializeOwned>(&self, input: StorageRequest) -> std::result::Result<T, Error> {
-        let input_message = lcs::to_bytes(&input)?;
-        let mut client = self.network_client.lock().unwrap();
-        client.write(&input_message)?;
-        let result = client.read()?;
-        lcs::from_bytes(&result)?
+        let input_message = bcs::to_bytes(&input)?;
+        let result = loop {
+            match self.process_one_message(&input_message) {
+                Err(err) => warn!(
+                    error = ?err,
+                    request = ?input,
+                    "Failed to communicate with storage service.",
+                ),
+                Ok(value) => break value,
+            }
+        };
+        bcs::from_bytes(&result)?
     }
 
     pub fn get_account_state_with_proof_by_version(
@@ -120,10 +135,21 @@ impl DbReader for StorageClient {
         &self,
         _key: &EventKey,
         _start: u64,
-        _ascending: bool,
+        _order: Order,
         _limit: u64,
     ) -> Result<Vec<(u64, ContractEvent)>> {
         unimplemented!()
+    }
+
+    fn get_events_with_proofs(
+        &self,
+        _event_key: &EventKey,
+        _start: u64,
+        _order: Order,
+        _limit: u64,
+        _known_version: Option<u64>,
+    ) -> Result<Vec<EventWithProof>> {
+        unimplemented!();
     }
 
     fn get_state_proof(
@@ -171,6 +197,10 @@ impl DbReader for StorageClient {
     }
 
     fn get_epoch_ending_ledger_info(&self, _: u64) -> Result<LedgerInfoWithSignatures> {
+        unimplemented!()
+    }
+
+    fn get_block_timestamp(&self, _version: u64) -> Result<u64> {
         unimplemented!()
     }
 }

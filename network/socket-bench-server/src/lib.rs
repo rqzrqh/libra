@@ -1,18 +1,19 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
 
+use diem_config::network_id::NetworkContext;
+use diem_crypto::{test_utils::TEST_SEED, x25519, Uniform as _};
+use diem_logger::prelude::*;
+use diem_network_address::NetworkAddress;
+use diem_types::PeerId;
 use futures::{
     future::Future,
     io::{AsyncRead, AsyncWrite},
     sink::SinkExt,
     stream::{Stream, StreamExt},
 };
-use libra_crypto::{test_utils::TEST_SEED, x25519, Uniform as _};
-use libra_logger::prelude::*;
-use libra_network_address::NetworkAddress;
-use libra_types::PeerId;
 use memsocket::MemorySocket;
 use netcore::{
     compat::IoCompat,
@@ -22,11 +23,15 @@ use netcore::{
         Transport, TransportExt,
     },
 };
-use network::noise::{stream::NoiseStream, HandshakeAuthMode, NoiseUpgrader};
+use network::{
+    constants,
+    noise::{stream::NoiseStream, HandshakeAuthMode, NoiseUpgrader},
+    protocols::wire::messaging::v1::network_message_frame_codec,
+};
 use rand::prelude::*;
-use std::{env, ffi::OsString, sync::Arc};
+use std::{env, ffi::OsString, io, sync::Arc};
 use tokio::runtime::Handle;
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
+use tokio_util::codec::Framed;
 
 #[derive(Debug)]
 pub struct Args {
@@ -84,14 +89,15 @@ pub fn build_memsocket_noise_transport() -> impl Transport<Output = NoiseStream<
         let public = private.public_key();
         let peer_id = PeerId::from_identity_public_key(public);
         let noise_config = Arc::new(NoiseUpgrader::new(
-            peer_id,
+            NetworkContext::mock_with_peer_id(peer_id),
             private,
-            HandshakeAuthMode::ServerOnly,
+            HandshakeAuthMode::server_only(),
         ));
         let remote_public_key = addr.find_noise_proto();
         let (_remote_static_key, socket) = noise_config
             .upgrade_with_noise(socket, origin, remote_public_key)
-            .await?;
+            .await
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
         Ok(socket)
     })
 }
@@ -104,14 +110,15 @@ pub fn build_tcp_noise_transport() -> impl Transport<Output = NoiseStream<TcpSoc
         let public = private.public_key();
         let peer_id = PeerId::from_identity_public_key(public);
         let noise_config = Arc::new(NoiseUpgrader::new(
-            peer_id,
+            NetworkContext::mock_with_peer_id(peer_id),
             private,
-            HandshakeAuthMode::ServerOnly,
+            HandshakeAuthMode::server_only(),
         ));
         let remote_public_key = addr.find_noise_proto();
         let (_remote_static_key, socket) = noise_config
             .upgrade_with_noise(socket, origin, remote_public_key)
-            .await?;
+            .await
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
         Ok(socket)
     })
 }
@@ -133,8 +140,8 @@ where
                 Ok((f_stream, _)) => {
                     match f_stream.await {
                         Ok(stream) => {
-                            let mut stream =
-                                Framed::new(IoCompat::new(stream), LengthDelimitedCodec::new());
+                            let codec = network_message_frame_codec(constants::MAX_FRAME_SIZE);
+                            let mut stream = Framed::new(IoCompat::new(stream), codec);
 
                             tokio::task::spawn(async move {
                                 // Drain all messages from the client.
@@ -142,10 +149,14 @@ where
                                 stream.close().await.unwrap();
                             });
                         }
-                        Err(e) => error!("Connection upgrade failed {:?}", e),
+                        Err(e) => error!(
+                            error = ?e,
+                            "Connection upgrade failed {:?}", e),
                     };
                 }
-                Err(e) => error!("Stream failed {:?}", e),
+                Err(e) => error!(
+                    error = ?e,
+                    "Stream failed {:?}", e),
             }
         })
         .await

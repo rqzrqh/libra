@@ -7,7 +7,7 @@ module TestModuleInvariants {
 
 
     // Some structure.
-    struct S {}
+    resource struct S {}
 
     // A resource tracking how many instances of S exist.
     resource struct SCounter {
@@ -70,6 +70,7 @@ module TestModuleInvariants {
     spec fun private_calls_public {
         requires global<SCounter>(0x0).n == spec_count;
     }
+
 }
 
 module TestModuleInvariantsExternal {

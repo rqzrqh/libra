@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{bail, format_err, Result};
@@ -9,12 +9,12 @@ use bytecode_source_map::{
 use bytecode_verifier::control_flow_graph::{ControlFlowGraph, VMControlFlowGraph};
 use colored::*;
 use move_core_types::identifier::IdentStr;
-use move_coverage::coverage_map::{CoverageMap, FunctionCoverage};
+use move_coverage::coverage_map::{ExecCoverageMap, FunctionCoverage};
 use vm::{
     access::ModuleAccess,
     file_format::{
-        Bytecode, FieldHandleIndex, FunctionDefinition, FunctionDefinitionIndex, Kind, Signature,
-        SignatureIndex, SignatureToken, StructDefinition, StructDefinitionIndex,
+        Bytecode, CompiledModule, FieldHandleIndex, FunctionDefinition, FunctionDefinitionIndex,
+        Kind, Signature, SignatureIndex, SignatureToken, StructDefinition, StructDefinitionIndex,
         StructFieldInformation, TableIndex, TypeSignature,
     },
 };
@@ -51,7 +51,7 @@ pub struct Disassembler<Location: Clone + Eq> {
     // The various options that we can set for disassembly.
     options: DisassemblerOptions,
     // Optional coverage map for use in displaying code coverage
-    coverage_map: Option<CoverageMap>,
+    coverage_map: Option<ExecCoverageMap>,
 }
 
 impl<Location: Clone + Eq> Disassembler<Location> {
@@ -63,7 +63,17 @@ impl<Location: Clone + Eq> Disassembler<Location> {
         }
     }
 
-    pub fn add_coverage_map(&mut self, coverage_map: CoverageMap) {
+    pub fn from_module(module: CompiledModule, default_loc: Location) -> Result<Self> {
+        let mut options = DisassemblerOptions::new();
+        options.print_code = true;
+        Ok(Self {
+            source_mapper: SourceMapping::new_from_module(module, default_loc)?,
+            options,
+            coverage_map: None,
+        })
+    }
+
+    pub fn add_coverage_map(&mut self, coverage_map: ExecCoverageMap) {
         self.coverage_map = Some(coverage_map);
     }
 
@@ -603,14 +613,11 @@ impl<Location: Clone + Eq> Disassembler<Location> {
                     struct_idx, name, ty_params
                 ))
             }
-            Bytecode::MoveToSender(struct_idx) => {
+            Bytecode::MoveTo(struct_idx) => {
                 let (name, ty_params) = self.struct_type_info(*struct_idx, &Signature(vec![]))?;
-                Ok(format!(
-                    "MoveToSender[{}]({}{})",
-                    struct_idx, name, ty_params
-                ))
+                Ok(format!("MoveTo[{}]({}{})", struct_idx, name, ty_params))
             }
-            Bytecode::MoveToSenderGeneric(struct_idx) => {
+            Bytecode::MoveToGeneric(struct_idx) => {
                 let struct_inst = self
                     .source_mapper
                     .bytecode
@@ -621,7 +628,7 @@ impl<Location: Clone + Eq> Disassembler<Location> {
                     .signature_at(struct_inst.type_parameters);
                 let (name, ty_params) = self.struct_type_info(struct_inst.def, type_params)?;
                 Ok(format!(
-                    "MoveToSenderGeneric[{}]({}{})",
+                    "MoveToGeneric[{}]({}{})",
                     struct_idx, name, ty_params
                 ))
             }
@@ -1001,7 +1008,8 @@ impl<Location: Clone + Eq> Disassembler<Location> {
 
     pub fn disassemble(&self) -> Result<String> {
         let name_opt = self.source_mapper.source_map.module_name_opt.as_ref();
-        let name = name_opt.map(|(addr, n)| format!("{}.{}", addr.short_str(), n.to_string()));
+        let name =
+            name_opt.map(|(addr, n)| format!("{}.{}", addr.short_str_lossless(), n.to_string()));
         let header = match name {
             Some(s) => format!("module {}", s),
             None => "script".to_owned(),

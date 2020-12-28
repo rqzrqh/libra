@@ -1,8 +1,9 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    json_encoder::JsonEncoder, json_metrics::get_json_metrics, public_metrics::PUBLIC_METRICS,
+    gather_metrics, json_encoder::JsonEncoder, json_metrics::get_json_metrics,
+    public_metrics::PUBLIC_METRICS, NUM_METRICS,
 };
 use futures::future;
 use hyper::{
@@ -18,12 +19,16 @@ use std::{
 use tokio::runtime;
 
 fn encode_metrics(encoder: impl Encoder, whitelist: &'static [&'static str]) -> Vec<u8> {
-    let mut metric_families = prometheus::gather();
+    let mut metric_families = gather_metrics();
     if !whitelist.is_empty() {
         metric_families = whitelist_metrics(metric_families, whitelist);
     }
     let mut buffer = vec![];
     encoder.encode(&metric_families, &mut buffer).unwrap();
+
+    NUM_METRICS
+        .with_label_values(&["total_bytes"])
+        .inc_by(buffer.len() as u64);
     buffer
 }
 
@@ -61,6 +66,9 @@ fn whitelist_json_metrics(
 async fn serve_metrics(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
     let mut resp = Response::new(Body::empty());
     match (req.method(), req.uri().path()) {
+        (&Method::GET, "/-/healthy") => {
+            *resp.body_mut() = Body::from("diem-node:ok");
+        }
         (&Method::GET, "/metrics") => {
             //Prometheus server expects metrics to be on host:port/metrics
             let encoder = TextEncoder::new();
@@ -74,7 +82,7 @@ async fn serve_metrics(req: Request<Body>) -> Result<Response<Body>, hyper::Erro
             *resp.body_mut() = Body::from(encoded_metrics);
         }
         (&Method::GET, "/counters") => {
-            // Json encoded libra_metrics;
+            // Json encoded diem_metrics;
             let encoder = JsonEncoder;
             let buffer = encode_metrics(encoder, &[]);
             *resp.body_mut() = Body::from(buffer);

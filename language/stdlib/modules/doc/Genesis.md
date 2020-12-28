@@ -3,9 +3,32 @@
 
 # Module `0x1::Genesis`
 
-### Table of Contents
+The <code><a href="Genesis.md#0x1_Genesis">Genesis</a></code> module defines the Move initialization entry point of the Diem framework
+when executing from a fresh state.
+
+> TODO: Currently there are a few additional functions called from Rust during genesis.
+> Document which these are and in which order they are called.
+
 
 -  [Function `initialize`](#0x1_Genesis_initialize)
+
+
+<pre><code><b>use</b> <a href="AccountFreezing.md#0x1_AccountFreezing">0x1::AccountFreezing</a>;
+<b>use</b> <a href="ChainId.md#0x1_ChainId">0x1::ChainId</a>;
+<b>use</b> <a href="Diem.md#0x1_Diem">0x1::Diem</a>;
+<b>use</b> <a href="DiemAccount.md#0x1_DiemAccount">0x1::DiemAccount</a>;
+<b>use</b> <a href="DiemBlock.md#0x1_DiemBlock">0x1::DiemBlock</a>;
+<b>use</b> <a href="DiemConfig.md#0x1_DiemConfig">0x1::DiemConfig</a>;
+<b>use</b> <a href="DiemSystem.md#0x1_DiemSystem">0x1::DiemSystem</a>;
+<b>use</b> <a href="DiemTimestamp.md#0x1_DiemTimestamp">0x1::DiemTimestamp</a>;
+<b>use</b> <a href="DiemTransactionPublishingOption.md#0x1_DiemTransactionPublishingOption">0x1::DiemTransactionPublishingOption</a>;
+<b>use</b> <a href="DiemVMConfig.md#0x1_DiemVMConfig">0x1::DiemVMConfig</a>;
+<b>use</b> <a href="DiemVersion.md#0x1_DiemVersion">0x1::DiemVersion</a>;
+<b>use</b> <a href="DualAttestation.md#0x1_DualAttestation">0x1::DualAttestation</a>;
+<b>use</b> <a href="TransactionFee.md#0x1_TransactionFee">0x1::TransactionFee</a>;
+<b>use</b> <a href="XDX.md#0x1_XDX">0x1::XDX</a>;
+<b>use</b> <a href="XUS.md#0x1_XUS">0x1::XUS</a>;
+</code></pre>
 
 
 
@@ -13,9 +36,10 @@
 
 ## Function `initialize`
 
+Initializes the Diem framework.
 
 
-<pre><code><b>fun</b> <a href="#0x1_Genesis_initialize">initialize</a>(association: &signer, config_account: &signer, fee_account: &signer, core_code_account: &signer, tc_account: &signer, tc_addr: address, genesis_auth_key: vector&lt;u8&gt;, publishing_option: vector&lt;u8&gt;, instruction_schedule: vector&lt;u8&gt;, native_schedule: vector&lt;u8&gt;)
+<pre><code><b>fun</b> <a href="Genesis.md#0x1_Genesis_initialize">initialize</a>(dr_account: &signer, tc_account: &signer, dr_auth_key: vector&lt;u8&gt;, tc_auth_key: vector&lt;u8&gt;, initial_script_allow_list: vector&lt;vector&lt;u8&gt;&gt;, is_open_module: bool, instruction_schedule: vector&lt;u8&gt;, native_schedule: vector&lt;u8&gt;, chain_id: u8)
 </code></pre>
 
 
@@ -24,159 +48,107 @@
 <summary>Implementation</summary>
 
 
-<pre><code><b>fun</b> <a href="#0x1_Genesis_initialize">initialize</a>(
-    association: &signer,
-    config_account: &signer,
-    fee_account: &signer,
-    core_code_account: &signer,
+<pre><code><b>fun</b> <a href="Genesis.md#0x1_Genesis_initialize">initialize</a>(
+    dr_account: &signer,
     tc_account: &signer,
-    tc_addr: address,
-    genesis_auth_key: vector&lt;u8&gt;,
-    publishing_option: vector&lt;u8&gt;,
+    dr_auth_key: vector&lt;u8&gt;,
+    tc_auth_key: vector&lt;u8&gt;,
+    initial_script_allow_list: vector&lt;vector&lt;u8&gt;&gt;,
+    is_open_module: bool,
     instruction_schedule: vector&lt;u8&gt;,
     native_schedule: vector&lt;u8&gt;,
+    chain_id: u8,
 ) {
-    <b>let</b> dummy_auth_key_prefix = x"00000000000000000000000000000000";
 
-    <a href="Roles.md#0x1_Roles_grant_root_association_role">Roles::grant_root_association_role</a>(association);
-    <a href="LibraConfig.md#0x1_LibraConfig_grant_privileges">LibraConfig::grant_privileges</a>(association);
-    <a href="LibraAccount.md#0x1_LibraAccount_grant_association_privileges">LibraAccount::grant_association_privileges</a>(association);
-    <a href="SlidingNonce.md#0x1_SlidingNonce_grant_privileges">SlidingNonce::grant_privileges</a>(association);
-    <b>let</b> assoc_root_capability = <a href="Roles.md#0x1_Roles_extract_privilege_to_capability">Roles::extract_privilege_to_capability</a>&lt;AssociationRootRole&gt;(association);
-    <b>let</b> create_config_capability = <a href="Roles.md#0x1_Roles_extract_privilege_to_capability">Roles::extract_privilege_to_capability</a>&lt;CreateOnChainConfig&gt;(association);
-    <b>let</b> create_sliding_nonce_capability = <a href="Roles.md#0x1_Roles_extract_privilege_to_capability">Roles::extract_privilege_to_capability</a>&lt;CreateSlidingNonce&gt;(association);
+    <a href="DiemAccount.md#0x1_DiemAccount_initialize">DiemAccount::initialize</a>(dr_account, x"00000000000000000000000000000000");
 
-    <a href="Roles.md#0x1_Roles_grant_treasury_compliance_role">Roles::grant_treasury_compliance_role</a>(tc_account, &assoc_root_capability);
-    <a href="LibraAccount.md#0x1_LibraAccount_grant_treasury_compliance_privileges">LibraAccount::grant_treasury_compliance_privileges</a>(tc_account);
-    <a href="Libra.md#0x1_Libra_grant_privileges">Libra::grant_privileges</a>(tc_account);
-    <a href="DualAttestationLimit.md#0x1_DualAttestationLimit_grant_privileges">DualAttestationLimit::grant_privileges</a>(tc_account);
-    <b>let</b> currency_registration_capability = <a href="Roles.md#0x1_Roles_extract_privilege_to_capability">Roles::extract_privilege_to_capability</a>&lt;RegisterNewCurrency&gt;(tc_account);
-    <b>let</b> tc_capability = <a href="Roles.md#0x1_Roles_extract_privilege_to_capability">Roles::extract_privilege_to_capability</a>&lt;TreasuryComplianceRole&gt;(tc_account);
+    <a href="ChainId.md#0x1_ChainId_initialize">ChainId::initialize</a>(dr_account, chain_id);
 
     // On-chain config setup
-    <a href="Event.md#0x1_Event_publish_generator">Event::publish_generator</a>(config_account);
-    <a href="LibraConfig.md#0x1_LibraConfig_initialize">LibraConfig::initialize</a>(
-        config_account,
-        &create_config_capability,
-    );
+    <a href="DiemConfig.md#0x1_DiemConfig_initialize">DiemConfig::initialize</a>(dr_account);
 
     // Currency setup
-    <a href="Libra.md#0x1_Libra_initialize">Libra::initialize</a>(config_account, &create_config_capability);
+    <a href="Diem.md#0x1_Diem_initialize">Diem::initialize</a>(dr_account);
 
-    // Set that this is testnet
-    <a href="Testnet.md#0x1_Testnet_initialize">Testnet::initialize</a>(association);
+    // Currency setup
+    <a href="XUS.md#0x1_XUS_initialize">XUS::initialize</a>(dr_account, tc_account);
 
-    // <a href="Event.md#0x1_Event">Event</a> and currency setup
-    <a href="Event.md#0x1_Event_publish_generator">Event::publish_generator</a>(association);
-    <b>let</b> (coin1_mint_cap, coin1_burn_cap) = <a href="Coin1.md#0x1_Coin1_initialize">Coin1::initialize</a>(
-        association,
-        &currency_registration_capability,
-    );
-    <b>let</b> (coin2_mint_cap, coin2_burn_cap) = <a href="Coin2.md#0x1_Coin2_initialize">Coin2::initialize</a>(
-        association,
-        &currency_registration_capability,
-    );
-    <a href="LBR.md#0x1_LBR_initialize">LBR::initialize</a>(
-        association,
-        &currency_registration_capability,
-        &tc_capability,
+    <a href="XDX.md#0x1_XDX_initialize">XDX::initialize</a>(
+        dr_account,
+        tc_account,
     );
 
-    <a href="LibraAccount.md#0x1_LibraAccount_initialize">LibraAccount::initialize</a>(association, &assoc_root_capability);
-    <a href="LibraAccount.md#0x1_LibraAccount_create_root_association_account">LibraAccount::create_root_association_account</a>&lt;<a href="LBR.md#0x1_LBR">LBR</a>&gt;(
-        <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(association),
-        <b>copy</b> dummy_auth_key_prefix,
+    <a href="AccountFreezing.md#0x1_AccountFreezing_initialize">AccountFreezing::initialize</a>(dr_account);
+
+    <a href="TransactionFee.md#0x1_TransactionFee_initialize">TransactionFee::initialize</a>(tc_account);
+
+    <a href="DiemSystem.md#0x1_DiemSystem_initialize_validator_set">DiemSystem::initialize_validator_set</a>(
+        dr_account,
+    );
+    <a href="DiemVersion.md#0x1_DiemVersion_initialize">DiemVersion::initialize</a>(
+        dr_account,
+    );
+    <a href="DualAttestation.md#0x1_DualAttestation_initialize">DualAttestation::initialize</a>(
+        dr_account,
+    );
+    <a href="DiemBlock.md#0x1_DiemBlock_initialize_block_metadata">DiemBlock::initialize_block_metadata</a>(dr_account);
+
+    <b>let</b> dr_rotate_key_cap = <a href="DiemAccount.md#0x1_DiemAccount_extract_key_rotation_capability">DiemAccount::extract_key_rotation_capability</a>(dr_account);
+    <a href="DiemAccount.md#0x1_DiemAccount_rotate_authentication_key">DiemAccount::rotate_authentication_key</a>(&dr_rotate_key_cap, dr_auth_key);
+    <a href="DiemAccount.md#0x1_DiemAccount_restore_key_rotation_capability">DiemAccount::restore_key_rotation_capability</a>(dr_rotate_key_cap);
+
+    <a href="DiemTransactionPublishingOption.md#0x1_DiemTransactionPublishingOption_initialize">DiemTransactionPublishingOption::initialize</a>(
+        dr_account,
+        initial_script_allow_list,
+        is_open_module,
     );
 
-    <a href="LibraAccount.md#0x1_LibraAccount_create_testnet_account">LibraAccount::create_testnet_account</a>&lt;<a href="LBR.md#0x1_LBR">LBR</a>&gt;(
-        association,
-        &assoc_root_capability,
-        <a href="Signer.md#0x1_Signer_address_of">Signer::address_of</a>(core_code_account),
-        <b>copy</b> dummy_auth_key_prefix,
-    );
-
-    // Register transaction fee accounts
-    <a href="TransactionFee.md#0x1_TransactionFee_initialize">TransactionFee::initialize</a>(
-        association,
-        fee_account,
-        &assoc_root_capability,
-        &tc_capability,
-        <b>copy</b> dummy_auth_key_prefix
-    );
-
-    // Create the treasury compliance account
-    <a href="LibraAccount.md#0x1_LibraAccount_create_treasury_compliance_account">LibraAccount::create_treasury_compliance_account</a>&lt;<a href="LBR.md#0x1_LBR">LBR</a>&gt;(
-        &assoc_root_capability,
-        &tc_capability,
-        &create_sliding_nonce_capability,
-        tc_addr,
-        <b>copy</b> dummy_auth_key_prefix,
-        coin1_mint_cap,
-        coin1_burn_cap,
-        coin2_mint_cap,
-        coin2_burn_cap,
-    );
-    <a href="AccountLimits.md#0x1_AccountLimits_publish_unrestricted_limits">AccountLimits::publish_unrestricted_limits</a>(tc_account);
-    <a href="AccountLimits.md#0x1_AccountLimits_certify_limits_definition">AccountLimits::certify_limits_definition</a>(&tc_capability, tc_addr);
-
-    // Create the config account
-    <a href="LibraAccount.md#0x1_LibraAccount_create_config_account">LibraAccount::create_config_account</a>&lt;<a href="LBR.md#0x1_LBR">LBR</a>&gt;(
-        association,
-        &create_config_capability,
-        <a href="CoreAddresses.md#0x1_CoreAddresses_DEFAULT_CONFIG_ADDRESS">CoreAddresses::DEFAULT_CONFIG_ADDRESS</a>(),
-        dummy_auth_key_prefix
-    );
-
-    <a href="LibraTransactionTimeout.md#0x1_LibraTransactionTimeout_initialize">LibraTransactionTimeout::initialize</a>(association);
-    <a href="LibraSystem.md#0x1_LibraSystem_initialize_validator_set">LibraSystem::initialize_validator_set</a>(config_account, &create_config_capability);
-    <a href="LibraVersion.md#0x1_LibraVersion_initialize">LibraVersion::initialize</a>(config_account, &create_config_capability);
-
-    <a href="DualAttestationLimit.md#0x1_DualAttestationLimit_initialize">DualAttestationLimit::initialize</a>(config_account, tc_account, &create_config_capability);
-    <a href="LibraBlock.md#0x1_LibraBlock_initialize_block_metadata">LibraBlock::initialize_block_metadata</a>(association);
-    <a href="LibraWriteSetManager.md#0x1_LibraWriteSetManager_initialize">LibraWriteSetManager::initialize</a>(association);
-    <a href="LibraTimestamp.md#0x1_LibraTimestamp_initialize">LibraTimestamp::initialize</a>(association);
-
-    <b>let</b> assoc_rotate_key_cap = <a href="LibraAccount.md#0x1_LibraAccount_extract_key_rotation_capability">LibraAccount::extract_key_rotation_capability</a>(association);
-    <a href="LibraAccount.md#0x1_LibraAccount_rotate_authentication_key">LibraAccount::rotate_authentication_key</a>(&assoc_rotate_key_cap, <b>copy</b> genesis_auth_key);
-    <a href="LibraAccount.md#0x1_LibraAccount_restore_key_rotation_capability">LibraAccount::restore_key_rotation_capability</a>(assoc_rotate_key_cap);
-
-    <a href="LibraVMConfig.md#0x1_LibraVMConfig_initialize">LibraVMConfig::initialize</a>(
-        config_account,
-        association,
-        &create_config_capability,
-        publishing_option,
+    <a href="DiemVMConfig.md#0x1_DiemVMConfig_initialize">DiemVMConfig::initialize</a>(
+        dr_account,
         instruction_schedule,
         native_schedule,
     );
 
-    <a href="LibraConfig.md#0x1_LibraConfig_grant_privileges_for_config_TESTNET_HACK_REMOVE">LibraConfig::grant_privileges_for_config_TESTNET_HACK_REMOVE</a>(config_account);
+    <b>let</b> tc_rotate_key_cap = <a href="DiemAccount.md#0x1_DiemAccount_extract_key_rotation_capability">DiemAccount::extract_key_rotation_capability</a>(tc_account);
+    <a href="DiemAccount.md#0x1_DiemAccount_rotate_authentication_key">DiemAccount::rotate_authentication_key</a>(&tc_rotate_key_cap, tc_auth_key);
+    <a href="DiemAccount.md#0x1_DiemAccount_restore_key_rotation_capability">DiemAccount::restore_key_rotation_capability</a>(tc_rotate_key_cap);
 
-    <b>let</b> config_rotate_key_cap = <a href="LibraAccount.md#0x1_LibraAccount_extract_key_rotation_capability">LibraAccount::extract_key_rotation_capability</a>(config_account);
-    <a href="LibraAccount.md#0x1_LibraAccount_rotate_authentication_key">LibraAccount::rotate_authentication_key</a>(&config_rotate_key_cap, <b>copy</b> genesis_auth_key);
-    <a href="LibraAccount.md#0x1_LibraAccount_restore_key_rotation_capability">LibraAccount::restore_key_rotation_capability</a>(config_rotate_key_cap);
-
-    <b>let</b> fee_rotate_key_cap = <a href="LibraAccount.md#0x1_LibraAccount_extract_key_rotation_capability">LibraAccount::extract_key_rotation_capability</a>(fee_account);
-    <a href="LibraAccount.md#0x1_LibraAccount_rotate_authentication_key">LibraAccount::rotate_authentication_key</a>(&fee_rotate_key_cap, <b>copy</b> genesis_auth_key);
-    <a href="LibraAccount.md#0x1_LibraAccount_restore_key_rotation_capability">LibraAccount::restore_key_rotation_capability</a>(fee_rotate_key_cap);
-
-    <b>let</b> tc_rotate_key_cap = <a href="LibraAccount.md#0x1_LibraAccount_extract_key_rotation_capability">LibraAccount::extract_key_rotation_capability</a>(tc_account);
-    <a href="LibraAccount.md#0x1_LibraAccount_rotate_authentication_key">LibraAccount::rotate_authentication_key</a>(&tc_rotate_key_cap, <b>copy</b> genesis_auth_key);
-    <a href="LibraAccount.md#0x1_LibraAccount_restore_key_rotation_capability">LibraAccount::restore_key_rotation_capability</a>(tc_rotate_key_cap);
-
-    <b>let</b> core_code_rotate_key_cap = <a href="LibraAccount.md#0x1_LibraAccount_extract_key_rotation_capability">LibraAccount::extract_key_rotation_capability</a>(core_code_account);
-    <a href="LibraAccount.md#0x1_LibraAccount_rotate_authentication_key">LibraAccount::rotate_authentication_key</a>(&core_code_rotate_key_cap, genesis_auth_key);
-    <a href="LibraAccount.md#0x1_LibraAccount_restore_key_rotation_capability">LibraAccount::restore_key_rotation_capability</a>(core_code_rotate_key_cap);
-
-    // Restore privileges
-    <a href="Roles.md#0x1_Roles_restore_capability_to_privilege">Roles::restore_capability_to_privilege</a>(association, create_config_capability);
-    <a href="Roles.md#0x1_Roles_restore_capability_to_privilege">Roles::restore_capability_to_privilege</a>(association, create_sliding_nonce_capability);
-    <a href="Roles.md#0x1_Roles_restore_capability_to_privilege">Roles::restore_capability_to_privilege</a>(association, assoc_root_capability);
-
-    <a href="Roles.md#0x1_Roles_restore_capability_to_privilege">Roles::restore_capability_to_privilege</a>(tc_account, currency_registration_capability);
-    <a href="Roles.md#0x1_Roles_restore_capability_to_privilege">Roles::restore_capability_to_privilege</a>(tc_account, tc_capability);
+    // After we have called this function, all invariants which are guarded by
+    // `<a href="DiemTimestamp.md#0x1_DiemTimestamp_is_operating">DiemTimestamp::is_operating</a>() ==&gt; ...` will become active and a verification condition.
+    // See also discussion at function specification.
+    <a href="DiemTimestamp.md#0x1_DiemTimestamp_set_time_has_started">DiemTimestamp::set_time_has_started</a>(dr_account);
 }
 </code></pre>
 
 
 
 </details>
+
+<details>
+<summary>Specification</summary>
+
+For verification of genesis, the goal is to prove that all the invariants which
+become active after the end of this function hold. This cannot be achieved with
+modular verification as we do in regular continuous testing. Rather, this module must
+be verified **together** with the module(s) which provides the invariant.
+
+> TODO: currently verifying this module together with modules providing invariants
+> (see above) times out. This can likely be solved by making more of the initialize
+> functions called by this function opaque, and prove the according invariants locally to
+> each module.
+
+Assume that this is called in genesis state (no timestamp).
+
+
+<pre><code><b>requires</b> <a href="DiemTimestamp.md#0x1_DiemTimestamp_is_genesis">DiemTimestamp::is_genesis</a>();
+</code></pre>
+
+
+
+</details>
+
+
+[//]: # ("File containing references which can be used from documentation")
+[ACCESS_CONTROL]: https://github.com/diem/dip/blob/master/dips/dip-2.md
+[ROLE]: https://github.com/diem/dip/blob/master/dips/dip-2.md#roles
+[PERMISSION]: https://github.com/diem/dip/blob/master/dips/dip-2.md#permissions

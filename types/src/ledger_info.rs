@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -9,11 +9,8 @@ use crate::{
     transaction::Version,
     validator_verifier::{ValidatorVerifier, VerifyError},
 };
-use libra_crypto::{
-    ed25519::Ed25519Signature,
-    hash::{CryptoHash, HashValue},
-};
-use libra_crypto_derive::{CryptoHasher, LCSCryptoHash};
+use diem_crypto::{ed25519::Ed25519Signature, hash::HashValue};
+use diem_crypto_derive::{BCSCryptoHash, CryptoHasher};
 #[cfg(any(test, feature = "fuzzing"))]
 use proptest_derive::Arbitrary;
 use serde::{Deserialize, Serialize};
@@ -40,7 +37,7 @@ use std::{
 /// LedgerInfo with the `version` being the latest version that will be committed if B gets 2f+1
 /// votes. It sets `consensus_data_hash` to represent B so that if those 2f+1 votes are gathered a
 /// QC is formed on B.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, CryptoHasher, LCSCryptoHash)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, CryptoHasher, BCSCryptoHash)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
 pub struct LedgerInfo {
     commit_info: BlockInfo,
@@ -116,6 +113,10 @@ impl LedgerInfo {
 
     pub fn next_epoch_state(&self) -> Option<&EpochState> {
         self.commit_info.next_epoch_state()
+    }
+
+    pub fn ends_epoch(&self) -> bool {
+        self.next_epoch_state().is_some()
     }
 
     /// Returns hash of consensus voting data in this `LedgerInfo`.
@@ -243,8 +244,40 @@ impl LedgerInfoWithV0 {
         &self,
         validator: &ValidatorVerifier,
     ) -> ::std::result::Result<(), VerifyError> {
-        let ledger_hash = self.ledger_info().hash();
-        validator.batch_verify_aggregated_signature(ledger_hash, self.signatures())
+        validator.batch_verify_aggregated_signatures(self.ledger_info(), self.signatures())
+    }
+}
+
+//
+// Arbitrary implementation of LedgerInfoWithV0 (for fuzzing)
+//
+
+#[cfg(any(test, feature = "fuzzing"))]
+use ::proptest::prelude::*;
+
+#[cfg(any(test, feature = "fuzzing"))]
+impl Arbitrary for LedgerInfoWithV0 {
+    type Parameters = ();
+    type Strategy = BoxedStrategy<Self>;
+
+    fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+        let dummy_signature = Ed25519Signature::dummy_signature();
+        (
+            proptest::arbitrary::any::<LedgerInfo>(),
+            proptest::collection::vec(proptest::arbitrary::any::<AccountAddress>(), 0..100),
+        )
+            .prop_map(move |(ledger_info, addresses)| {
+                let mut signatures = BTreeMap::new();
+                for address in addresses {
+                    let signature = dummy_signature.clone();
+                    signatures.insert(address, signature);
+                }
+                Self {
+                    ledger_info,
+                    signatures,
+                }
+            })
+            .boxed()
     }
 }
 
@@ -255,9 +288,8 @@ mod tests {
 
     #[test]
     fn test_signatures_hash() {
-        let ledger_info = LedgerInfo::new(BlockInfo::empty(), HashValue::zero());
+        let ledger_info = LedgerInfo::new(BlockInfo::empty(), HashValue::random());
 
-        let random_hash = HashValue::random();
         const NUM_SIGNERS: u8 = 7;
         // Generate NUM_SIGNERS random signers.
         let validator_signers: Vec<ValidatorSigner> = (0..NUM_SIGNERS)
@@ -265,7 +297,7 @@ mod tests {
             .collect();
         let mut author_to_signature_map = BTreeMap::new();
         for validator in validator_signers.iter() {
-            author_to_signature_map.insert(validator.author(), validator.sign_message(random_hash));
+            author_to_signature_map.insert(validator.author(), validator.sign(&ledger_info));
         }
 
         let ledger_info_with_signatures =
@@ -274,16 +306,16 @@ mod tests {
         // Add the signatures in reverse order and ensure the serialization matches
         let mut author_to_signature_map = BTreeMap::new();
         for validator in validator_signers.iter().rev() {
-            author_to_signature_map.insert(validator.author(), validator.sign_message(random_hash));
+            author_to_signature_map.insert(validator.author(), validator.sign(&ledger_info));
         }
 
         let ledger_info_with_signatures_reversed =
             LedgerInfoWithV0::new(ledger_info, author_to_signature_map);
 
         let ledger_info_with_signatures_bytes =
-            lcs::to_bytes(&ledger_info_with_signatures).expect("block serialization failed");
+            bcs::to_bytes(&ledger_info_with_signatures).expect("block serialization failed");
         let ledger_info_with_signatures_reversed_bytes =
-            lcs::to_bytes(&ledger_info_with_signatures_reversed)
+            bcs::to_bytes(&ledger_info_with_signatures_reversed)
                 .expect("block serialization failed");
 
         assert_eq!(

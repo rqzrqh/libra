@@ -1,13 +1,13 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{common::Round, quorum_cert::QuorumCert, timeout_certificate::TimeoutCertificate};
 use anyhow::{ensure, Context};
-use libra_types::{block_info::BlockInfo, validator_verifier::ValidatorVerifier};
+use diem_types::{block_info::BlockInfo, validator_verifier::ValidatorVerifier};
 use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 
-#[derive(Deserialize, Serialize, Clone, Debug, Eq, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, Eq, PartialEq)]
 /// This struct describes basic synchronization metadata.
 pub struct SyncInfo {
     /// Highest quorum certificate known to the peer.
@@ -16,6 +16,13 @@ pub struct SyncInfo {
     highest_commit_cert: Option<QuorumCert>,
     /// Optional highest timeout certificate if available.
     highest_timeout_cert: Option<TimeoutCertificate>,
+}
+
+// this is required by structured log
+impl Debug for SyncInfo {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
 }
 
 impl Display for SyncInfo {

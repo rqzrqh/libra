@@ -1,11 +1,9 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
     access_path::AccessPath,
-    account_config::constants::{
-        association_address, type_tag_for_currency_code, CORE_CODE_ADDRESS,
-    },
+    account_config::constants::{diem_root_address, type_tag_for_currency_code, CORE_CODE_ADDRESS},
     event::EventHandle,
 };
 use anyhow::Result;
@@ -17,11 +15,11 @@ use move_core_types::{
 use serde::{Deserialize, Serialize};
 
 /// Struct that represents a CurrencyInfo resource
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CurrencyInfoResource {
     total_value: u128,
     preburn_value: u64,
-    to_lbr_exchange_rate: u64,
+    to_xdx_exchange_rate: u64,
     is_synthetic: bool,
     scaling_factor: u64,
     fractional_part: u64,
@@ -35,11 +33,43 @@ pub struct CurrencyInfoResource {
 }
 
 impl MoveResource for CurrencyInfoResource {
-    const MODULE_NAME: &'static str = "Libra";
+    const MODULE_NAME: &'static str = "Diem";
     const STRUCT_NAME: &'static str = "CurrencyInfo";
 }
 
 impl CurrencyInfoResource {
+    pub fn new(
+        total_value: u128,
+        preburn_value: u64,
+        to_xdx_exchange_rate: u64,
+        is_synthetic: bool,
+        scaling_factor: u64,
+        fractional_part: u64,
+        currency_code: Identifier,
+        can_mint: bool,
+        mint_events: EventHandle,
+        burn_events: EventHandle,
+        preburn_events: EventHandle,
+        cancel_burn_events: EventHandle,
+        exchange_rate_update_events: EventHandle,
+    ) -> Self {
+        Self {
+            total_value,
+            preburn_value,
+            to_xdx_exchange_rate,
+            is_synthetic,
+            scaling_factor,
+            fractional_part,
+            currency_code,
+            can_mint,
+            mint_events,
+            burn_events,
+            preburn_events,
+            cancel_burn_events,
+            exchange_rate_update_events,
+        }
+    }
+
     pub fn currency_code(&self) -> &IdentStr {
         &self.currency_code
     }
@@ -48,20 +78,25 @@ impl CurrencyInfoResource {
         self.scaling_factor
     }
 
+    pub fn total_value(&self) -> u128 {
+        self.total_value
+    }
+
+    pub fn preburn_value(&self) -> u64 {
+        self.preburn_value
+    }
+
     pub fn fractional_part(&self) -> u64 {
         self.fractional_part
     }
 
     pub fn exchange_rate(&self) -> f32 {
-        // Exchange rates are represented as 32|32 fixed-point numbers on-chain. So we divide by the scaling
+        // Exchange rates are represented as 32|32 fixed-point numbers on-chain, so we divide by the scaling
         // factor (2^32) of the number to arrive at the floating point representation of the number.
-        // The exchange rate returned is the on-chain rate to two decimal places rounded up (e.g. 1.3333
-        // would be rounded to 1.34).
-        let unrounded = (self.to_lbr_exchange_rate as f32) / 2f32.powf(32f32);
-        (unrounded * 100.0).round() / 100.0
+        (self.to_xdx_exchange_rate as f32) / 2f32.powf(32f32)
     }
 
-    pub fn convert_to_lbr(&self, amount: u64) -> u64 {
+    pub fn convert_to_xdx(&self, amount: u64) -> u64 {
         (self.exchange_rate() * (amount as f32)) as u64
     }
 
@@ -76,13 +111,33 @@ impl CurrencyInfoResource {
 
     pub fn resource_path_for(currency_code: Identifier) -> AccessPath {
         let resource_key = ResourceKey::new(
-            association_address(),
+            diem_root_address(),
             CurrencyInfoResource::struct_tag_for(currency_code),
         );
-        AccessPath::resource_access_path(&resource_key)
+        AccessPath::resource_access_path(resource_key)
     }
 
     pub fn try_from_bytes(bytes: &[u8]) -> Result<Self> {
-        lcs::from_bytes(bytes).map_err(Into::into)
+        bcs::from_bytes(bytes).map_err(Into::into)
+    }
+
+    pub fn mint_events(&self) -> &EventHandle {
+        &self.mint_events
+    }
+
+    pub fn burn_events(&self) -> &EventHandle {
+        &self.burn_events
+    }
+
+    pub fn preburn_events(&self) -> &EventHandle {
+        &self.preburn_events
+    }
+
+    pub fn cancel_burn_events(&self) -> &EventHandle {
+        &self.cancel_burn_events
+    }
+
+    pub fn exchange_rate_update_events(&self) -> &EventHandle {
+        &self.exchange_rate_update_events
     }
 }

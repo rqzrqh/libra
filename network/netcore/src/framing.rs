@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use bytes::BytesMut;
@@ -48,7 +48,6 @@ where
     let len = buf
         .len()
         .try_into()
-        // TODO Maybe use our own Error Type?
         .map_err(|_e| std::io::Error::new(std::io::ErrorKind::Other, "Too big"))?;
     write_u16frame_len(&mut stream, len).await?;
     stream.write_all(buf).await?;

@@ -1,49 +1,47 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    block_storage::{block_tree::BlockTree, BlockReader},
+    block_storage::{
+        block_tree::BlockTree,
+        tracing::{observe_block, BlockStage},
+        BlockReader,
+    },
     counters,
+    logging::{LogEvent, LogSchema},
     persistent_liveness_storage::{
         PersistentLivenessStorage, RecoveryData, RootInfo, RootMetadata,
     },
     state_replication::StateComputer,
-    util::time_service::{duration_since_epoch, TimeService},
+    util::time_service::TimeService,
 };
 use anyhow::{bail, ensure, format_err, Context};
 use consensus_types::{
     block::Block, executed_block::ExecutedBlock, quorum_cert::QuorumCert, sync_info::SyncInfo,
     timeout_certificate::TimeoutCertificate,
 };
-use debug_interface::prelude::*;
-use executor_types::StateComputeResult;
-
-use libra_crypto::HashValue;
-use libra_logger::prelude::*;
-#[cfg(any(test, feature = "fuzzing"))]
-use libra_types::epoch_state::EpochState;
-use libra_types::{ledger_info::LedgerInfoWithSignatures, transaction::TransactionStatus};
-use std::{
-    collections::vec_deque::VecDeque,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
-use termion::color::*;
+use diem_crypto::HashValue;
+use diem_infallible::RwLock;
+use diem_logger::prelude::*;
+use diem_trace::prelude::*;
+use diem_types::{ledger_info::LedgerInfoWithSignatures, transaction::TransactionStatus};
+use executor_types::{Error, StateComputeResult};
+use std::{collections::vec_deque::VecDeque, sync::Arc, time::Duration};
 
 #[cfg(test)]
 #[path = "block_store_test.rs"]
 mod block_store_test;
+
+#[cfg(test)]
+#[path = "block_store_and_lec_recovery_test.rs"]
+mod block_store_and_lec_recovery_test;
 
 #[path = "sync_manager.rs"]
 pub mod sync_manager;
 
 fn update_counters_for_committed_blocks(blocks_to_commit: &[Arc<ExecutedBlock>]) {
     for block in blocks_to_commit {
-        if let Some(time_to_commit) =
-            duration_since_epoch().checked_sub(Duration::from_micros(block.timestamp_usecs()))
-        {
-            counters::CREATION_TO_COMMIT_S.observe_duration(time_to_commit);
-        }
+        observe_block(block.block().timestamp_usecs(), BlockStage::COMMITTED);
         let txn_status = block.compute_result().compute_status();
         counters::NUM_TXNS_PER_BLOCK.observe(txn_status.len() as f64);
         counters::COMMITTED_BLOCKS_COUNT.inc();
@@ -149,18 +147,23 @@ impl BlockStore {
             root_metadata.accu_hash,
         );
 
+        let result = StateComputeResult::new(
+            root_metadata.accu_hash,
+            root_metadata.frozen_root_hashes,
+            root_metadata.num_leaves, /* num_leaves */
+            vec![],                   /* parent_root_hashes */
+            0,                        /* parent_num_leaves */
+            None,                     /* epoch_state */
+            vec![],                   /* compute_status */
+            vec![],                   /* txn_infos */
+        );
+
         let executed_root_block = ExecutedBlock::new(
             root_block,
             // Create a dummy state_compute_result with necessary fields filled in.
-            StateComputeResult::new(
-                root_metadata.accu_hash,
-                root_metadata.frozen_root_hashes,
-                root_metadata.num_leaves, /* num_leaves */
-                None,                     /* epoch_state */
-                vec![],                   /* compute_status */
-                vec![],                   /* transaction_info_hashes */
-            ),
+            result,
         );
+
         let tree = BlockTree::new(
             executed_root_block,
             root_qc,
@@ -188,6 +191,9 @@ impl BlockStore {
                     panic!("[BlockStore] failed to insert quorum during build{:?}", e)
                 });
         }
+        counters::LAST_COMMITTED_ROUND.set(block_store.root().round() as i64);
+        counters::LAST_COMMITTED_VERSION
+            .set(block_store.root().compute_result().num_leaves() as i64);
         block_store
     }
 
@@ -219,10 +225,17 @@ impl BlockStore {
             .await
             .expect("Failed to persist commit");
         update_counters_for_committed_blocks(&blocks_to_commit);
-        debug!("{}Committed{} {}", Fg(Blue), Fg(Reset), *block_to_commit);
+        let current_round = self.root().round();
+        let committed_round = block_to_commit.round();
+        debug!(
+            LogSchema::new(LogEvent::CommitViaBlock).round(current_round),
+            committed_round = committed_round,
+            block_id = block_to_commit.id(),
+        );
         event!("committed",
             "block_id": block_to_commit.id().short_str(),
-            "round": block_to_commit.round(),
+            "epoch": block_to_commit.epoch(),
+            "round": committed_round,
             "parent_id": block_to_commit.parent_id().short_str(),
         );
         self.prune_tree(block_to_commit.id());
@@ -236,7 +249,7 @@ impl BlockStore {
         blocks: Vec<Block>,
         quorum_certs: Vec<QuorumCert>,
     ) {
-        let max_pruned_blocks_in_mem = self.inner.read().unwrap().max_pruned_blocks_in_mem();
+        let max_pruned_blocks_in_mem = self.inner.read().max_pruned_blocks_in_mem();
         // Rollover the previous highest TC from the old tree to the new one.
         let prev_htc = self.highest_timeout_cert().map(|tc| tc.as_ref().clone());
         let BlockStore { inner, .. } = Self::build(
@@ -250,16 +263,15 @@ impl BlockStore {
             max_pruned_blocks_in_mem,
             Arc::clone(&self.time_service),
         );
-        let to_remove = self.inner.read().unwrap().get_all_block_id();
+        let to_remove = self.inner.read().get_all_block_id();
         if let Err(e) = self.storage.prune_tree(to_remove) {
             // it's fine to fail here, the next restart will try to clean up dangling blocks again.
-            error!("fail to delete block: {:?}", e);
+            error!(error = ?e, "Fail to delete block from consensus db");
         }
         // Unwrap the new tree and replace the existing tree.
-        *self.inner.write().unwrap() = Arc::try_unwrap(inner)
+        *self.inner.write() = Arc::try_unwrap(inner)
             .unwrap_or_else(|_| panic!("New block tree is not shared"))
-            .into_inner()
-            .unwrap();
+            .into_inner();
         // If we fail to commit B_i via state computer and crash, after restart our highest commit cert
         // will not match the latest commit B_j(j<i) of state computer.
         // This introduces an inconsistent state if we send out SyncInfo and others try to sync to
@@ -268,7 +280,7 @@ impl BlockStore {
         if self.highest_commit_cert().commit_info().round() > self.root().round() {
             let finality_proof = self.highest_commit_cert().ledger_info().clone();
             if let Err(e) = self.commit(finality_proof).await {
-                warn!("{:?}", e);
+                error!(error = ?e, "Commit error during rebuild");
             }
         }
     }
@@ -285,45 +297,44 @@ impl BlockStore {
         if let Some(existing_block) = self.get_block(block.id()) {
             return Ok(existing_block);
         }
-        let executed_block = self.execute_block(block)?;
+        ensure!(
+            self.inner.read().root().round() < block.round(),
+            "Block with old round"
+        );
+
+        let executed_block = match self.execute_block(block.clone()) {
+            Ok(res) => Ok(res),
+            Err(Error::BlockNotFound(parent_block_id)) => {
+                // recover the block tree in executor
+                let blocks_to_reexecute = self
+                    .path_from_root(parent_block_id)
+                    .unwrap_or_else(Vec::new);
+
+                for block in blocks_to_reexecute {
+                    self.execute_block(block.block().clone())?;
+                }
+                self.execute_block(block)
+            }
+            err => err,
+        }?;
+
         // ensure local time past the block time
         let block_time = Duration::from_micros(executed_block.timestamp_usecs());
         self.time_service.wait_until(block_time);
         self.storage
             .save_tree(vec![executed_block.block().clone()], vec![])
             .context("Insert block failed when saving block")?;
-        self.inner.write().unwrap().insert_block(executed_block)
+        self.inner.write().insert_block(executed_block)
     }
 
-    fn execute_block(&self, block: Block) -> anyhow::Result<ExecutedBlock> {
+    fn execute_block(&self, block: Block) -> anyhow::Result<ExecutedBlock, Error> {
         trace_code_block!("block_store::execute_block", {"block", block.id()});
-        ensure!(
-            self.inner.read().unwrap().root().round() < block.round(),
-            "Block with old round"
-        );
 
-        let parent_block = self
-            .get_block(block.parent_id())
-            .ok_or_else(|| format_err!("Block with missing parent {}", block.parent_id()))?;
+        // Although NIL blocks don't have a payload, we still send a T::default() to compute
+        // because we may inject a block prologue transaction.
+        let state_compute_result = self.state_computer.compute(&block, block.parent_id())?;
+        observe_block(block.timestamp_usecs(), BlockStage::EXECUTED);
 
-        // Reconfiguration rule - if a block is a child of pending reconfiguration, it needs to be empty
-        // So we roll over the executed state until it's committed and we start new epoch.
-        let state_compute_result = if parent_block.compute_result().has_reconfiguration() {
-            StateComputeResult::new(
-                parent_block.compute_result().root_hash(),
-                parent_block.compute_result().frozen_subtree_roots().clone(),
-                parent_block.compute_result().num_leaves(),
-                parent_block.compute_result().epoch_state().clone(),
-                vec![], /* compute_status */
-                vec![], /* transaction_info_hashes */
-            )
-        } else {
-            // Although NIL blocks don't have payload, we still send a T::default() to compute
-            // because we may inject a block prologue transaction.
-            self.state_computer
-                .compute(&block, parent_block.id())
-                .with_context(|| format!("Execution failure for block {}", block))?
-        };
         Ok(ExecutedBlock::new(block, state_compute_result))
     }
 
@@ -343,14 +354,18 @@ impl BlockStore {
                     qc.certified_block(),
                     executed_block.block_info()
                 );
+                observe_block(
+                    executed_block.block().timestamp_usecs(),
+                    BlockStage::QC_ADDED,
+                );
             }
             None => bail!("Insert {} without having the block in store first", qc),
-        }
+        };
 
         self.storage
             .save_tree(vec![], vec![qc.clone()])
             .context("Insert block failed when saving quorum")?;
-        self.inner.write().unwrap().insert_quorum_cert(qc)
+        self.inner.write().insert_quorum_cert(qc)
     }
 
     /// Replace the highest timeout certificate in case the given one has a higher round.
@@ -363,7 +378,7 @@ impl BlockStore {
         self.storage
             .save_highest_timeout_cert(tc.as_ref().clone())
             .context("Timeout certificate insert failed when persisting to DB")?;
-        self.inner.write().unwrap().replace_timeout_cert(tc);
+        self.inner.write().replace_timeout_cert(tc);
         Ok(())
     }
 
@@ -379,11 +394,7 @@ impl BlockStore {
     ///
     /// Returns the block ids of the blocks removed.
     fn prune_tree(&self, next_root_id: HashValue) -> VecDeque<HashValue> {
-        let id_to_remove = self
-            .inner
-            .read()
-            .unwrap()
-            .find_blocks_to_prune(next_root_id);
+        let id_to_remove = self.inner.read().find_blocks_to_prune(next_root_id);
         if let Err(e) = self
             .storage
             .prune_tree(id_to_remove.clone().into_iter().collect())
@@ -391,11 +402,10 @@ impl BlockStore {
             // it's fine to fail here, as long as the commit succeeds, the next restart will clean
             // up dangling blocks, and we need to prune the tree to keep the root consistent with
             // executor.
-            error!("fail to delete block: {:?}", e);
+            error!(error = ?e, "fail to delete block");
         }
         self.inner
             .write()
-            .unwrap()
             .process_pruned_blocks(next_root_id, id_to_remove.clone());
         id_to_remove
     }
@@ -403,42 +413,39 @@ impl BlockStore {
 
 impl BlockReader for BlockStore {
     fn block_exists(&self, block_id: HashValue) -> bool {
-        self.inner.read().unwrap().block_exists(&block_id)
+        self.inner.read().block_exists(&block_id)
     }
 
     fn get_block(&self, block_id: HashValue) -> Option<Arc<ExecutedBlock>> {
-        self.inner.read().unwrap().get_block(&block_id)
+        self.inner.read().get_block(&block_id)
     }
 
     fn root(&self) -> Arc<ExecutedBlock> {
-        self.inner.read().unwrap().root()
+        self.inner.read().root()
     }
 
     fn get_quorum_cert_for_block(&self, block_id: HashValue) -> Option<Arc<QuorumCert>> {
-        self.inner
-            .read()
-            .unwrap()
-            .get_quorum_cert_for_block(&block_id)
+        self.inner.read().get_quorum_cert_for_block(&block_id)
     }
 
     fn path_from_root(&self, block_id: HashValue) -> Option<Vec<Arc<ExecutedBlock>>> {
-        self.inner.read().unwrap().path_from_root(block_id)
+        self.inner.read().path_from_root(block_id)
     }
 
     fn highest_certified_block(&self) -> Arc<ExecutedBlock> {
-        self.inner.read().unwrap().highest_certified_block()
+        self.inner.read().highest_certified_block()
     }
 
     fn highest_quorum_cert(&self) -> Arc<QuorumCert> {
-        self.inner.read().unwrap().highest_quorum_cert()
+        self.inner.read().highest_quorum_cert()
     }
 
     fn highest_commit_cert(&self) -> Arc<QuorumCert> {
-        self.inner.read().unwrap().highest_commit_cert()
+        self.inner.read().highest_commit_cert()
     }
 
     fn highest_timeout_cert(&self) -> Option<Arc<TimeoutCertificate>> {
-        self.inner.read().unwrap().highest_timeout_cert()
+        self.inner.read().highest_timeout_cert()
     }
 
     fn sync_info(&self) -> SyncInfo {
@@ -454,44 +461,22 @@ impl BlockReader for BlockStore {
 impl BlockStore {
     /// Returns the number of blocks in the tree
     pub(crate) fn len(&self) -> usize {
-        self.inner.read().unwrap().len()
+        self.inner.read().len()
     }
 
     /// Returns the number of child links in the tree
     pub(crate) fn child_links(&self) -> usize {
-        self.inner.read().unwrap().child_links()
+        self.inner.read().child_links()
     }
 
     /// The number of pruned blocks that are still available in memory
     pub(super) fn pruned_blocks_in_mem(&self) -> usize {
-        self.inner.read().unwrap().pruned_blocks_in_mem()
+        self.inner.read().pruned_blocks_in_mem()
     }
 
     /// Helper function to insert the block with the qc together
     pub fn insert_block_with_qc(&self, block: Block) -> anyhow::Result<Arc<ExecutedBlock>> {
         self.insert_single_quorum_cert(block.quorum_cert().clone())?;
         Ok(self.execute_and_insert_block(block)?)
-    }
-
-    /// Helper function to insert a reconfiguration block
-    pub fn insert_reconfiguration_block(&self, block: Block) -> anyhow::Result<Arc<ExecutedBlock>> {
-        self.insert_single_quorum_cert(block.quorum_cert().clone())?;
-        let executed_block = self.execute_block(block)?;
-        let compute_result = executed_block.compute_result();
-        Ok(self
-            .inner
-            .write()
-            .unwrap()
-            .insert_block(ExecutedBlock::new(
-                executed_block.block().clone(),
-                StateComputeResult::new(
-                    compute_result.root_hash(),
-                    compute_result.frozen_subtree_roots().clone(),
-                    compute_result.num_leaves(),
-                    Some(EpochState::empty()),
-                    compute_result.compute_status().clone(),
-                    compute_result.transaction_info_hashes().clone(),
-                ),
-            ))?)
     }
 }

@@ -1,8 +1,8 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::file_format::{Constant, SignatureToken};
-use libra_types::account_address::AccountAddress;
+use move_core_types::account_address::AccountAddress;
 use proptest::{
     arbitrary::any,
     collection::{btree_set, vec, SizeRange},

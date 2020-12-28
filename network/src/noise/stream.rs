@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! The socket module implements the post-handshake part of the protocol.
@@ -19,8 +19,8 @@ use std::{
     task::{Context, Poll},
 };
 
-use libra_crypto::{noise, x25519};
-use libra_logger::prelude::*;
+use diem_crypto::{noise, x25519};
+use diem_logger::prelude::*;
 
 //
 // NoiseStream
@@ -60,11 +60,6 @@ impl<TSocket> NoiseStream<TSocket> {
     /// Pull out the static public key of the remote
     pub fn get_remote_static(&self) -> x25519::PublicKey {
         self.session.get_remote_static()
-    }
-
-    #[cfg(any(test, feature = "fuzzing"))]
-    pub fn into_socket(self) -> TSocket {
-        self.socket
     }
 }
 
@@ -117,7 +112,8 @@ where
                         Ok(Some(frame_len)) => {
                             // Empty Frame
                             if frame_len == 0 {
-                                self.read_state = ReadState::Init;
+                                // 0-length messages are not expected
+                                self.read_state = ReadState::Eof(Err(()));
                             } else {
                                 self.read_state = ReadState::ReadFrame {
                                     frame_len,
@@ -157,7 +153,7 @@ where
                                     };
                                 }
                                 Err(e) => {
-                                    error!("Decryption Error: {}", e);
+                                    error!(error = %e, "Decryption Error: {}", e);
                                     self.read_state = ReadState::DecryptionError(e);
                                 }
                             }
@@ -294,7 +290,7 @@ where
                                 };
                             }
                             Err(e) => {
-                                error!("Encryption Error: {}", e);
+                                error!(error = %e, "Encryption Error: {}", e);
                                 let err = io::Error::new(
                                     io::ErrorKind::InvalidData,
                                     format!("EncryptionError: {}", e),
@@ -550,14 +546,18 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::noise::{AntiReplayTimestamps, HandshakeAuthMode, NoiseUpgrader};
+    use crate::{
+        noise::{AntiReplayTimestamps, HandshakeAuthMode, NoiseUpgrader},
+        testutils::fake_socket::{ReadOnlyTestSocket, ReadWriteTestSocket},
+    };
+    use diem_config::network_id::NetworkContext;
+    use diem_crypto::{test_utils::TEST_SEED, traits::Uniform as _, x25519};
+    use diem_types::PeerId;
     use futures::{
         executor::block_on,
         future::join,
         io::{AsyncReadExt, AsyncWriteExt},
     };
-    use libra_crypto::{test_utils::TEST_SEED, traits::Uniform as _, x25519};
-    use libra_types::PeerId;
     use memsocket::MemorySocket;
     use rand::SeedableRng as _;
     use std::io;
@@ -578,14 +578,14 @@ mod test {
         let server_peer_id = PeerId::from_identity_public_key(server_public);
 
         let client = NoiseUpgrader::new(
-            client_peer_id,
+            NetworkContext::mock_with_peer_id(client_peer_id),
             client_private,
-            HandshakeAuthMode::ServerOnly,
+            HandshakeAuthMode::server_only(),
         );
         let server = NoiseUpgrader::new(
-            server_peer_id,
+            NetworkContext::mock_with_peer_id(server_peer_id),
             server_private,
-            HandshakeAuthMode::ServerOnly,
+            HandshakeAuthMode::server_only(),
         );
 
         ((client, client_public), (server, server_public))
@@ -608,7 +608,7 @@ mod test {
 
         //
         let client_session = client_session.unwrap();
-        let (server_session, _) = server_session.unwrap();
+        let (server_session, _, _) = server_session.unwrap();
         (client_session, server_session)
     }
 
@@ -630,6 +630,27 @@ mod test {
         assert_eq!(buf, b"stormlight archive");
 
         Ok(())
+    }
+
+    // we used to time out when given a stream of all zeros, now we want an EOF
+    #[test]
+    fn dont_read_forever() {
+        // setup fake socket
+        let mut fake_socket = ReadOnlyTestSocket::new(&[0u8]);
+
+        // the socket will read a continuous streams of zeros
+        fake_socket.set_trailing();
+
+        // setup a NoiseStream with a dummy state
+        let noise_session = noise::NoiseSession::new_for_testing();
+        let mut peer = NoiseStream::new(fake_socket, noise_session);
+
+        // make sure we error and we don't continuously read
+        block_on(async move {
+            let mut buffer = [0u8; 128];
+            let res = peer.read(&mut buffer).await;
+            assert!(res.is_err());
+        });
     }
 
     #[test]
@@ -671,5 +692,48 @@ mod test {
         let mut buf_receive = [0; noise::MAX_SIZE_NOISE_MSG];
         block_on(server.read_exact(&mut buf_receive)).unwrap();
         assert_eq!(&buf_receive[..], &buf_send[..]);
+    }
+
+    #[test]
+    fn fragmented_stream() {
+        // create an in-memory socket for testing
+        let (mut dialer_socket, mut listener_socket) = ReadWriteTestSocket::new_pair();
+
+        // fragment reads
+        dialer_socket.set_fragmented_read();
+        listener_socket.set_fragmented_read();
+
+        // get peers
+        let ((client, _client_public_key), (server, server_public_key)) = build_peers();
+
+        // perform the handshake
+        let (client, server) = block_on(join(
+            client.upgrade_outbound(dialer_socket, server_public_key, AntiReplayTimestamps::now),
+            server.upgrade_inbound(listener_socket),
+        ));
+
+        // get session
+        let mut client = client.unwrap();
+        let (mut server, _, _) = server.unwrap();
+
+        // test send and receive
+        block_on(client.write_all(b"The Name of the Wind")).unwrap();
+        block_on(client.flush()).unwrap();
+        block_on(client.write_all(b"The Wise Man's Fear")).unwrap();
+        block_on(client.flush()).unwrap();
+
+        block_on(server.write_all(b"The Doors of Stone")).unwrap();
+        block_on(server.flush()).unwrap();
+
+        let mut buf = [0; 20];
+        block_on(server.read_exact(&mut buf)).unwrap();
+        assert_eq!(&buf, b"The Name of the Wind");
+        let mut buf = [0; 19];
+        block_on(server.read_exact(&mut buf)).unwrap();
+        assert_eq!(&buf, b"The Wise Man's Fear");
+
+        let mut buf = [0; 18];
+        block_on(client.read_exact(&mut buf)).unwrap();
+        assert_eq!(&buf, b"The Doors of Stone");
     }
 }

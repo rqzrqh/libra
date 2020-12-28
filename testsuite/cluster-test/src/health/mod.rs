@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
@@ -9,7 +9,7 @@ mod fullnode_check;
 mod liveness_check;
 mod log_tail;
 
-use crate::{cluster::Cluster, util::unix_timestamp_now};
+use crate::cluster::Cluster;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 pub use commit_check::CommitHistoryHealthCheck;
@@ -22,15 +22,22 @@ use std::{
     collections::{HashMap, HashSet},
     env, fmt,
     iter::FromIterator,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 use termion::color::*;
 
 #[derive(Clone, Debug)]
 pub struct Commit {
     commit: String,
+    epoch: u64,
     round: u64,
     parent: String,
+}
+
+impl Commit {
+    pub fn epoch_and_round(&self) -> (u64, u64) {
+        (self.epoch, self.round)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -133,7 +140,7 @@ impl HealthCheckRunner {
             if self.debug {
                 messages.push(format!(
                     "{} {}, on_event time: {}ms, verify time: {}ms, events: {}",
-                    unix_timestamp_now().as_millis(),
+                    diem_infallible::duration_since_epoch().as_millis(),
                     health_check.name(),
                     (events_processed - start).as_millis(),
                     (verified - events_processed).as_millis(),
@@ -143,7 +150,11 @@ impl HealthCheckRunner {
         }
         for err in context.err_acc {
             node_health.insert(err.validator.clone(), false);
-            messages.push(format!("{} {:?}", unix_timestamp_now().as_millis(), err));
+            messages.push(format!(
+                "{} {:?}",
+                diem_infallible::duration_since_epoch().as_millis(),
+                err
+            ));
         }
 
         let mut failed = vec![];
@@ -156,7 +167,7 @@ impl HealthCheckRunner {
                 failed.push(node);
             }
             if (i + 1) % 15 == 0 {
-                validators_message.push_str("\n");
+                validators_message.push('\n');
             }
         }
         messages.push(validators_message);
@@ -222,9 +233,7 @@ pub struct HealthCheckError {
 
 impl HealthCheckContext {
     pub fn new() -> Self {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("Now is behind UNIX_EPOCH");
+        let now = diem_infallible::duration_since_epoch();
         Self {
             now,
             err_acc: vec![],

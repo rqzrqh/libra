@@ -1,11 +1,11 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
 
+use proxy::Proxy;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::env;
 use thiserror::Error;
 
 /// Request timeout for github operations
@@ -78,7 +78,7 @@ impl Client {
 
         let resp = self
             .upgrade_request(ureq::delete(&self.url(path)))
-            .send_json(json!({ "message": "libra-secure", "sha": hash }));
+            .send_json(json!({ "message": "diem-secure", "sha": hash }));
 
         match resp.status() {
             200 => Ok(()),
@@ -153,10 +153,10 @@ impl Client {
     pub fn put(&self, path: &str, content: &str) -> Result<(), Error> {
         let json = match self.get_sha(path) {
             Ok(hash) => {
-                json!({ "content": content, "message": format!("[libra-management] {}", path), "sha": hash })
+                json!({ "content": content, "message": format!("[diem-management] {}", path), "sha": hash })
             }
             Err(Error::NotFound(_)) => {
-                json!({ "content": content, "message": format!("[libra-management] {}", path) })
+                json!({ "content": content, "message": format!("[diem-management] {}", path) })
             }
             Err(e) => return Err(e),
         };
@@ -178,15 +178,14 @@ impl Client {
             .set("Authorization", &format!("token {}", self.token))
             .set(ACCEPT_HEADER, ACCEPT_VALUE)
             .timeout_connect(TIMEOUT);
-        match env::var("https_proxy") {
-            Ok(proxy) => request
-                .set_proxy(
-                    ureq::Proxy::new(proxy)
-                        .expect("Unable to parse https_proxy environment variable"),
-                )
-                .build(),
-            Err(_e) => request,
+
+        let proxy = Proxy::new();
+        let host = request.get_host().expect("unable to get the host");
+        let proxy_url = proxy.https(&host);
+        if let Some(proxy_url) = proxy_url {
+            request.set_proxy(ureq::Proxy::new(proxy_url).expect("Unable to parse proxy_url"));
         }
+        request
     }
 
     /// Get can read files or directories, this makes it easier to use

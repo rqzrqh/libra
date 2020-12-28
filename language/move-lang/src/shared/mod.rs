@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use move_ir_types::location::*;
@@ -11,7 +11,6 @@ use std::{
 };
 
 pub mod ast_debug;
-pub mod fake_natives;
 pub mod remembering_unique_map;
 pub mod unique_map;
 
@@ -25,7 +24,7 @@ pub const ADDRESS_LENGTH: usize = 16;
 pub struct Address([u8; ADDRESS_LENGTH]);
 
 impl Address {
-    pub const LIBRA_CORE: Address = Address::new([
+    pub const DIEM_CORE: Address = Address::new([
         0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8,
     ]);
 
@@ -43,13 +42,12 @@ impl Address {
             hex_string.insert(0, '0');
         }
 
-        let mut result = hex::decode(hex_string.as_str()).unwrap();
+        let mut result = hex::decode(hex_string.as_str())
+            .map_err(|e| format!("hex string {} fails to decode with Error {}", hex_string, e))?;
         let len = result.len();
         if len < ADDRESS_LENGTH {
             result.reverse();
-            for _ in len..ADDRESS_LENGTH {
-                result.push(0);
-            }
+            result.resize(ADDRESS_LENGTH, 0);
             result.reverse();
         }
 
@@ -72,19 +70,34 @@ impl AsRef<[u8]> for Address {
 
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter) -> std::fmt::Result {
-        write!(f, "0x{:#x}", self)
+        write!(f, "0x{:#X}", self)
     }
 }
 
 impl fmt::Debug for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0x{:#x}", self)
+        write!(f, "0x{:#X}", self)
     }
 }
 
 impl fmt::LowerHex for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let encoded = hex::encode(&self.0);
+        let dropped = encoded
+            .chars()
+            .skip_while(|c| c == &'0')
+            .collect::<String>();
+        if dropped.is_empty() {
+            write!(f, "0")
+        } else {
+            write!(f, "{}", dropped)
+        }
+    }
+}
+
+impl fmt::UpperHex for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let encoded = hex::encode_upper(&self.0);
         let dropped = encoded
             .chars()
             .skip_while(|c| c == &'0')

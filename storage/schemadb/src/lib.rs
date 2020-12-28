@@ -1,11 +1,11 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
 
 //! This library implements a schematized DB on top of [RocksDB](https://rocksdb.org/). It makes
 //! sure all data passed in and out are structured according to predefined schemas and prevents
-//! access to raw keys and values. This library also enforces a set of Libra specific DB options,
+//! access to raw keys and values. This library also enforces a set of Diem specific DB options,
 //! like custom comparators and schema-to-column-family mapping.
 //!
 //! It requires that different kinds of key-value pairs be stored in separate column
@@ -13,13 +13,19 @@
 //! [`define_schema!`] macro to define the schema name, the types of key and value, and name of the
 //! column family.
 
+mod metrics;
 #[macro_use]
 pub mod schema;
 
-use crate::schema::{KeyCodec, Schema, SeekKeyCodec, ValueCodec};
+use crate::{
+    metrics::{
+        DIEM_SCHEMADB_BATCH_COMMIT_BYTES, DIEM_SCHEMADB_BATCH_COMMIT_LATENCY_SECONDS,
+        DIEM_SCHEMADB_DELETES, DIEM_SCHEMADB_GET_BYTES, DIEM_SCHEMADB_GET_LATENCY_SECONDS,
+        DIEM_SCHEMADB_ITER_BYTES, DIEM_SCHEMADB_ITER_LATENCY_SECONDS, DIEM_SCHEMADB_PUT_BYTES,
+    },
+    schema::{KeyCodec, Schema, SeekKeyCodec, ValueCodec},
+};
 use anyhow::{ensure, format_err, Result};
-use libra_metrics::OpMetrics;
-use once_cell::sync::Lazy;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     iter::Iterator,
@@ -27,10 +33,11 @@ use std::{
     path::Path,
 };
 
-static OP_COUNTER: Lazy<OpMetrics> = Lazy::new(|| OpMetrics::new_and_registered("schemadb"));
-
 /// Type alias to `rocksdb::ReadOptions`. See [`rocksdb doc`](https://github.com/pingcap/rust-rocksdb/blob/master/src/rocksdb_options.rs)
 pub type ReadOptions = rocksdb::ReadOptions;
+
+/// Type alias to `rocksdb::Options`.
+pub type Options = rocksdb::Options;
 
 /// Type alias to improve readability.
 pub type ColumnFamilyName = &'static str;
@@ -82,10 +89,16 @@ impl SchemaBatch {
     }
 }
 
+pub enum ScanDirection {
+    Forward,
+    Backward,
+}
+
 /// DB Iterator parameterized on [`Schema`] that seeks with [`Schema::Key`] and yields
 /// [`Schema::Key`] and [`Schema::Value`]
 pub struct SchemaIterator<'a, S> {
     db_iter: rocksdb::DBRawIterator<'a>,
+    direction: ScanDirection,
     phantom: PhantomData<S>,
 }
 
@@ -93,9 +106,10 @@ impl<'a, S> SchemaIterator<'a, S>
 where
     S: Schema,
 {
-    fn new(db_iter: rocksdb::DBRawIterator<'a>) -> Self {
+    fn new(db_iter: rocksdb::DBRawIterator<'a>, direction: ScanDirection) -> Self {
         SchemaIterator {
             db_iter,
+            direction,
             phantom: PhantomData,
         }
     }
@@ -135,6 +149,10 @@ where
     }
 
     fn next_impl(&mut self) -> Result<Option<(S::Key, S::Value)>> {
+        let _timer = DIEM_SCHEMADB_ITER_LATENCY_SECONDS
+            .with_label_values(&[S::COLUMN_FAMILY_NAME])
+            .start_timer();
+
         if !self.db_iter.valid() {
             self.db_iter.status()?;
             return Ok(None);
@@ -142,9 +160,18 @@ where
 
         let raw_key = self.db_iter.key().expect("Iterator must be valid.");
         let raw_value = self.db_iter.value().expect("Iterator must be valid.");
+        DIEM_SCHEMADB_ITER_BYTES
+            .with_label_values(&[S::COLUMN_FAMILY_NAME])
+            .observe((raw_key.len() + raw_value.len()) as f64);
+
         let key = <S::Key as KeyCodec<S>>::decode_key(raw_key)?;
         let value = <S::Value as ValueCodec<S>>::decode_value(raw_value)?;
-        self.db_iter.next();
+
+        match self.direction {
+            ScanDirection::Forward => self.db_iter.next(),
+            ScanDirection::Backward => self.db_iter.prev(),
+        }
+
         Ok(Some((key, value)))
     }
 }
@@ -176,6 +203,7 @@ impl DB {
         path: impl AsRef<Path>,
         name: &'static str,
         column_families: Vec<ColumnFamilyName>,
+        db_opts: &rocksdb::Options,
     ) -> Result<Self> {
         {
             let cfs_set: HashSet<_> = column_families.iter().collect();
@@ -189,36 +217,44 @@ impl DB {
             );
         }
 
-        let mut db_opts = rocksdb::Options::default();
-        db_opts.create_if_missing(true);
-        db_opts.create_missing_column_families(true);
-
-        // For now we set the max total WAL size to be 1G. This config can be useful when column
-        // families are updated at non-uniform frequencies.
-        db_opts.set_max_total_wal_size(1 << 30);
-
-        let db = DB::open_cf(&db_opts, path, name, column_families)?;
+        let db = DB::open_cf(db_opts, path, name, column_families)?;
         Ok(db)
     }
 
     /// Open db in readonly mode
+    /// Note that this still assumes there's only one process that opens the same DB.
+    /// See `open_as_secondary`
     pub fn open_readonly(
         path: impl AsRef<Path>,
         name: &'static str,
         column_families: Vec<ColumnFamilyName>,
+        db_opts: &rocksdb::Options,
     ) -> Result<Self> {
-        let db_opts = rocksdb::Options::default();
-        DB::open_cf_readonly(&db_opts, path, name, column_families)
+        DB::open_cf_readonly(db_opts, path, name, column_families)
+    }
+
+    /// Open db as secondary.
+    /// This allows to read the DB in another process while it's already opened for read / write in
+    /// one (e.g. a Diem Node)
+    /// https://github.com/facebook/rocksdb/blob/493f425e77043cc35ea2d89ee3c4ec0274c700cb/include/rocksdb/db.h#L176-L222
+    pub fn open_as_secondary<P: AsRef<Path>>(
+        primary_path: P,
+        secondary_path: P,
+        name: &'static str,
+        column_families: Vec<ColumnFamilyName>,
+        db_opts: &rocksdb::Options,
+    ) -> Result<Self> {
+        DB::open_cf_as_secondary(db_opts, primary_path, secondary_path, name, column_families)
     }
 
     fn open_cf(
-        opts: &rocksdb::Options,
+        db_opts: &rocksdb::Options,
         path: impl AsRef<Path>,
         name: &'static str,
         column_families: Vec<ColumnFamilyName>,
     ) -> Result<DB> {
         let inner = rocksdb::DB::open_cf_descriptors(
-            opts,
+            db_opts,
             path,
             column_families.iter().map(|cf_name| {
                 let mut cf_opts = rocksdb::Options::default();
@@ -254,14 +290,41 @@ impl DB {
         })
     }
 
+    fn open_cf_as_secondary<P: AsRef<Path>>(
+        opts: &rocksdb::Options,
+        primary_path: P,
+        secondary_path: P,
+        name: &'static str,
+        column_families: Vec<ColumnFamilyName>,
+    ) -> Result<DB> {
+        let inner = rocksdb::DB::open_cf_as_secondary(
+            opts,
+            primary_path,
+            secondary_path,
+            &column_families,
+        )?;
+
+        Ok(DB {
+            name,
+            inner,
+            column_families,
+        })
+    }
+
     /// Reads single record by key.
     pub fn get<S: Schema>(&self, schema_key: &S::Key) -> Result<Option<S::Value>> {
+        let _timer = DIEM_SCHEMADB_GET_LATENCY_SECONDS
+            .with_label_values(&[S::COLUMN_FAMILY_NAME])
+            .start_timer();
+
         let k = <S::Key as KeyCodec<S>>::encode_key(&schema_key)?;
         let cf_handle = self.get_cf_handle(S::COLUMN_FAMILY_NAME)?;
-        let time = std::time::Instant::now();
 
         let result = self.inner.get_cf(cf_handle, &k)?;
-        OP_COUNTER.observe_duration(&format!("db_get_{}", S::COLUMN_FAMILY_NAME), time.elapsed());
+        DIEM_SCHEMADB_GET_BYTES
+            .with_label_values(&[S::COLUMN_FAMILY_NAME])
+            .observe(result.as_ref().map_or(0.0, |v| v.len() as f64));
+
         result
             .map(|raw_value| <S::Value as ValueCodec<S>>::decode_value(&raw_value))
             .transpose()
@@ -269,7 +332,7 @@ impl DB {
 
     /// Writes single record.
     pub fn put<S: Schema>(&self, key: &S::Key, value: &S::Value) -> Result<()> {
-        // Not necessary to use a batch, but we'd like a central place to bump OP_COUNTERS.
+        // Not necessary to use a batch, but we'd like a central place to bump counters.
         // Used in tests only anyway.
         let mut batch = SchemaBatch::new();
         batch.put::<S>(key, value)?;
@@ -294,16 +357,34 @@ impl DB {
         Ok(())
     }
 
-    /// Returns a [`SchemaIterator`] on a certain schema.
-    pub fn iter<S: Schema>(&self, opts: ReadOptions) -> Result<SchemaIterator<S>> {
+    fn iter_with_direction<S: Schema>(
+        &self,
+        opts: ReadOptions,
+        direction: ScanDirection,
+    ) -> Result<SchemaIterator<S>> {
         let cf_handle = self.get_cf_handle(S::COLUMN_FAMILY_NAME)?;
         Ok(SchemaIterator::new(
             self.inner.raw_iterator_cf_opt(cf_handle, opts),
+            direction,
         ))
+    }
+
+    /// Returns a forward [`SchemaIterator`] on a certain schema.
+    pub fn iter<S: Schema>(&self, opts: ReadOptions) -> Result<SchemaIterator<S>> {
+        self.iter_with_direction::<S>(opts, ScanDirection::Forward)
+    }
+
+    /// Returns a backward [`SchemaIterator`] on a certain schema.
+    pub fn rev_iter<S: Schema>(&self, opts: ReadOptions) -> Result<SchemaIterator<S>> {
+        self.iter_with_direction::<S>(opts, ScanDirection::Backward)
     }
 
     /// Writes a group of records wrapped in a [`SchemaBatch`].
     pub fn write_schemas(&self, batch: SchemaBatch) -> Result<()> {
+        let _timer = DIEM_SCHEMADB_BATCH_COMMIT_LATENCY_SECONDS
+            .with_label_values(&[self.name])
+            .start_timer();
+
         let mut db_batch = rocksdb::WriteBatch::default();
         for (cf_name, rows) in &batch.rows {
             let cf_handle = self.get_cf_handle(cf_name)?;
@@ -322,18 +403,20 @@ impl DB {
         for (cf_name, rows) in &batch.rows {
             for (key, write_op) in rows {
                 match write_op {
-                    WriteOp::Value(value) => OP_COUNTER.observe(
-                        &format!("db_put_bytes_{}", cf_name),
-                        (key.len() + value.len()) as f64,
-                    ),
-                    WriteOp::Deletion => OP_COUNTER.inc(&format!("db_delete_{}", cf_name)),
+                    WriteOp::Value(value) => {
+                        DIEM_SCHEMADB_PUT_BYTES
+                            .with_label_values(&[cf_name])
+                            .observe((key.len() + value.len()) as f64);
+                    }
+                    WriteOp::Deletion => {
+                        DIEM_SCHEMADB_DELETES.with_label_values(&[cf_name]).inc();
+                    }
                 }
             }
         }
-        OP_COUNTER.observe(
-            &format!("db_batch_commit_bytes_{}", self.name),
-            serialized_size as f64,
-        );
+        DIEM_SCHEMADB_BATCH_COMMIT_BYTES
+            .with_label_values(&[self.name])
+            .observe(serialized_size as f64);
 
         Ok(())
     }

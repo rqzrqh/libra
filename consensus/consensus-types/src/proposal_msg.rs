@@ -1,9 +1,9 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{block::Block, common::Author, sync_info::SyncInfo};
 use anyhow::{ensure, format_err, Context, Result};
-use libra_types::validator_verifier::ValidatorVerifier;
+use diem_types::validator_verifier::ValidatorVerifier;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -77,7 +77,7 @@ impl ProposalMsg {
 
     pub fn verify(&self, validator: &ValidatorVerifier) -> Result<()> {
         self.proposal
-            .validate_signatures(validator)
+            .validate_signature(validator)
             .map_err(|e| format_err!("{:?}", e))?;
         // if there is a timeout certificate, verify its signatures
         if let Some(tc) = self.sync_info.highest_timeout_certificate() {
@@ -108,10 +108,10 @@ impl ProposalMsg {
 
 impl fmt::Display for ProposalMsg {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let author = match self.proposal.author() {
-            Some(author) => author.short_str(),
-            None => String::from("NIL"),
-        };
-        write!(f, "[proposal {} from {}]", self.proposal, author,)
+        write!(f, "[proposal {} from ", self.proposal)?;
+        match self.proposal.author() {
+            Some(author) => write!(f, "{}]", author.short_str()),
+            None => write!(f, "NIL]"),
+        }
     }
 }

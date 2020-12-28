@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! mempool is used to track transactions which have been submitted but not yet
@@ -10,20 +10,21 @@ use crate::{
         transaction_store::TransactionStore,
         ttl_cache::TtlCache,
     },
-    OP_COUNTERS,
+    counters,
+    logging::{LogEntry, LogSchema, TxnsLog},
 };
-use debug_interface::prelude::*;
-use libra_config::config::NodeConfig;
-use libra_logger::prelude::*;
-use libra_types::{
+use diem_config::config::NodeConfig;
+use diem_logger::prelude::*;
+use diem_trace::prelude::*;
+use diem_types::{
     account_address::AccountAddress,
     mempool_status::{MempoolStatus, MempoolStatusCode},
-    transaction::SignedTransaction,
+    transaction::{GovernanceRole, SignedTransaction},
 };
 use std::{
     cmp::max,
     collections::HashSet,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 
 pub struct Mempool {
@@ -31,7 +32,6 @@ pub struct Mempool {
     transactions: TransactionStore,
 
     sequence_number_cache: TtlCache<AccountAddress, u64>,
-    // temporary DS. TODO: eventually retire it
     // for each transaction, entry with timestamp is added when transaction enters mempool
     // used to measure e2e latency of transaction in system, as well as time it takes to pick it up
     // by consensus
@@ -60,14 +60,16 @@ impl Mempool {
     ) {
         trace_event!("mempool:remove_transaction", {"txn", sender, sequence_number});
         trace!(
-            "[Mempool] Removing transaction from mempool: {}:{}:{}",
-            sender,
-            sequence_number,
-            is_rejected
+            LogSchema::new(LogEntry::RemoveTxn).txns(TxnsLog::new_txn(*sender, sequence_number)),
+            is_rejected = is_rejected
         );
-        self.log_latency(*sender, sequence_number, "e2e.latency");
+        let metric_label = if is_rejected {
+            counters::COMMIT_REJECTED_LABEL
+        } else {
+            counters::COMMIT_ACCEPTED_LABEL
+        };
+        self.log_latency(*sender, sequence_number, metric_label);
         self.metrics_cache.remove(&(*sender, sequence_number));
-        OP_COUNTERS.inc(&format!("remove_transaction.{}", is_rejected));
 
         let current_seq_number = self
             .sequence_number_cache
@@ -75,10 +77,6 @@ impl Mempool {
             .unwrap_or_default();
 
         if is_rejected {
-            debug!(
-                "[Mempool] transaction is rejected: {}:{}",
-                sender, sequence_number
-            );
             if sequence_number >= current_seq_number {
                 self.transactions
                     .reject_transaction(&sender, sequence_number);
@@ -95,7 +93,9 @@ impl Mempool {
     fn log_latency(&mut self, account: AccountAddress, sequence_number: u64, metric: &str) {
         if let Some(&creation_time) = self.metrics_cache.get(&(account, sequence_number)) {
             if let Ok(time_delta) = SystemTime::now().duration_since(creation_time) {
-                OP_COUNTERS.observe_duration(metric, time_delta);
+                counters::CORE_MEMPOOL_TXN_COMMIT_LATENCY
+                    .with_label_values(&[metric])
+                    .observe(time_delta.as_secs_f64());
             }
         }
     }
@@ -106,17 +106,16 @@ impl Mempool {
         &mut self,
         txn: SignedTransaction,
         gas_amount: u64,
-        rankin_score: u64,
+        ranking_score: u64,
         db_sequence_number: u64,
         timeline_state: TimelineState,
-        is_governance_txn: bool,
+        governance_role: GovernanceRole,
     ) -> MempoolStatus {
         trace_event!("mempool::add_txn", {"txn", txn.sender(), txn.sequence_number()});
         trace!(
-            "[Mempool] Adding transaction to mempool: {}:{}:{}",
-            &txn.sender(),
-            txn.sequence_number(),
-            db_sequence_number,
+            LogSchema::new(LogEntry::AddTxn)
+                .txns(TxnsLog::new_txn(txn.sender(), txn.sequence_number())),
+            committed_seq_number = db_sequence_number
         );
         let cached_value = self.sequence_number_cache.get(&txn.sender());
         let sequence_number =
@@ -133,10 +132,8 @@ impl Mempool {
             ));
         }
 
-        let expiration_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("init timestamp failure")
-            + self.system_transaction_timeout;
+        let expiration_time =
+            diem_infallible::duration_since_epoch() + self.system_transaction_timeout;
         if timeline_state != TimelineState::NonQualified {
             self.metrics_cache
                 .insert((txn.sender(), txn.sequence_number()), SystemTime::now());
@@ -146,14 +143,12 @@ impl Mempool {
             txn,
             expiration_time,
             gas_amount,
-            rankin_score,
+            ranking_score,
             timeline_state,
-            is_governance_txn,
+            governance_role,
         );
 
-        let status = self.transactions.insert(txn_info, sequence_number);
-        OP_COUNTERS.inc(&format!("insert.{:?}", status));
-        status
+        self.transactions.insert(txn_info, sequence_number)
     }
 
     /// Fetches next block of transactions for consensus
@@ -213,17 +208,28 @@ impl Mempool {
         }
         let result_size = result.len();
         // convert transaction pointers to real values
+        let mut block_log = TxnsLog::new();
         let block: Vec<_> = result
             .into_iter()
-            .filter_map(|(address, seq)| self.transactions.get(&address, seq))
+            .filter_map(|(address, seq)| {
+                block_log.add(address, seq);
+                self.transactions.get(&address, seq)
+            })
             .collect();
-        debug!("mempool::get_block: seen_consensus={}, walked={}, seen_after={}, result_size={}, block_size={}",
-               seen_size, txn_walked, seen.len(), result_size, block.len());
+
+        debug!(
+            LogSchema::new(LogEntry::GetBlock).txns(block_log),
+            seen_consensus = seen_size,
+            walked = txn_walked,
+            seen_after = seen.len(),
+            result_size = result_size,
+            block_size = block.len()
+        );
         for transaction in &block {
             self.log_latency(
                 transaction.sender(),
                 transaction.sequence_number(),
-                "txn_pre_consensus_s",
+                counters::GET_BLOCK_STAGE_LABEL,
             );
         }
         block
@@ -234,14 +240,15 @@ impl Mempool {
     /// clears expired entries in metrics cache and sequence number cache
     pub(crate) fn gc(&mut self) {
         let now = SystemTime::now();
-        self.transactions.gc_by_system_ttl();
+        self.transactions.gc_by_system_ttl(&self.metrics_cache);
         self.metrics_cache.gc(now);
         self.sequence_number_cache.gc(now);
     }
 
     /// Garbage collection based on client-specified expiration time
     pub(crate) fn gc_by_expiration_time(&mut self, block_time: Duration) {
-        self.transactions.gc_by_expiration_time(block_time);
+        self.transactions
+            .gc_by_expiration_time(block_time, &self.metrics_cache);
     }
 
     /// Read `count` transactions from timeline since `timeline_id`
@@ -250,16 +257,21 @@ impl Mempool {
         &mut self,
         timeline_id: u64,
         count: usize,
-    ) -> (Vec<(u64, SignedTransaction)>, u64) {
+    ) -> (Vec<SignedTransaction>, u64) {
         self.transactions.read_timeline(timeline_id, count)
     }
 
-    /// Read transactions as (timeline_id, transaction) with timeline IDs in `timeline_ids`
-    /// Note for some requested timeline IDs, the corresponding transaction may not be in the timeline
-    pub(crate) fn filter_read_timeline(
-        &mut self,
-        timeline_ids: Vec<u64>,
-    ) -> Vec<(u64, SignedTransaction)> {
-        self.transactions.filter_read_timeline(timeline_ids)
+    /// Read transactions from timeline from `start_id` (exclusive) to `end_id` (inclusive)
+    pub(crate) fn timeline_range(&mut self, start_id: u64, end_id: u64) -> Vec<SignedTransaction> {
+        self.transactions.timeline_range(start_id, end_id)
+    }
+
+    pub fn gen_snapshot(&self) -> TxnsLog {
+        self.transactions.gen_snapshot(&self.metrics_cache)
+    }
+
+    #[cfg(test)]
+    pub fn get_parking_lot_size(&self) -> usize {
+        self.transactions.get_parking_lot_size()
     }
 }

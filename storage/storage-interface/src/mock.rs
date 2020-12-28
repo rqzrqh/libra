@@ -1,17 +1,17 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! This module provides mock dbreader for tests.
 
-use crate::{DbReader, StartupInfo, TreeState};
+use crate::{DbReader, Order, StartupInfo, TreeState};
 use anyhow::Result;
-use libra_crypto::HashValue;
-use libra_types::{
+use diem_crypto::HashValue;
+use diem_types::{
     account_address::AccountAddress,
     account_config::AccountResource,
     account_state::AccountState,
     account_state_blob::{AccountStateBlob, AccountStateWithProof},
-    contract_event::ContractEvent,
+    contract_event::{ContractEvent, EventWithProof},
     epoch_change::EpochChangeProof,
     event::{EventHandle, EventKey},
     ledger_info::LedgerInfoWithSignatures,
@@ -48,9 +48,25 @@ impl DbReader for MockDbReader {
         &self,
         _event_key: &EventKey,
         _start: u64,
-        _ascending: bool,
+        _order: Order,
         _limit: u64,
     ) -> Result<Vec<(u64, ContractEvent)>> {
+        unimplemented!()
+    }
+
+    /// Returns events by given event key
+    fn get_events_with_proofs(
+        &self,
+        _event_key: &EventKey,
+        _start: u64,
+        _order: Order,
+        _limit: u64,
+        _known_version: Option<u64>,
+    ) -> Result<Vec<EventWithProof>> {
+        unimplemented!()
+    }
+
+    fn get_block_timestamp(&self, _version: u64) -> Result<u64> {
         unimplemented!()
     }
 
@@ -140,13 +156,12 @@ fn get_mock_account_state_blob() -> AccountStateBlob {
         None,
         EventHandle::random_handle(0),
         EventHandle::random_handle(0),
-        false,
     );
 
     let mut account_state = AccountState::default();
     account_state.insert(
         AccountResource::resource_path(),
-        lcs::to_bytes(&account_resource).unwrap(),
+        bcs::to_bytes(&account_resource).unwrap(),
     );
 
     AccountStateBlob::try_from(&account_state).unwrap()

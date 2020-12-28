@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -8,21 +8,22 @@ use crate::{
     CommitNotification, ConsensusRequest, SubmissionStatus,
 };
 use anyhow::{format_err, Result};
-use channel::{self, libra_channel, message_queues::QueueStyle};
-use futures::channel::{mpsc, oneshot};
-use libra_config::{
+use channel::{self, diem_channel, message_queues::QueueStyle};
+use diem_config::{
     config::{NetworkConfig, NodeConfig},
-    network_id::NetworkId,
+    network_id::{NetworkId, NodeNetworkId},
 };
-use libra_types::{mempool_status::MempoolStatusCode, transaction::SignedTransaction};
+use diem_infallible::{Mutex, RwLock};
+use diem_types::{
+    mempool_status::MempoolStatusCode,
+    transaction::{GovernanceRole, SignedTransaction},
+};
+use futures::channel::{mpsc, oneshot};
 use network::{
     peer_manager::{conn_notifs_channel, ConnectionRequestSender, PeerManagerRequestSender},
     protocols::network::{NewNetworkEvents, NewNetworkSender},
 };
-use std::{
-    num::NonZeroUsize,
-    sync::{Arc, Mutex, RwLock},
-};
+use std::{num::NonZeroUsize, sync::Arc};
 use storage_interface::mock::MockDbReader;
 use tokio::runtime::{Builder, Runtime};
 use vm_validator::mocks::mock_vm_validator::MockVMValidator;
@@ -46,7 +47,7 @@ impl MockSharedMempool {
     /// and the channel through which shared mempool receives client events
     pub fn new(state_sync: Option<mpsc::Receiver<CommitNotification>>) -> Self {
         let runtime = Builder::new()
-            .thread_name("mock-shared-mem-")
+            .thread_name("mock-shared-mem")
             .threaded_scheduler()
             .enable_all()
             .build()
@@ -54,15 +55,14 @@ impl MockSharedMempool {
 
         let mut config = NodeConfig::random();
         config.validator_network = Some(NetworkConfig::network_with_id(NetworkId::Validator));
-        let peer_id = config.validator_network.as_ref().unwrap().peer_id();
 
         let mempool = Arc::new(Mutex::new(CoreMempool::new(&config)));
         let (network_reqs_tx, _network_reqs_rx) =
-            libra_channel::new(QueueStyle::FIFO, NonZeroUsize::new(8).unwrap(), None);
+            diem_channel::new(QueueStyle::FIFO, NonZeroUsize::new(8).unwrap(), None);
         let (connection_reqs_tx, _) =
-            libra_channel::new(QueueStyle::FIFO, NonZeroUsize::new(8).unwrap(), None);
+            diem_channel::new(QueueStyle::FIFO, NonZeroUsize::new(8).unwrap(), None);
         let (_network_notifs_tx, network_notifs_rx) =
-            libra_channel::new(QueueStyle::FIFO, NonZeroUsize::new(8).unwrap(), None);
+            diem_channel::new(QueueStyle::FIFO, NonZeroUsize::new(8).unwrap(), None);
         let (_, conn_notifs_rx) = conn_notifs_channel::new();
         let network_sender = MempoolNetworkSender::new(
             PeerManagerRequestSender::new(network_reqs_tx),
@@ -79,8 +79,12 @@ impl MockSharedMempool {
             Some(state_sync) => (None, state_sync),
         };
         let (_reconfig_event_publisher, reconfig_event_subscriber) =
-            libra_channel::new(QueueStyle::LIFO, NonZeroUsize::new(1).unwrap(), None);
-        let network_handles = vec![(peer_id, network_sender, network_events)];
+            diem_channel::new(QueueStyle::LIFO, NonZeroUsize::new(1).unwrap(), None);
+        let network_handles = vec![(
+            NodeNetworkId::new(NetworkId::Validator, 0),
+            network_sender,
+            network_events,
+        )];
 
         start_shared_mempool(
             runtime.handle(),
@@ -108,10 +112,7 @@ impl MockSharedMempool {
     /// add txns to mempool
     pub fn add_txns(&self, txns: Vec<SignedTransaction>) -> Result<()> {
         {
-            let mut pool = self
-                .mempool
-                .lock()
-                .expect("[mock shared mempool] failed to acquire mempool lock");
+            let mut pool = self.mempool.lock();
             for txn in txns {
                 if pool
                     .add_txn(
@@ -120,7 +121,7 @@ impl MockSharedMempool {
                         txn.gas_unit_price(),
                         0,
                         TimelineState::NotReady,
-                        false,
+                        GovernanceRole::NonGovernanceRole,
                     )
                     .code
                     != MempoolStatusCode::Accepted
@@ -134,14 +135,10 @@ impl MockSharedMempool {
 
     /// true if all given txns are in mempool, else false
     pub fn read_timeline(&self, timeline_id: u64, count: usize) -> Vec<SignedTransaction> {
-        let mut pool = self
-            .mempool
-            .lock()
-            .expect("[mock shared mempool] failed to acquire mempool lock");
+        let mut pool = self.mempool.lock();
         pool.read_timeline(timeline_id, count)
             .0
             .into_iter()
-            .map(|(_, txn)| txn)
             .collect()
     }
 }

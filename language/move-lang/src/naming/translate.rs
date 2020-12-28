@@ -1,11 +1,11 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
     errors::*,
-    expansion::ast as E,
+    expansion::{ast as E, translate::is_valid_struct_constant_or_schema_name as is_constant_name},
     naming::ast as N,
-    parser::ast::{Field, FunctionName, Kind, Kind_, ModuleIdent, StructName, Var},
+    parser::ast::{ConstantName, Field, FunctionName, Kind, Kind_, ModuleIdent, StructName, Var},
     shared::{unique_map::UniqueMap, *},
     typing::core::{self, Subst},
 };
@@ -37,9 +37,11 @@ impl ResolvedType {
 struct Context {
     errors: Errors,
     current_module: Option<ModuleIdent>,
-    scoped_types: BTreeMap<ModuleIdent, BTreeMap<String, (Loc, ModuleIdent, Option<Kind>)>>,
+    scoped_types: BTreeMap<ModuleIdent, BTreeMap<String, (Loc, ModuleIdent, Option<Kind>, usize)>>,
     unscoped_types: BTreeMap<String, ResolvedType>,
     scoped_functions: BTreeMap<ModuleIdent, BTreeMap<String, Loc>>,
+    unscoped_constants: BTreeMap<String, Loc>,
+    scoped_constants: BTreeMap<ModuleIdent, BTreeMap<String, Loc>>,
 }
 
 impl Context {
@@ -54,7 +56,9 @@ impl Context {
                     .iter()
                     .map(|(s, sdef)| {
                         let kopt = sdef.resource_opt.map(|l| sp(l, Kind_::Resource));
-                        (s.value().to_string(), (s.loc(), mident.clone(), kopt))
+                        let arity = sdef.type_parameters.len();
+                        let sname = s.value().to_string();
+                        (sname, (s.loc(), mident.clone(), kopt, arity))
                     })
                     .collect();
                 (mident, mems)
@@ -72,6 +76,18 @@ impl Context {
                 (mident, mems)
             })
             .collect();
+        let scoped_constants = prog
+            .modules
+            .iter()
+            .map(|(mident, mdef)| {
+                let mems = mdef
+                    .constants
+                    .iter()
+                    .map(|(n, _)| (n.value().to_string(), n.loc()))
+                    .collect();
+                (mident, mems)
+            })
+            .collect();
         let unscoped_types = N::BuiltinTypeName_::all_names()
             .into_iter()
             .map(|s| (s.to_string(), RT::BuiltinType))
@@ -81,7 +97,9 @@ impl Context {
             current_module: None,
             scoped_types,
             scoped_functions,
+            scoped_constants,
             unscoped_types,
+            unscoped_constants: BTreeMap::new(),
         }
     }
 
@@ -103,7 +121,7 @@ impl Context {
         loc: Loc,
         m: &ModuleIdent,
         n: &Name,
-    ) -> Option<(Loc, StructName, Option<Kind>)> {
+    ) -> Option<(Loc, StructName, Option<Kind>, usize)> {
         let types = match self.scoped_types.get(m) {
             None => {
                 self.error(vec![(loc, format!("Unbound module '{}'", m,))]);
@@ -122,7 +140,9 @@ impl Context {
                 )]);
                 None
             }
-            Some((decl_loc, _, rloc)) => Some((decl_loc, StructName(n.clone()), rloc)),
+            Some((decl_loc, _, rloc, arity)) => {
+                Some((decl_loc, StructName(n.clone()), rloc, arity))
+            }
         }
     }
 
@@ -132,14 +152,14 @@ impl Context {
         m: &ModuleIdent,
         n: &Name,
     ) -> Option<FunctionName> {
-        let types = match self.scoped_functions.get(m) {
+        let functions = match self.scoped_functions.get(m) {
             None => {
                 self.error(vec![(loc, format!("Unbound module '{}'", m,))]);
                 return None;
             }
             Some(members) => members,
         };
-        match types.get(&n.value).cloned() {
+        match functions.get(&n.value).cloned() {
             None => {
                 self.error(vec![(
                     loc,
@@ -151,6 +171,34 @@ impl Context {
                 None
             }
             Some(_) => Some(FunctionName(n.clone())),
+        }
+    }
+
+    fn resolve_module_constant(
+        &mut self,
+        loc: Loc,
+        m: &ModuleIdent,
+        n: Name,
+    ) -> Option<ConstantName> {
+        let constants = match self.scoped_constants.get(m) {
+            None => {
+                self.error(vec![(loc, format!("Unbound module '{}'", m,))]);
+                return None;
+            }
+            Some(members) => members,
+        };
+        match constants.get(&n.value).cloned() {
+            None => {
+                self.error(vec![(
+                    loc,
+                    format!(
+                        "Invalid module access. Unbound constant '{}' in module '{}'",
+                        n, m
+                    ),
+                )]);
+                None
+            }
+            Some(_) => Some(ConstantName(n)),
         }
     }
 
@@ -197,16 +245,47 @@ impl Context {
         }
     }
 
+    fn resolve_constant(
+        &mut self,
+        sp!(loc, ma_): E::ModuleAccess,
+    ) -> Option<(Option<ModuleIdent>, ConstantName)> {
+        use E::ModuleAccess_ as EA;
+        match ma_ {
+            EA::Name(n) => match self.unscoped_constants.get(&n.value) {
+                None => {
+                    self.error(vec![(loc, format!("Unbound constant '{}'", n))]);
+                    None
+                }
+                Some(_) => Some((None, ConstantName(n))),
+            },
+            EA::ModuleAccess(m, n) => match self.resolve_module_constant(loc, &m, n) {
+                None => {
+                    assert!(self.has_errors());
+                    None
+                }
+                Some(cname) => Some((Some(m), cname)),
+            },
+        }
+    }
+
     fn bind_type(&mut self, s: String, rt: ResolvedType) {
         self.unscoped_types.insert(s, rt);
     }
 
-    fn save_unscoped(&self) -> BTreeMap<String, ResolvedType> {
-        self.unscoped_types.clone()
+    fn bind_constant(&mut self, s: String, loc: Loc) {
+        self.unscoped_constants.insert(s, loc);
     }
 
-    fn restore_unscoped(&mut self, types: BTreeMap<String, ResolvedType>) {
+    fn save_unscoped(&self) -> (BTreeMap<String, ResolvedType>, BTreeMap<String, Loc>) {
+        (self.unscoped_types.clone(), self.unscoped_constants.clone())
+    }
+
+    fn restore_unscoped(
+        &mut self,
+        (types, constants): (BTreeMap<String, ResolvedType>, BTreeMap<String, Loc>),
+    ) {
         self.unscoped_types = types;
+        self.unscoped_constants = constants;
     }
 }
 
@@ -245,12 +324,17 @@ fn module(
         context.restore_unscoped(unscoped.clone());
         function(context, name, f)
     });
+    let constants = mdef.constants.map(|name, c| {
+        context.restore_unscoped(unscoped.clone());
+        constant(context, name, c)
+    });
     context.restore_unscoped(unscoped);
     N::ModuleDefinition {
         is_source_module,
         dependency_order: 0,
         structs,
         functions,
+        constants,
     }
 }
 
@@ -267,13 +351,27 @@ fn scripts(
 fn script(context: &mut Context, escript: E::Script) -> N::Script {
     let E::Script {
         loc,
+        constants: econstants,
         function_name,
         function: efunction,
         specs: _specs,
     } = escript;
+    let outer_unscoped = context.save_unscoped();
+    for (n, _) in &econstants {
+        let sp!(loc, s) = n.0;
+        context.bind_constant(s, loc)
+    }
+    let inner_unscoped = context.save_unscoped();
+    let constants = econstants.map(|name, c| {
+        context.restore_unscoped(inner_unscoped.clone());
+        constant(context, name, c)
+    });
+    context.restore_unscoped(inner_unscoped);
     let function = function(context, function_name.clone(), efunction);
+    context.restore_unscoped(outer_unscoped);
     N::Script {
         loc,
+        constants,
         function_name,
         function,
     }
@@ -358,7 +456,7 @@ fn acquires_type(context: &mut Context, sp!(loc, en_): E::ModuleAccess) -> Optio
             None
         }
         EN::ModuleAccess(m, n) => {
-            let (decl_loc, _, resource_opt) = context.resolve_module_type(loc, &m, &n)?;
+            let (decl_loc, _, resource_opt, _) = context.resolve_module_type(loc, &m, &n)?;
             acquires_type_struct(context, loc, decl_loc, m, StructName(n), resource_opt)
         }
     }
@@ -467,6 +565,25 @@ fn check_no_nominal_resources(context: &mut Context, s: &StructName, field: &Fie
 }
 
 //**************************************************************************************************
+// Constants
+//**************************************************************************************************
+
+fn constant(context: &mut Context, _name: ConstantName, econstant: E::Constant) -> N::Constant {
+    let E::Constant {
+        loc,
+        signature: esignature,
+        value: evalue,
+    } = econstant;
+    let signature = type_(context, esignature);
+    let value = exp_(context, evalue);
+    N::Constant {
+        loc,
+        signature,
+        value,
+    }
+}
+
+//**************************************************************************************************
 // Types
 //**************************************************************************************************
 
@@ -523,9 +640,12 @@ fn type_(context: &mut Context, sp!(loc, ety_): E::Type) -> N::Type {
                 NT::UnresolvedError
             }
             Some(RT::BuiltinType) => {
-                let ty_args = types(context, tys);
                 let bn_ = N::BuiltinTypeName_::resolve(&n.value).unwrap();
-                NT::builtin_(sp(loc, bn_), ty_args)
+                let name_f = || format!("{}", &bn_);
+                let arity = bn_.tparam_constraints(loc).len();
+                let tys = types(context, tys);
+                let tys = check_type_argument_arity(context, loc, name_f, tys, arity);
+                NT::builtin_(sp(loc, bn_), tys)
             }
             Some(RT::TParam(_, tp)) => {
                 if !tys.is_empty() {
@@ -539,21 +659,55 @@ fn type_(context: &mut Context, sp!(loc, ety_): E::Type) -> N::Type {
                 }
             }
         },
-        ET::Apply(sp!(loc, EN::ModuleAccess(m, n)), tys) => {
-            match context.resolve_module_type(loc, &m, &n) {
+        ET::Apply(sp!(nloc, EN::ModuleAccess(m, n)), tys) => {
+            match context.resolve_module_type(nloc, &m, &n) {
                 None => {
                     assert!(context.has_errors());
                     NT::UnresolvedError
                 }
-                Some((_, _, resource_opt)) => {
-                    let tn = sp(loc, NN::ModuleType(m, StructName(n)));
-                    NT::Apply(resource_opt, tn, types(context, tys))
+                Some((_, _, resource_opt, arity)) => {
+                    let tn = sp(nloc, NN::ModuleType(m, StructName(n)));
+                    let tys = types(context, tys);
+                    let name_f = || format!("{}", tn);
+                    let tys = check_type_argument_arity(context, loc, name_f, tys, arity);
+                    NT::Apply(resource_opt, tn, tys)
                 }
             }
         }
         ET::Fun(_, _) => panic!("ICE only allowed in spec context"),
     };
     sp(loc, ty_)
+}
+
+fn check_type_argument_arity<F: FnOnce() -> String>(
+    context: &mut Context,
+    loc: Loc,
+    name_f: F,
+    mut ty_args: Vec<N::Type>,
+    arity: usize,
+) -> Vec<N::Type> {
+    let args_len = ty_args.len();
+    if args_len != arity {
+        context.error(vec![(
+            loc,
+            format!(
+                "Invalid instantiation of '{}'. Expected {} type argument(s) but got {}",
+                name_f(),
+                arity,
+                args_len
+            ),
+        )])
+    }
+
+    while ty_args.len() > arity {
+        ty_args.pop();
+    }
+
+    while ty_args.len() < arity {
+        ty_args.push(sp(loc, N::Type_::UnresolvedError))
+    }
+
+    ty_args
 }
 
 //**************************************************************************************************
@@ -618,7 +772,14 @@ fn exp_(context: &mut Context, e: E::Exp) -> N::Exp {
         EE::Value(val) => NE::Value(val),
         EE::Move(v) => NE::Move(v),
         EE::Copy(v) => NE::Copy(v),
-        EE::Name(sp!(_, E::ModuleAccess_::Name(v)), None) => NE::Use(Var(v)),
+        EE::Name(sp!(aloc, E::ModuleAccess_::Name(v)), None) => {
+            if is_constant_name(&v.value) {
+                access_constant(context, sp(aloc, E::ModuleAccess_::Name(v)))
+            } else {
+                NE::Use(Var(v))
+            }
+        }
+        EE::Name(ma, None) => access_constant(context, ma),
 
         EE::IfElse(eb, et, ef) => {
             NE::IfElse(exp(context, *eb), exp(context, *et), exp(context, *ef))
@@ -747,11 +908,21 @@ fn exp_(context: &mut Context, e: E::Exp) -> N::Exp {
             NE::UnresolvedError
         }
         // `Name` matches name variants only allowed in specs (we handle the allowed ones above)
-        EE::Index(..) | EE::Lambda(..) | EE::Name(..) => {
+        EE::Index(..) | EE::Lambda(..) | EE::Name(_, Some(_)) => {
             panic!("ICE unexpected specification construct")
         }
     };
     sp(eloc, ne_)
+}
+
+fn access_constant(context: &mut Context, ma: E::ModuleAccess) -> N::Exp_ {
+    match context.resolve_constant(ma) {
+        None => {
+            assert!(context.has_errors());
+            N::Exp_::UnresolvedError
+        }
+        Some((m, c)) => N::Exp_::Constant(m, c),
+    }
 }
 
 fn dotted(context: &mut Context, edot: E::ExpDotted) -> Option<N::ExpDotted> {
@@ -782,7 +953,7 @@ fn lvalue(context: &mut Context, case: LValueCase, sp!(loc, l_): E::LValue) -> O
     let nl_ = match l_ {
         EL::Var(sp!(_, E::ModuleAccess_::Name(n)), None) => {
             let v = Var(n);
-            if v.starts_with_underscore() {
+            if v.is_underscore() {
                 NL::Ignore
             } else {
                 NL::Var(v)
@@ -840,7 +1011,6 @@ fn resolve_builtin_function(
 ) -> Option<N::BuiltinFunction_> {
     use N::{BuiltinFunction_ as B, BuiltinFunction_::*};
     Some(match b.value.as_str() {
-        B::MOVE_TO_SENDER => MoveToSender(check_builtin_ty_arg(context, loc, b, ty_args)),
         B::MOVE_TO => MoveTo(check_builtin_ty_arg(context, loc, b, ty_args)),
         B::MOVE_FROM => MoveFrom(check_builtin_ty_arg(context, loc, b, ty_args)),
         B::BORROW_GLOBAL => BorrowGlobal(false, check_builtin_ty_arg(context, loc, b, ty_args)),
@@ -885,7 +1055,7 @@ fn check_builtin_ty_args(
                 (b.loc, format!("Invalid call to builtin function: '{}'", b)),
                 (
                     loc,
-                    format!("Expected {} type arguments but got {}", arity, len),
+                    format!("Expected {} type argument(s) but got {}", arity, len),
                 ),
             ]);
         }

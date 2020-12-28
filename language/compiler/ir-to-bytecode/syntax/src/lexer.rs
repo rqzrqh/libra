@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::syntax::ParseError;
@@ -63,8 +63,6 @@ pub enum Tok {
     Exists,
     False,
     Freeze,
-    /// Function to get transaction sender in the Move language
-    GetTxnSender,
     /// Like borrow_global, but for spec language
     Global,
     /// Like exists, but for spec language
@@ -82,7 +80,6 @@ pub enum Tok {
     Module,
     Move,
     MoveFrom,
-    MoveToSender,
     MoveTo,
     Native,
     Old,
@@ -98,8 +95,6 @@ pub enum Tok {
     SucceedsIf,
     Synthetic,
     True,
-    /// Transaction sender in the specification language
-    TxnSender,
     U8,
     U64,
     U128,
@@ -253,7 +248,6 @@ impl<'input> Lexer<'input> {
                             "borrow_global_mut" => (Tok::BorrowGlobalMut, len + 1),
                             "exists" => (Tok::Exists, len + 1),
                             "move_from" => (Tok::MoveFrom, len + 1),
-                            "move_to_sender" => (Tok::MoveToSender, len + 1),
                             "move_to" => (Tok::MoveTo, len + 1),
                             "main" => (Tok::Main, len),
                             _ => (Tok::NameBeginTyValue, len + 1),
@@ -367,20 +361,14 @@ fn get_name_len(text: &str) -> usize {
         return 0;
     }
     text.chars()
-        .position(|c| match c {
-            'a'..='z' | 'A'..='Z' | '$' | '_' | '0'..='9' => false,
-            _ => true,
-        })
+        .position(|c| !matches!(c, 'a'..='z' | 'A'..='Z' | '$' | '_' | '0'..='9'))
         .unwrap_or_else(|| text.len())
 }
 
 fn get_decimal_number(text: &str) -> (Tok, usize) {
     let len = text
         .chars()
-        .position(|c| match c {
-            '0'..='9' => false,
-            _ => true,
-        })
+        .position(|c| !matches!(c, '0'..='9'))
         .unwrap_or_else(|| text.len());
     let rest = &text[len..];
     if rest.starts_with("u8") {
@@ -397,10 +385,7 @@ fn get_decimal_number(text: &str) -> (Tok, usize) {
 // Return the length of the substring containing characters in [0-9a-fA-F].
 fn get_hex_digits_len(text: &str) -> usize {
     text.chars()
-        .position(|c| match c {
-            'a'..='f' | 'A'..='F' | '0'..='9' => false,
-            _ => true,
-        })
+        .position(|c| !matches!(c, 'a'..='f' | 'A'..='F' | '0'..='9'))
         .unwrap_or_else(|| text.len())
 }
 
@@ -430,7 +415,6 @@ fn get_name_token(name: &str) -> Tok {
         "ensures" => Tok::Ensures,
         "false" => Tok::False,
         "freeze" => Tok::Freeze,
-        "get_txn_sender" => Tok::GetTxnSender,
         "global" => Tok::Global,              // spec language
         "global_exists" => Tok::GlobalExists, // spec language
         "to_u8" => Tok::ToU8,
@@ -455,7 +439,6 @@ fn get_name_token(name: &str) -> Tok {
         "succeeds_if" => Tok::SucceedsIf,
         "synthetic" => Tok::Synthetic,
         "true" => Tok::True,
-        "txn_sender" => Tok::TxnSender,
         "u8" => Tok::U8,
         "u64" => Tok::U64,
         "u128" => Tok::U128,

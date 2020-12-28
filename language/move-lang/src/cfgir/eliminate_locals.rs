@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use super::cfg::BlockCFG;
@@ -42,7 +42,6 @@ mod count {
     use crate::{
         hlir::ast::*,
         parser::ast::{BinOp, UnaryOp, Var},
-        shared::*,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -137,7 +136,7 @@ mod count {
     fn exp(context: &mut Context, parent_e: &Exp) {
         use UnannotatedExp_ as E;
         match &parent_e.exp.value {
-            E::Unit { .. } | E::Value(_) | E::UnresolvedError => (),
+            E::Unit { .. } | E::Value(_) | E::Constant(_) | E::UnresolvedError => (),
             E::Spec(_, used_locals) => {
                 used_locals.keys().for_each(|var| context.used(var, false));
             }
@@ -206,17 +205,17 @@ mod count {
             | E::Builtin(_, _)
             | E::Freeze(_)
             | E::Dereference(_)
+            | E::ModuleCall(_)
             | E::Move { .. }
             | E::Borrow(_, _, _) => false,
 
-            E::Unit { .. } | E::Value(_) => true,
+            E::Unit { .. } | E::Value(_) | E::Constant(_) => true,
 
             E::Cast(e, _) => can_subst_exp_single(e),
             E::UnaryExp(op, e) => can_subst_exp_unary(op) && can_subst_exp_single(e),
             E::BinopExp(e1, op, e2) => {
                 can_subst_exp_binary(op) && can_subst_exp_single(e1) && can_subst_exp_single(e2)
             }
-            E::ModuleCall(mcall) => can_subst_exp_module_call(mcall),
             E::ExpList(es) => es.iter().all(|i| can_subst_exp_item(i)),
             E::Pack(_, _, fields) => fields.iter().all(|(_, _, e)| can_subst_exp_single(e)),
 
@@ -230,26 +229,6 @@ mod count {
 
     fn can_subst_exp_binary(sp!(_, op_): &BinOp) -> bool {
         op_.is_pure()
-    }
-
-    fn can_subst_exp_module_call(mcall: &ModuleCall) -> bool {
-        use crate::shared::fake_natives::transaction as TXN;
-        let ModuleCall {
-            module,
-            name,
-            arguments,
-            ..
-        } = mcall;
-        let a_m_f = (
-            &module.0.value.address,
-            module.0.value.name.value(),
-            name.value(),
-        );
-        let call_is_pure = match a_m_f {
-            (&Address::LIBRA_CORE, TXN::MOD, TXN::SENDER) => true,
-            _ => false,
-        };
-        call_is_pure && can_subst_exp_single(arguments)
     }
 
     fn can_subst_exp_item(item: &ExpListItem) -> bool {
@@ -371,6 +350,7 @@ mod eliminate {
 
             E::Unit { .. }
             | E::Value(_)
+            | E::Constant(_)
             | E::Spec(_, _)
             | E::UnresolvedError
             | E::BorrowLocal(_, _) => (),

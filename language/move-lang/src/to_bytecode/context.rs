@@ -1,12 +1,14 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
     expansion::ast::SpecId,
     hlir::ast as H,
-    parser::ast::{FunctionName, ModuleIdent, ModuleIdent_, ModuleName, StructName, Var},
+    parser::ast::{
+        ConstantName, FunctionName, ModuleIdent, ModuleIdent_, ModuleName, StructName, Var,
+    },
 };
-use libra_types::account_address::AccountAddress as LibraAddress;
+use diem_types::account_address::AccountAddress as DiemAddress;
 use move_ir_types::ast as IR;
 use std::{
     clone::Clone,
@@ -216,7 +218,7 @@ impl<'a> Context<'a> {
         let name = Self::translate_module_name(name);
         IR::ModuleIdent::Qualified(IR::QualifiedModuleIdent::new(
             name,
-            LibraAddress::new(address.to_u8()),
+            DiemAddress::new(address.to_u8()),
         ))
     }
 
@@ -226,6 +228,10 @@ impl<'a> Context<'a> {
 
     fn translate_struct_name(n: StructName) -> IR::StructName {
         IR::StructName::new(n.0.value)
+    }
+
+    fn translate_constant_name(n: ConstantName) -> IR::ConstantName {
+        IR::ConstantName::new(n.0.value)
     }
 
     fn translate_function_name(n: FunctionName) -> IR::FunctionName {
@@ -284,6 +290,22 @@ impl<'a> Context<'a> {
         };
         let n = Self::translate_function_name(f);
         (mname, n)
+    }
+
+    pub fn constant_definition_name(
+        &self,
+        m: Option<&ModuleIdent>,
+        f: ConstantName,
+    ) -> IR::ConstantName {
+        assert!(
+            self.current_module == m,
+            "ICE invalid constant definition lookup"
+        );
+        Self::translate_constant_name(f)
+    }
+
+    pub fn constant_name(&mut self, f: ConstantName) -> IR::ConstantName {
+        Self::translate_constant_name(f)
     }
 
     //**********************************************************************************************

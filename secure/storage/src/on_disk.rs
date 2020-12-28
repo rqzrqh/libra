@@ -1,9 +1,11 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{CryptoKVStorage, Error, GetResponse, KVStorage, Value};
-use libra_secure_time::{RealTimeService, TimeService};
-use libra_temppath::TempPath;
+use crate::{CryptoKVStorage, Error, GetResponse, KVStorage};
+use diem_secure_time::{RealTimeService, TimeService};
+use diem_temppath::TempPath;
+use serde::{de::DeserializeOwned, Serialize};
+use serde_json::Value;
 use std::{
     collections::HashMap,
     fs::{self, File},
@@ -15,7 +17,7 @@ use std::{
 /// intended for single threads (or must be wrapped by a Arc<RwLock<>>). This provides no permission
 /// checks and simply offers a proof of concept to unblock building of applications without more
 /// complex data stores. Internally, it reads and writes all data to a file, which means that it
-/// must make copies of all key material which violates the Libra code base. It violates it because
+/// must make copies of all key material which violates the Diem code base. It violates it because
 /// the anticipation is that data stores would securely handle key material. This should not be used
 /// in production.
 pub type OnDiskStorage = OnDiskStorageInternal<RealTimeService>;
@@ -51,7 +53,7 @@ impl<T: TimeService> OnDiskStorageInternal<T> {
         }
     }
 
-    fn read(&self) -> Result<HashMap<String, GetResponse>, Error> {
+    fn read(&self) -> Result<HashMap<String, Value>, Error> {
         let mut file = File::open(&self.file_path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
@@ -62,7 +64,7 @@ impl<T: TimeService> OnDiskStorageInternal<T> {
         Ok(data)
     }
 
-    fn write(&self, data: &HashMap<String, GetResponse>) -> Result<(), Error> {
+    fn write(&self, data: &HashMap<String, Value>) -> Result<(), Error> {
         let contents = serde_json::to_vec(data)?;
         let mut file = File::create(self.temp_path.path())?;
         file.write_all(&contents)?;
@@ -71,22 +73,23 @@ impl<T: TimeService> OnDiskStorageInternal<T> {
     }
 }
 
-impl<T: Send + Sync + TimeService> KVStorage for OnDiskStorageInternal<T> {
+impl<T: TimeService> KVStorage for OnDiskStorageInternal<T> {
     fn available(&self) -> Result<(), Error> {
         Ok(())
     }
 
-    fn get(&self, key: &str) -> Result<GetResponse, Error> {
+    fn get<V: DeserializeOwned>(&self, key: &str) -> Result<GetResponse<V>, Error> {
         let mut data = self.read()?;
         data.remove(key)
             .ok_or_else(|| Error::KeyNotSet(key.to_string()))
+            .and_then(|value| serde_json::from_value(value).map_err(|e| e.into()))
     }
 
-    fn set(&mut self, key: &str, value: Value) -> Result<(), Error> {
+    fn set<V: Serialize>(&mut self, key: &str, value: V) -> Result<(), Error> {
         let mut data = self.read()?;
         data.insert(
             key.to_string(),
-            GetResponse::new(value, self.time_service.now()),
+            serde_json::to_value(&GetResponse::new(value, self.time_service.now()))?,
         );
         self.write(&data)
     }
@@ -97,4 +100,4 @@ impl<T: Send + Sync + TimeService> KVStorage for OnDiskStorageInternal<T> {
     }
 }
 
-impl<T: TimeService + Send + Sync> CryptoKVStorage for OnDiskStorageInternal<T> {}
+impl<T: TimeService> CryptoKVStorage for OnDiskStorageInternal<T> {}

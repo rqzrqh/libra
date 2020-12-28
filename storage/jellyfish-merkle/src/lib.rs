@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
@@ -71,18 +71,18 @@
 pub mod iterator;
 #[cfg(test)]
 mod jellyfish_merkle_test;
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzzing"))]
 mod mock_tree_store;
 mod nibble_path;
 pub mod node_type;
 pub mod restore;
-#[cfg(test)]
-mod test_helper;
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod test_helper;
 mod tree_cache;
 
 use anyhow::{bail, ensure, format_err, Result};
-use libra_crypto::HashValue;
-use libra_types::{
+use diem_crypto::HashValue;
+use diem_types::{
     account_state_blob::AccountStateBlob,
     proof::{SparseMerkleProof, SparseMerkleRangeProof},
     transaction::Version,
@@ -92,7 +92,14 @@ use node_type::{Child, Children, InternalNode, LeafNode, Node, NodeKey};
 #[cfg(any(test, feature = "fuzzing"))]
 use proptest_derive::Arbitrary;
 use std::collections::{BTreeMap, BTreeSet};
+use thiserror::Error;
 use tree_cache::TreeCache;
+
+#[derive(Error, Debug)]
+#[error("Missing state root node at version {version}, probably pruned.")]
+pub struct MissingRootError {
+    pub version: Version,
+}
 
 /// The hardcoded maximum height of a [`JellyfishMerkleTree`] in nibbles.
 pub const ROOT_NIBBLE_HEIGHT: usize = HashValue::LENGTH * 2;
@@ -126,6 +133,14 @@ pub type NodeBatch = BTreeMap<NodeKey, Node>;
 /// with other batches.
 pub type StaleNodeIndexBatch = BTreeSet<StaleNodeIndex>;
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NodeStats {
+    pub new_nodes: usize,
+    pub new_leaves: usize,
+    pub stale_nodes: usize,
+    pub stale_leaves: usize,
+}
+
 /// Indicates a node becomes stale since `stale_since_version`.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
@@ -145,8 +160,7 @@ pub struct StaleNodeIndex {
 pub struct TreeUpdateBatch {
     pub node_batch: NodeBatch,
     pub stale_node_index_batch: StaleNodeIndexBatch,
-    pub num_new_leaves: usize,
-    pub num_stale_leaves: usize,
+    pub node_stats: Vec<NodeStats>,
 }
 
 /// The Jellyfish Merkle tree data structure. See [`crate`] for description.
@@ -166,7 +180,7 @@ where
     /// This is a convenient function that calls
     /// [`put_blob_sets`](struct.JellyfishMerkleTree.html#method.put_blob_sets) with a single
     /// `keyed_blob_set`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzzing"))]
     pub fn put_blob_set(
         &self,
         blob_set: Vec<(HashValue, AccountStateBlob)>,
@@ -512,7 +526,13 @@ where
         // We limit the number of loops here deliberately to avoid potential cyclic graph bugs
         // in the tree structure.
         for nibble_depth in 0..=ROOT_NIBBLE_HEIGHT {
-            let next_node = self.reader.get_node(&next_node_key)?;
+            let next_node = self.reader.get_node(&next_node_key).map_err(|err| {
+                if nibble_depth == 0 {
+                    MissingRootError { version }.into()
+                } else {
+                    err
+                }
+            })?;
             match next_node {
                 Node::Internal(internal_node) => {
                     let queried_child_index = nibble_iter
@@ -594,7 +614,6 @@ where
         Ok(self.get_with_proof(key, version)?.0)
     }
 
-    #[cfg(any(test, feature = "fuzzing"))]
     pub fn get_root_hash(&self, version: Version) -> Result<HashValue> {
         self.get_root_hash_option(version)?
             .ok_or_else(|| format_err!("Root node not found for version {}.", version))

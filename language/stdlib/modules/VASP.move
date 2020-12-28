@@ -1,35 +1,20 @@
-// Error codes:
-// 7000 -> INSUFFICIENT_PRIVILEGES
-// 7001 -> INVALID_PARENT_VASP_ACCOUNT
-// 7002 -> INVALID_CHILD_VASP_ACCOUNT
-// 7003 -> CHILD_ACCOUNT_STILL_PARENT
-// 7004 -> INVALID_PUBLIC_KEY
 address 0x1 {
 
+/// A VASP is one type of balance-holding account on the blockchain. VASPs from a two-layer
+/// hierarchy.  The main account, called a "parent VASP" and a collection of "child VASP"s.
+/// This module provides functions to manage VASP accounts.
+
 module VASP {
-    use 0x1::LibraTimestamp;
+    use 0x1::Errors;
+    use 0x1::DiemTimestamp;
     use 0x1::Signer;
-    use 0x1::Signature;
-    use 0x1::Roles::{Capability, AssociationRootRole, ParentVASPRole};
+    use 0x1::Roles;
+    use 0x1::AccountLimits;
 
     /// Each VASP has a unique root account that holds a `ParentVASP` resource. This resource holds
     /// the VASP's globally unique name and all of the metadata that other VASPs need to perform
     /// off-chain protocols with this one.
     resource struct ParentVASP {
-        /// The human readable name of this VASP. Immutable.
-        human_name: vector<u8>,
-        /// The base_url holds the URL to be used for off-chain communication. This contains the
-        /// entire URL (e.g. https://...). Mutable.
-        base_url: vector<u8>,
-        /// Expiration date in microseconds from unix epoch. For V1 VASPs, it is always set to
-        /// U64_MAX. Mutable, but only by the Association.
-        expiration_date: u64,
-        /// 32 byte Ed25519 public key whose counterpart must be used to sign
-        /// (1) the payment metadata for on-chain travel rule transactions
-        /// (2) the KYC information exchanged in the off-chain travel rule protocol.
-        /// Note that this is different than `authentication_key` used in LibraAccount::T, which is
-        /// a hash of a public key + signature scheme identifier, not a public key. Mutable.
-        compliance_public_key: vector<u8>,
         /// Number of child accounts this parent has created.
         num_children: u64
     }
@@ -37,52 +22,48 @@ module VASP {
     /// A resource that represents a child account of the parent VASP account at `parent_vasp_addr`
     resource struct ChildVASP { parent_vasp_addr: address }
 
-    ///////////////////////////////////////////////////////////////////////////
-    // Association called functions for parent VASP accounts
-    ///////////////////////////////////////////////////////////////////////////
+    /// The `ParentVASP` or `ChildVASP` resources are not in the required state
+    const EPARENT_OR_CHILD_VASP: u64 = 0;
+    /// The creation of a new Child VASP account would exceed the number of children permitted for a VASP
+    const ETOO_MANY_CHILDREN: u64 = 1;
+    /// The account must be a Parent or Child VASP account
+    const ENOT_A_VASP: u64 = 2;
+    /// The creating account must be a Parent VASP account
+    const ENOT_A_PARENT_VASP: u64 = 3;
 
-    /// Renew's `parent_vasp`'s certification
-    public fun recertify_vasp(parent_vasp: &mut ParentVASP) {
-        parent_vasp.expiration_date = LibraTimestamp::now_microseconds() + cert_lifetime();
-    }
 
-    /// Non-destructively decertify `parent_vasp`. Can be
-    /// recertified later on via `recertify_vasp`.
-    public fun decertify_vasp(parent_vasp: &mut ParentVASP) {
-        // Expire the parent credential.
-        parent_vasp.expiration_date = 0;
-    }
-
-    // A year in microseconds
-    fun cert_lifetime(): u64 {
-        31540000000000
-    }
+    /// Maximum number of child accounts that can be created by a single ParentVASP
+    const MAX_CHILD_ACCOUNTS: u64 = 65536; // 2^16
 
     ///////////////////////////////////////////////////////////////////////////
     // To-be parent-vasp called functions
     ///////////////////////////////////////////////////////////////////////////
 
     /// Create a new `ParentVASP` resource under `vasp`
-    /// Aborts if `association` is not an Association account
-    public fun publish_parent_vasp_credential(
-        vasp: &signer,
-        _: &Capability<AssociationRootRole>,
-        human_name: vector<u8>,
-        base_url: vector<u8>,
-        compliance_public_key: vector<u8>
-    ) {
-        assert(Signature::ed25519_validate_pubkey(copy compliance_public_key), 7004);
-        move_to(
-            vasp,
-            ParentVASP {
-                // For testnet and V1, so it should never expire. So set to u64::MAX
-                expiration_date: 18446744073709551615,
-                human_name,
-                base_url,
-                compliance_public_key,
-                num_children: 0
-            }
-        );
+    /// Aborts if `dr_account` is not the diem root account,
+    /// or if there is already a VASP (child or parent) at this account.
+    public fun publish_parent_vasp_credential(vasp: &signer, tc_account: &signer) {
+        DiemTimestamp::assert_operating();
+        Roles::assert_treasury_compliance(tc_account);
+        Roles::assert_parent_vasp_role(vasp);
+        let vasp_addr = Signer::address_of(vasp);
+        assert(!is_vasp(vasp_addr), Errors::already_published(EPARENT_OR_CHILD_VASP));
+        move_to(vasp, ParentVASP { num_children: 0 });
+    }
+
+    spec fun publish_parent_vasp_credential {
+        include DiemTimestamp::AbortsIfNotOperating;
+        include Roles::AbortsIfNotTreasuryCompliance{account: tc_account};
+        include Roles::AbortsIfNotParentVasp{account: vasp};
+        let vasp_addr = Signer::spec_address_of(vasp);
+        aborts_if is_vasp(vasp_addr) with Errors::ALREADY_PUBLISHED;
+        include PublishParentVASPEnsures{vasp_addr: vasp_addr};
+    }
+
+    spec schema PublishParentVASPEnsures {
+        vasp_addr: address;
+        ensures is_parent(vasp_addr);
+        ensures spec_num_children(vasp_addr) == 0;
     }
 
     /// Create a child VASP resource for the `parent`
@@ -90,13 +71,51 @@ module VASP {
     public fun publish_child_vasp_credential(
         parent: &signer,
         child: &signer,
-        _: &Capability<ParentVASPRole>,
     ) acquires ParentVASP {
+        Roles::assert_parent_vasp_role(parent);
+        Roles::assert_child_vasp_role(child);
+        let child_vasp_addr = Signer::address_of(child);
+        assert(!is_vasp(child_vasp_addr), Errors::already_published(EPARENT_OR_CHILD_VASP));
         let parent_vasp_addr = Signer::address_of(parent);
-        assert(exists<ParentVASP>(parent_vasp_addr), 7000);
+        assert(is_parent(parent_vasp_addr), Errors::invalid_argument(ENOT_A_PARENT_VASP));
         let num_children = &mut borrow_global_mut<ParentVASP>(parent_vasp_addr).num_children;
+        // Abort if creating this child account would put the parent VASP over the limit
+        assert(*num_children < MAX_CHILD_ACCOUNTS, Errors::limit_exceeded(ETOO_MANY_CHILDREN));
         *num_children = *num_children + 1;
         move_to(child, ChildVASP { parent_vasp_addr });
+    }
+    spec fun publish_child_vasp_credential {
+        let child_addr = Signer::spec_address_of(child);
+        include PublishChildVASPAbortsIf{child_addr};
+        // NB: This aborts condition is separated out so that `PublishChildVASPAbortsIf` can be used in
+        //     `DiemAccount::create_child_vasp_account` since this doesn't hold of the new account in the pre-state.
+        include Roles::AbortsIfNotChildVasp{account: child_addr};
+        include PublishChildVASPEnsures{parent_addr: Signer::spec_address_of(parent), child_addr: child_addr};
+    }
+
+    spec schema PublishChildVASPAbortsIf {
+        parent: signer;
+        child_addr: address;
+        let parent_addr = Signer::spec_address_of(parent);
+        include Roles::AbortsIfNotParentVasp{account: parent};
+        aborts_if is_vasp(child_addr) with Errors::ALREADY_PUBLISHED;
+        aborts_if !is_parent(parent_addr) with Errors::INVALID_ARGUMENT;
+        aborts_if spec_num_children(parent_addr) + 1 > MAX_CHILD_ACCOUNTS with Errors::LIMIT_EXCEEDED;
+    }
+
+    spec schema PublishChildVASPEnsures {
+        parent_addr: address;
+        child_addr: address;
+        ensures spec_num_children(parent_addr) == old(spec_num_children(parent_addr)) + 1;
+        ensures is_child(child_addr);
+        ensures spec_parent_address(child_addr) == parent_addr;
+    }
+
+    /// Return `true` if `addr` is a parent or child VASP whose parent VASP account contains an
+    /// `AccountLimits<CoinType>` resource.
+    /// Aborts if `addr` is not a VASP
+    public fun has_account_limits<CoinType>(addr: address): bool acquires ChildVASP {
+        AccountLimits::has_window_published<CoinType>(parent_address(addr))
     }
 
     ///////////////////////////////////////////////////////////////////////////
@@ -106,72 +125,147 @@ module VASP {
     /// Return `addr` if `addr` is a `ParentVASP` or its parent's address if it is a `ChildVASP`
     /// Aborts otherwise
     public fun parent_address(addr: address): address acquires ChildVASP {
-        if (exists<ParentVASP>(addr)) {
+        if (is_parent(addr)) {
             addr
-        } else if (exists<ChildVASP>(addr)) {
+        } else if (is_child(addr)) {
             borrow_global<ChildVASP>(addr).parent_vasp_addr
         } else { // wrong account type, abort
-            abort(88)
+            abort(Errors::invalid_argument(ENOT_A_VASP))
+        }
+    }
+    spec fun parent_address {
+        pragma opaque;
+        aborts_if !is_parent(addr) && !is_child(addr) with Errors::INVALID_ARGUMENT;
+        ensures result == spec_parent_address(addr);
+    }
+    spec module {
+        /// Spec version of `Self::parent_address`.
+        define spec_parent_address(addr: address): address {
+            if (is_parent(addr)) {
+                addr
+            } else {
+                global<ChildVASP>(addr).parent_vasp_addr
+            }
+        }
+        define spec_has_account_limits<Token>(addr: address): bool {
+            AccountLimits::has_window_published<Token>(spec_parent_address(addr))
         }
     }
 
+    /// Returns true if `addr` is a parent VASP.
     public fun is_parent(addr: address): bool {
         exists<ParentVASP>(addr)
     }
+    spec fun is_parent {
+        pragma opaque = true;
+        aborts_if false;
+        ensures result == is_parent(addr);
+    }
 
+    /// Returns true if `addr` is a child VASP.
     public fun is_child(addr: address): bool {
         exists<ChildVASP>(addr)
     }
+    spec fun is_child {
+        pragma opaque = true;
+        aborts_if false;
+        ensures result == is_child(addr);
+    }
 
+    /// Returns true if `addr` is a VASP.
     public fun is_vasp(addr: address): bool {
         is_parent(addr) || is_child(addr)
     }
-
-    /// Return the human-readable name for the VASP account
-    /// Aborts if `addr` is not a ParentVASP or ChildVASP account
-    public fun human_name(addr: address): vector<u8>  acquires ChildVASP, ParentVASP {
-        *&borrow_global<ParentVASP>(parent_address(addr)).human_name
+    spec fun is_vasp {
+        pragma opaque = true;
+        aborts_if false;
+        ensures result == is_vasp(addr);
+    }
+    spec schema AbortsIfNotVASP {
+        addr: address;
+        aborts_if !is_vasp(addr);
     }
 
-    /// Return the base URL for the VASP account
-    /// Aborts if `addr` is not a ParentVASP or ChildVASP account
-    public fun base_url(addr: address): vector<u8>  acquires ChildVASP, ParentVASP {
-        *&borrow_global<ParentVASP>(parent_address(addr)).base_url
+    /// Returns true if both addresses are VASPs and they have the same parent address.
+    public fun is_same_vasp(addr1: address, addr2: address): bool acquires ChildVASP {
+        is_vasp(addr1) && is_vasp(addr2) && parent_address(addr1) == parent_address(addr2)
+    }
+    spec fun is_same_vasp {
+        pragma opaque = true;
+        aborts_if false;
+        ensures result == spec_is_same_vasp(addr1, addr2);
+    }
+    /// Spec version of `Self::is_same_vasp`.
+    spec define spec_is_same_vasp(addr1: address, addr2: address): bool {
+        is_vasp(addr1) && is_vasp(addr2) && spec_parent_address(addr1) == spec_parent_address(addr2)
     }
 
-    /// Return the compliance public key for the VASP account
-    /// Aborts if `addr` is not a ParentVASP or ChildVASP account
-    public fun compliance_public_key(addr: address): vector<u8> acquires ChildVASP, ParentVASP {
-        *&borrow_global<ParentVASP>(parent_address(addr)).compliance_public_key
-    }
 
-    /// Return the expiration date for the VASP account
-    /// Aborts if `addr` is not a ParentVASP or ChildVASP account
-    public fun expiration_date(addr: address): u64  acquires ChildVASP, ParentVASP {
-        *&borrow_global<ParentVASP>(parent_address(addr)).expiration_date
-    }
-
-    /// Return the number of child accounts for this VASP.
+    /// If `addr` is the address of a `ParentVASP`, return the number of children.
+    /// If it is the address of a ChildVASP, return the number of children of the parent.
     /// The total number of accounts for this VASP is num_children() + 1
     /// Aborts if `addr` is not a ParentVASP or ChildVASP account
     public fun num_children(addr: address): u64  acquires ChildVASP, ParentVASP {
+        // If parent VASP succeeds, the parent is guaranteed to exist.
         *&borrow_global<ParentVASP>(parent_address(addr)).num_children
     }
-
-    /// Rotate the base URL for the `parent_vasp` account to `new_url`
-    public fun rotate_base_url(parent_vasp: &signer, new_url: vector<u8>) acquires ParentVASP {
-        let parent_addr = Signer::address_of(parent_vasp);
-        borrow_global_mut<ParentVASP>(parent_addr).base_url = new_url
+    spec fun num_children {
+        aborts_if !is_vasp(addr) with Errors::INVALID_ARGUMENT;
+    }
+    /// Spec version of `Self::num_children`.
+    spec define spec_num_children(parent: address): u64 {
+        global<ParentVASP>(parent).num_children
     }
 
-    /// Rotate the compliance public key for `parent_vasp` to `new_key`
-    public fun rotate_compliance_public_key(
-        parent_vasp: &signer,
-        new_key: vector<u8>
-    ) acquires ParentVASP {
-        assert(Signature::ed25519_validate_pubkey(copy new_key), 7004);
-        let parent_addr = Signer::address_of(parent_vasp);
-        borrow_global_mut<ParentVASP>(parent_addr).compliance_public_key = new_key
+    // **************** SPECIFICATIONS ****************
+    spec module {} // switch documentation context back to module level
+
+    /// # Persistence of parent and child VASPs
+    spec module {
+        invariant update [global] forall addr: address where old(is_parent(addr)):
+            is_parent(addr);
+
+        invariant update [global] forall addr: address where old(is_child(addr)):
+            is_child(addr);
+    }
+
+    /// # Existence of Parents
+    spec module {
+        invariant [global]
+            forall child_addr: address where is_child(child_addr):
+                is_parent(global<ChildVASP>(child_addr).parent_vasp_addr);
+    }
+
+    /// # Creation of Child VASPs
+
+    spec module {
+        /// Only a parent VASP calling `Self::publish_child_vasp_credential` can create
+        /// child VASPs.
+        apply ChildVASPsDontChange to *<T>, * except publish_child_vasp_credential;
+
+        /// The number of children of a parent VASP can only changed by adding
+        /// a child through `Self::publish_child_vast_credential`.
+        apply NumChildrenRemainsSame to * except publish_child_vasp_credential;
+    }
+
+    spec schema ChildVASPsDontChange {
+        /// A ChildVASP resource is at an address if and only if it was there in the
+        /// previous state.
+        ensures forall a: address : exists<ChildVASP>(a) == old(exists<ChildVASP>(a));
+    }
+
+    spec schema NumChildrenRemainsSame {
+        ensures forall parent: address
+            where old(is_parent(parent)):
+                spec_num_children(parent) == old(spec_num_children(parent));
+    }
+
+    /// # Immutability of Parent Address
+
+    spec module {
+        /// The parent address stored at ChildVASP resource never changes.
+        invariant update [global]
+            forall a: address where old(is_child(a)): spec_parent_address(a) == old(spec_parent_address(a));
     }
 
 }

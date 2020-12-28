@@ -1,30 +1,30 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Rust representation of a Move transaction script that can be executed on the Libra blockchain.
-//! Libra does not allow arbitrary transaction scripts; only scripts whose hashes are present in
-//! the on-chain script whitelist. The genesis whitelist is derived from this file, and the
-//! `Stdlib` script enum will be modified to reflect changes in the on-chain whitelist as time goes
+//! Rust representation of a Move transaction script that can be executed on the Diem blockchain.
+//! Diem does not allow arbitrary transaction scripts; only scripts whose hashes are present in
+//! the on-chain script allowlist. The genesis allowlist is derived from this file, and the
+//! `Stdlib` script enum will be modified to reflect changes in the on-chain allowlist as time goes
 //! on.
 
 use anyhow::{anyhow, Error, Result};
+use diem_crypto::HashValue;
+use diem_types::transaction::{ScriptABI, SCRIPT_HASH_LENGTH};
 use include_dir::{include_dir, Dir};
-use libra_crypto::HashValue;
-use libra_types::transaction::SCRIPT_HASH_LENGTH;
 use std::{convert::TryFrom, fmt, path::PathBuf};
 
-// This includes the compiled transaction scripts as binaries. We must use this hack to work around
+// This includes the script ABIs as binaries. We must use this hack to work around
 // a problem with Docker, which does not copy over the Move source files that would be be used to
 // produce these binaries at runtime.
-#[allow(dead_code)]
-const COMPILED_TXN_SCRIPTS_DIR: Dir = include_dir!("transaction_scripts");
+const TXN_SCRIPTS_ABI_DIR: Dir = include_dir!("transaction_scripts/abi");
 
-/// All of the Move transaction scripts that can be executed on the Libra blockchain
+/// All of the Move transaction scripts that can be executed on the Diem blockchain
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum StdlibScript {
-    AddValidator,
     AddCurrencyToAccount,
     AddRecoveryRotationCapability,
+    AddScriptAllowList,
+    AddValidatorAndReconfigure,
     Burn,
     BurnTxnFees,
     CancelBurn,
@@ -33,31 +33,28 @@ pub enum StdlibScript {
     CreateParentVaspAccount,
     CreateRecoveryAddress,
     CreateValidatorAccount,
-    EmptyScript,
+    CreateValidatorOperatorAccount,
     FreezeAccount,
-    Mint,
-    MintLbr,
-    ModifyPublishingOption,
     PeerToPeerWithMetadata,
     Preburn,
     PublishSharedEd2551PublicKey,
-    Reconfigure,
-    RemoveValidator,
+    RegisterValidatorConfig,
+    RemoveValidatorAndReconfigure,
     RotateAuthenticationKey,
     RotateAuthenticationKeyWithNonce,
+    RotateAuthenticationKeyWithNonceAdmin,
     RotateAuthenticationKeyWithRecoveryAddress,
-    RotateBaseUrl,
-    RotateCompliancePublicKey,
+    RotateDualAttestationInfo,
     RotateSharedEd2551PublicKey,
-    SetValidatorConfig,
+    SetValidatorConfigAndReconfigure,
+    SetValidatorOperator,
+    SetValidatorOperatorWithNonceAdmin,
     TieredMint,
-    UpdateTravelRuleLimit,
     UnfreezeAccount,
-    UnmintLbr,
-    UpdateUnhostedWalletLimits,
-    UpdateLibraVersion,
     UpdateExchangeRate,
+    UpdateDiemVersion,
     UpdateMintingAbility,
+    UpdateDualAttestationLimit,
     // ...add new scripts here
 }
 
@@ -67,9 +64,10 @@ impl StdlibScript {
     pub fn all() -> Vec<Self> {
         use StdlibScript::*;
         vec![
-            AddValidator,
             AddCurrencyToAccount,
             AddRecoveryRotationCapability,
+            AddScriptAllowList,
+            AddValidatorAndReconfigure,
             Burn,
             BurnTxnFees,
             CancelBurn,
@@ -78,37 +76,35 @@ impl StdlibScript {
             CreateParentVaspAccount,
             CreateRecoveryAddress,
             CreateValidatorAccount,
-            EmptyScript,
+            CreateValidatorOperatorAccount,
             FreezeAccount,
-            Mint,
-            MintLbr,
-            ModifyPublishingOption,
             PeerToPeerWithMetadata,
             Preburn,
             PublishSharedEd2551PublicKey,
-            Reconfigure,
-            RemoveValidator,
+            RegisterValidatorConfig,
+            RemoveValidatorAndReconfigure,
             RotateAuthenticationKey,
             RotateAuthenticationKeyWithNonce,
+            RotateAuthenticationKeyWithNonceAdmin,
             RotateAuthenticationKeyWithRecoveryAddress,
-            RotateBaseUrl,
-            RotateCompliancePublicKey,
+            RotateDualAttestationInfo,
             RotateSharedEd2551PublicKey,
-            SetValidatorConfig,
+            SetValidatorConfigAndReconfigure,
+            SetValidatorOperator,
+            SetValidatorOperatorWithNonceAdmin,
             TieredMint,
-            UpdateTravelRuleLimit,
             UnfreezeAccount,
-            UnmintLbr,
-            UpdateUnhostedWalletLimits,
-            UpdateLibraVersion,
             UpdateExchangeRate,
-            UpdateMintingAbility, // ...add new scripts here
+            UpdateDiemVersion,
+            UpdateMintingAbility,
+            UpdateDualAttestationLimit,
+            // ...add new scripts here
         ]
     }
 
-    /// Construct the whitelist of script hashes used to determine whether a transaction script can
-    /// be executed on the Libra blockchain
-    pub fn whitelist() -> Vec<[u8; SCRIPT_HASH_LENGTH]> {
+    /// Construct the allowlist of script hashes used to determine whether a transaction script can
+    /// be executed on the Diem blockchain
+    pub fn allowlist() -> Vec<[u8; SCRIPT_HASH_LENGTH]> {
         StdlibScript::all()
             .iter()
             .map(|script| *script.compiled_bytes().hash().as_ref())
@@ -125,22 +121,24 @@ impl StdlibScript {
         Self::try_from(code_bytes).is_ok()
     }
 
-    /// Return the Move bytecode produced by compiling this script. This will almost always read
-    /// from disk rather invoking the compiler; genesis is the only exception.
+    /// Return the Move bytecode that was produced by compiling this script.
     pub fn compiled_bytes(self) -> CompiledBytes {
-        // read from disk
-        let mut path = PathBuf::from(self.name());
-        path.set_extension("mv");
-        CompiledBytes(
-            COMPILED_TXN_SCRIPTS_DIR
-                .get_file(path.clone())
-                .unwrap_or_else(|| panic!("File {:?} does not exist", path))
-                .contents()
-                .to_vec(),
-        )
+        CompiledBytes(self.abi().code().to_vec())
     }
 
-    /// Return the sha3-256 hash of the compiled script bytes
+    /// Return the ABI of the script (including the bytecode).
+    pub fn abi(self) -> ScriptABI {
+        let mut path = PathBuf::from(self.name());
+        path.set_extension("abi");
+        let content = TXN_SCRIPTS_ABI_DIR
+            .get_file(path.clone())
+            .unwrap_or_else(|| panic!("File {:?} does not exist", path))
+            .contents();
+        bcs::from_bytes(content)
+            .unwrap_or_else(|err| panic!("Failed to deserialize ABI file {:?}: {}", path, err))
+    }
+
+    /// Return the sha3-256 hash of the compiled script bytes.
     pub fn hash(self) -> HashValue {
         self.compiled_bytes().hash()
     }
@@ -189,9 +187,10 @@ impl fmt::Display for StdlibScript {
             f,
             "{}",
             match self {
-                AddValidator => "add_validator",
+                AddValidatorAndReconfigure => "add_validator_and_reconfigure",
                 AddCurrencyToAccount => "add_currency_to_account",
                 AddRecoveryRotationCapability => "add_recovery_rotation_capability",
+                AddScriptAllowList => "add_to_script_allow_list",
                 Burn => "burn",
                 BurnTxnFees => "burn_txn_fees",
                 CancelBurn => "cancel_burn",
@@ -200,30 +199,28 @@ impl fmt::Display for StdlibScript {
                 CreateParentVaspAccount => "create_parent_vasp_account",
                 CreateRecoveryAddress => "create_recovery_address",
                 CreateValidatorAccount => "create_validator_account",
-                EmptyScript => "empty_script",
+                CreateValidatorOperatorAccount => "create_validator_operator_account",
                 FreezeAccount => "freeze_account",
-                Mint => "mint",
-                MintLbr => "mint_lbr",
-                ModifyPublishingOption => "modify_publishing_option",
                 PeerToPeerWithMetadata => "peer_to_peer_with_metadata",
                 Preburn => "preburn",
                 PublishSharedEd2551PublicKey => "publish_shared_ed25519_public_key",
-                Reconfigure => "reconfigure",
-                RemoveValidator => "remove_validator",
+                RegisterValidatorConfig => "register_validator_config",
+                RemoveValidatorAndReconfigure => "remove_validator_and_reconfigure",
                 RotateAuthenticationKey => "rotate_authentication_key",
                 RotateAuthenticationKeyWithNonce => "rotate_authentication_key_with_nonce",
+                RotateAuthenticationKeyWithNonceAdmin =>
+                    "rotate_authentication_key_with_nonce_admin",
                 RotateAuthenticationKeyWithRecoveryAddress =>
                     "rotate_authentication_key_with_recovery_address",
-                RotateBaseUrl => "rotate_base_url",
-                RotateCompliancePublicKey => "rotate_compliance_public_key",
+                RotateDualAttestationInfo => "rotate_dual_attestation_info",
                 RotateSharedEd2551PublicKey => "rotate_shared_ed25519_public_key",
-                SetValidatorConfig => "set_validator_config",
+                SetValidatorConfigAndReconfigure => "set_validator_config_and_reconfigure",
+                SetValidatorOperator => "set_validator_operator",
+                SetValidatorOperatorWithNonceAdmin => "set_validator_operator_with_nonce_admin",
                 TieredMint => "tiered_mint",
-                UpdateTravelRuleLimit => "update_travel_rule_limit",
+                UpdateDualAttestationLimit => "update_dual_attestation_limit",
                 UnfreezeAccount => "unfreeze_account",
-                UnmintLbr => "unmint_lbr",
-                UpdateUnhostedWalletLimits => "update_unhosted_wallet_limits",
-                UpdateLibraVersion => "update_libra_version",
+                UpdateDiemVersion => "update_diem_version",
                 UpdateExchangeRate => "update_exchange_rate",
                 UpdateMintingAbility => "update_minting_ability",
             }
@@ -235,10 +232,13 @@ impl fmt::Display for StdlibScript {
 mod test {
     use super::*;
 
+    // This includes the compiled script binaries.
+    const COMPILED_TXN_SCRIPTS_DIR: Dir = include_dir!("transaction_scripts");
+
     #[test]
     fn test_file_correspondence() {
-        // make sure that every file under transaction_scripts/ is represented in
-        // StdlibScript::all() (and vice versa)
+        // Make sure that every compiled file under transaction_scripts is represented in
+        // StdlibScript::all() (and vice versa).
         let files = COMPILED_TXN_SCRIPTS_DIR.files();
         let scripts = StdlibScript::all();
         for file in files {
@@ -258,5 +258,32 @@ mod test {
                 "Did you forget to rebuild the standard library?"
             }
         );
+    }
+
+    #[test]
+    fn test_names() {
+        // Make sure that the names listed here matches the function names in the code.
+        for script in StdlibScript::all() {
+            assert_eq!(
+                script.name(),
+                script.abi().name(),
+                "The main function in language/stdlib/transaction_scripts/{}.move is named `{}` instead of `{}`. Please fix the issue and re-run (cd language/stdlib && cargo run --release)",
+                script.name(),
+                script.abi().name(),
+                script.name(),
+            );
+        }
+    }
+
+    #[test]
+    fn test_docs() {
+        // Make sure that scripts have non-empty documentation.
+        for script in StdlibScript::all() {
+            assert!(
+                !script.abi().doc().is_empty(),
+                "The main function in language/stdlib/transaction_scripts/{}.move does not have a `///` inline doc comment. Please fix the issue and re-run (cd language/stdlib && cargo run --release)",
+                script.name(),
+            );
+        }
     }
 }

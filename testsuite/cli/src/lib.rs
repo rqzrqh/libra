@@ -1,20 +1,20 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-//! Libra Client
+//! Diem Client
 //!
-//! Client (binary) is the CLI tool to interact with Libra validator.
+//! Client (binary) is the CLI tool to interact with Diem validator.
 //! It supposes all public APIs.
 
-use libra_crypto::{
+use diem_crypto::{
     ed25519::{Ed25519PrivateKey, Ed25519PublicKey},
     test_utils::KeyPair,
     traits::ValidCryptoMaterialStringExt,
 };
-use libra_types::account_address::AccountAddress;
+use diem_types::account_address::AccountAddress;
 use serde::{Deserialize, Serialize};
 
 mod account_commands;
@@ -22,9 +22,11 @@ mod account_commands;
 pub mod client_proxy;
 /// Command struct to interact with client.
 pub mod commands;
+mod counters;
 mod dev_commands;
 /// Client wrapper to connect to validator.
-mod libra_client;
+mod diem_client;
+mod info_commands;
 mod query_commands;
 mod transfer_commands;
 
@@ -60,7 +62,7 @@ pub enum AccountStatus {
 impl AccountData {
     /// Serialize account keypair if exists.
     pub fn keypair_as_string(&self) -> Option<(String, String)> {
-        self.key_pair.as_ref().and_then(|key_pair| {
+        self.key_pair.as_ref().map(|key_pair| {
             let private_key_string = key_pair
                 .private_key
                 .to_encoded_string()
@@ -69,7 +71,7 @@ impl AccountData {
                 .public_key
                 .to_encoded_string()
                 .expect("Account public Key not convertible to string!");
-            Some((private_key_string, public_key_string))
+            (private_key_string, public_key_string)
         })
     }
 }

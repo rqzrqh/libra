@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::block_storage::{BlockReader, BlockStore};
@@ -9,9 +9,9 @@ use consensus_types::{
     quorum_cert::QuorumCert,
     sync_info::SyncInfo,
 };
-use libra_crypto::HashValue;
-use libra_logger::Level;
-use libra_types::{ledger_info::LedgerInfo, validator_signer::ValidatorSigner};
+use diem_crypto::HashValue;
+use diem_logger::Level;
+use diem_types::{ledger_info::LedgerInfo, validator_signer::ValidatorSigner};
 use std::{future::Future, sync::Arc, time::Duration};
 use tokio::{runtime, time::timeout};
 
@@ -22,7 +22,7 @@ mod mock_txn_manager;
 
 use crate::util::mock_time_service::SimulatedTimeService;
 use consensus_types::{block::block_test_utils::gen_test_certificate, common::Payload};
-use libra_types::block_info::BlockInfo;
+use diem_types::block_info::BlockInfo;
 pub use mock_state_computer::{EmptyStateComputer, MockStateComputer};
 pub use mock_storage::{EmptyStorage, MockSharedStorage, MockStorage};
 pub use mock_txn_manager::MockTransactionManager;
@@ -55,20 +55,6 @@ pub fn build_simple_tree() -> (Vec<Arc<ExecutedBlock>>, Arc<BlockStore>) {
     assert_eq!(block_store.child_links(), block_store.len() - 1);
 
     (vec![genesis_block, a1, a2, a3, b1, b2, c1], block_store)
-}
-
-pub fn build_chain() -> Vec<Arc<ExecutedBlock>> {
-    let mut inserter = TreeInserter::default();
-    let block_store = inserter.block_store();
-    let genesis = block_store.root();
-    let a1 = inserter.insert_block_with_qc(certificate_for_genesis(), &genesis, 1);
-    let a2 = inserter.insert_block(&a1, 2, None);
-    let a3 = inserter.insert_block(&a2, 3, Some(genesis.block_info()));
-    let a4 = inserter.insert_block(&a3, 4, Some(a1.block_info()));
-    let a5 = inserter.insert_block(&a4, 5, Some(a2.block_info()));
-    let a6 = inserter.insert_block(&a5, 6, Some(a3.block_info()));
-    let a7 = inserter.insert_block(&a6, 7, Some(a4.block_info()));
-    vec![genesis, a1, a2, a3, a4, a5, a6, a7]
 }
 
 pub fn build_empty_tree() -> Arc<BlockStore> {
@@ -173,21 +159,6 @@ impl TreeInserter {
     ) -> Block {
         Block::new_proposal(payload, round, timestamp_usecs, parent_qc, &self.signer)
     }
-
-    pub fn insert_reconfiguration_block(
-        &mut self,
-        parent: &ExecutedBlock,
-        round: Round,
-    ) -> Arc<ExecutedBlock> {
-        self.block_store
-            .insert_reconfiguration_block(self.create_block_with_qc(
-                self.create_qc_for_block(parent, None),
-                parent.timestamp_usecs() + 1,
-                round,
-                vec![],
-            ))
-            .unwrap()
-    }
 }
 
 pub fn placeholder_ledger_info() -> LedgerInfo {
@@ -204,7 +175,7 @@ fn nocapture() -> bool {
 
 pub fn consensus_runtime() -> runtime::Runtime {
     if nocapture() {
-        ::libra_logger::Logger::new().level(Level::Debug).init();
+        ::diem_logger::Logger::new().level(Level::Debug).init();
     }
 
     runtime::Builder::new()

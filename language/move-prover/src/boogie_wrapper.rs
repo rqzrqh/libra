@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! Wrapper around the boogie program. Allows to call boogie and analyze the output.
@@ -9,7 +9,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     option::Option::None,
-    process::Command,
 };
 
 use codespan::{ByteIndex, ByteOffset, ColumnIndex, FileId, LineIndex, Location, Span};
@@ -18,7 +17,7 @@ use itertools::Itertools;
 use log::{debug, info, warn};
 use num::BigInt;
 use pretty::RcDoc;
-use regex::Regex;
+use regex::{Captures, Regex};
 
 use spec_lang::{
     code_writer::CodeWriter,
@@ -26,13 +25,16 @@ use spec_lang::{
     ty::{PrimitiveType, Type},
 };
 
-use crate::cli::Options;
+use crate::{
+    cli::Options,
+    prover_task_runner::{ProverTaskRunner, RunBoogieWithSeeds},
+};
 // DEBUG
 // use backtrace::Backtrace;
-use spec_lang::env::NodeId;
-use stackless_bytecode_generator::{
-    function_target::FunctionTarget, function_target_pipeline::FunctionTargetsHolder,
-};
+use bytecode::{function_target::FunctionTarget, function_target_pipeline::FunctionTargetsHolder};
+use once_cell::sync::Lazy;
+use spec_lang::env::{ConditionTag, NodeId};
+use std::num::ParseIntError;
 
 /// A type alias for the way how we use crate `pretty`'s document type. `pretty` is a
 /// Wadler-style pretty printer. Our simple usage doesn't require any lifetime management.
@@ -63,13 +65,19 @@ pub struct BoogieOutput {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BoogieErrorKind {
     Compilation,
+    Precondition,
     Postcondition,
     Assertion,
+    Inconclusive,
 }
 
 impl BoogieErrorKind {
     fn is_from_verification(self) -> bool {
-        self == BoogieErrorKind::Assertion || self == BoogieErrorKind::Postcondition
+        use BoogieErrorKind::*;
+        matches!(
+            self,
+            Assertion | Precondition | Postcondition | Inconclusive
+        )
     }
 }
 
@@ -77,6 +85,7 @@ impl BoogieErrorKind {
 pub struct BoogieError {
     pub kind: BoogieErrorKind,
     pub position: Location,
+    pub context_position: Option<Location>,
     pub message: String,
     pub execution_trace: Vec<(Location, TraceKind, String)>,
     pub model: Option<Model>,
@@ -105,7 +114,23 @@ impl<'env> BoogieWrapper<'env> {
         info!("running solver");
         debug!("command line: {}", args.iter().join(" "));
         for count in 0..bench_repeat {
-            let output = Command::new(&args[0]).args(&args[1..]).output()?;
+            let task = RunBoogieWithSeeds {
+                options: self.options.clone(),
+                boogie_file: boogie_file.to_string(),
+            };
+            // When running on complicated formulas(especially those with quantifiers), SMT solvers
+            // can suffer from the so-called butterfly effect, where minor changes such as using
+            // different random seeds cause significant instabilities in verification times.
+            // Thus by running multiple instances of Boogie with different random seeds, we can
+            // potentially alleviate the instability.
+            let (seed, output) = ProverTaskRunner::run_tasks(
+                task,
+                self.options.prover.num_instances,
+                self.options.prover.sequential_task,
+            );
+            if self.options.prover.num_instances > 1 {
+                debug!("Boogie instance with seed {} finished first", seed);
+            }
             if !output.status.success() {
                 return Err(anyhow!("boogie exited with: {:?}", output));
             } else if count == bench_repeat - 1 {
@@ -115,6 +140,7 @@ impl<'env> BoogieWrapper<'env> {
                 debug!("analyzing boogie output");
                 let out = String::from_utf8_lossy(&output.stdout).to_string();
                 let mut errors = self.extract_verification_errors(&out);
+                errors.extend(self.extract_inconclusive_errors(&out));
                 errors.extend(self.extract_compilation_errors(&out));
                 return Ok(BoogieOutput {
                     errors,
@@ -135,6 +161,7 @@ impl<'env> BoogieWrapper<'env> {
     ) -> anyhow::Result<()> {
         let BoogieOutput { errors, all_output } = self.call_boogie(bench_repeat, boogie_file)?;
         let boogie_log_file = self.options.get_boogie_log_file(boogie_file);
+        let log_file_existed = std::path::Path::new(&boogie_log_file).exists();
         debug!("writing boogie log to {}", boogie_log_file);
         fs::write(&boogie_log_file, &all_output)?;
 
@@ -154,6 +181,10 @@ impl<'env> BoogieWrapper<'env> {
         // Add errors for functions with smoke tests
         self.add_negative_errors(negative_cond_errors);
 
+        if !log_file_existed && !self.options.backend.keep_artifacts {
+            std::fs::remove_file(boogie_log_file).unwrap_or_default();
+        }
+
         Ok(())
     }
 
@@ -172,7 +203,7 @@ impl<'env> BoogieWrapper<'env> {
 
         // Check whether the condition which failed was a negative one.
         self.env
-            .get_condition_info(&source_loc)
+            .get_condition_info(&source_loc, ConditionTag::NegativeTest)
             .filter(|info| info.negative_cond)?;
         Some(source_loc)
     }
@@ -180,7 +211,7 @@ impl<'env> BoogieWrapper<'env> {
     /// Go over all negative conditions and check whether errors occurred for them.
     /// For those which did not occur, report error.
     fn add_negative_errors(&self, negative_cond_errors: BTreeSet<Loc>) {
-        self.env.with_condition_infos(|loc, info| {
+        self.env.with_condition_infos(|(loc, _), info| {
             if !info.negative_cond || negative_cond_errors.contains(loc) {
                 // Not a negative condition, or expected error happened.
                 return;
@@ -188,7 +219,7 @@ impl<'env> BoogieWrapper<'env> {
             // Expected error did not happen, report it.
             let diag = Diagnostic::new(
                 Severity::Error,
-                info.message.clone(),
+                format!("{} (negative error)", info.message),
                 Label::new(loc.file_id(), loc.span(), ""),
             );
             self.env.add_diag(diag);
@@ -214,11 +245,33 @@ impl<'env> BoogieWrapper<'env> {
         };
 
         // Create the error
-        let (show_trace, message) = loc_opt
+        let (show_trace, message, call_loc) = loc_opt
             .as_ref()
-            .and_then(|loc| self.env.get_condition_info(loc))
-            .map(|info| (!info.omit_trace, info.message))
-            .unwrap_or_else(|| (true, error.message.clone()));
+            .and_then(|loc| {
+                if error.kind == BoogieErrorKind::Inconclusive {
+                    Some((false, error.message.clone(), None))
+                } else {
+                    let requires_info = self.env.get_condition_info(&loc, ConditionTag::Requires);
+                    let ensures_info = self.env.get_condition_info(&loc, ConditionTag::Ensures);
+                    if let Some(info) = requires_info {
+                        // Check whether the Boogie error indicates a precondition, or if this is
+                        // the only info we have.
+                        if error.kind == BoogieErrorKind::Precondition || ensures_info.is_none() {
+                            // Extract the location of the call site.
+                            let call_loc = error.context_position.and_then(|p| {
+                                self.to_proper_source_location(self.get_locations(p).1)
+                            });
+                            return Some((!info.omit_trace, info.message, call_loc));
+                        }
+                    }
+                    if let Some(info) = ensures_info {
+                        Some((!info.omit_trace, info.message, None))
+                    } else {
+                        None
+                    }
+                }
+            })
+            .unwrap_or_else(|| (true, error.message.clone(), None));
         let mut diag = Diagnostic::new(
             if on_source {
                 Severity::Error
@@ -229,6 +282,10 @@ impl<'env> BoogieWrapper<'env> {
             message,
             label,
         );
+        if let Some(loc) = call_loc {
+            let label = Label::new(loc.file_id(), loc.span(), "called function");
+            diag.secondary_labels.push(label);
+        }
 
         // Now add trace diagnostics.
         if error.kind.is_from_verification()
@@ -275,23 +332,18 @@ impl<'env> BoogieWrapper<'env> {
                     }
                     // DEBUG
                     //warn!(
-                    //    "checking abort at {}.{}",
-                    //    source_pos.1.line, source_pos.1.column
+                    //   "checking abort at {}.{}",
+                    //   source_pos.1.line, source_pos.1.column
                     //);
                     // END DEBUG
-                    let aborts_here = error
-                        .model
-                        .as_ref()
-                        .map(|model| {
-                            model
-                                .tracked_aborts
-                                .get(&(source_pos.0.clone(), source_pos.1.line))
-                                .is_some()
-                        })
-                        .unwrap_or(false);
-                    if aborts_here {
+                    let abort_marker = error.model.as_ref().and_then(|model| {
+                        model
+                            .tracked_aborts
+                            .get(&(source_pos.0.clone(), source_pos.1.line))
+                    });
+                    if let Some(m) = abort_marker {
                         kind = &TraceKind::Aborted;
-                        aborted = Some(source_loc.clone());
+                        aborted = Some((source_loc.clone(), m.code));
                     }
                     Some((orig_pos, source_loc, source_pos, kind, msg))
                 })
@@ -329,14 +381,31 @@ impl<'env> BoogieWrapper<'env> {
                         .collect_vec()
                 })
                 .collect_vec();
-            if let Some(abort_loc) = aborted {
-                // Patch the diag for aborted case. In this case, none of the aborts_if clauses
-                // covered the abort case, and the error message can be misleading.
-                diag.message = "abort not covered by any of the `aborts_if` clauses".to_string();
+            if let Some((abort_loc, code)) = aborted {
+                // Patch the diag for aborted case if its the generic one. In this case, none of
+                // the aborts_if clauses covered the abort case, and the error message can be
+                // misleading.
+                if diag
+                    .message
+                    .trim()
+                    .starts_with("A postcondition might not hold")
+                {
+                    diag.message =
+                        "abort not covered by any of the `aborts_if` clauses".to_string();
+                }
+                let reason = if let Some(c) = code {
+                    if c == -1 {
+                        " with execution failure".to_string()
+                    } else {
+                        format!(" with code `0x{:X}`", c)
+                    }
+                } else {
+                    "".to_string()
+                };
                 diag.secondary_labels = vec![Label::new(
                     abort_loc.file_id(),
                     abort_loc.span(),
-                    "abort happened here",
+                    &format!("abort happened here{}", reason),
                 )];
             }
             diag = diag.with_notes(trace);
@@ -490,101 +559,253 @@ impl<'env> BoogieWrapper<'env> {
     /// output.bpl(2964,1): Related location: This is the postcondition that might not hold.
     /// Execution trace:
     ///    output.bpl(3068,5): anon0
-    ///    output.bpl(2960,23): inline$LibraAccount_pay_from_sender_with_metadata$0$Entry
-    ///    output.bpl(2989,5): inline$LibraAccount_pay_from_sender_with_metadata$0$anon0
+    ///    output.bpl(2960,23): inline$DiemAccount_pay_from_sender_with_metadata$0$Entry
+    ///    output.bpl(2989,5): inline$DiemAccount_pay_from_sender_with_metadata$0$anon0
     ///    ...
     /// ```
     fn extract_verification_errors(&self, out: &str) -> Vec<BoogieError> {
-        let model_region =
-            Regex::new(r"(?m)^\*\*\* MODEL$(?P<mod>(?s:.)*?^\*\*\* END_MODEL$)").unwrap();
-        let verification_diag_start =
-            Regex::new(r"(?m)^.*\((?P<line>\d+),(?P<col>\d+)\): Error BP\d+:(?P<msg>.*)$").unwrap();
-        let verification_diag_related =
-            Regex::new(r"^\n.+\((?P<line>\d+),(?P<col>\d+)\): Related.*\n").unwrap();
-        let verification_diag_trace = Regex::new(r"(?m)^Execution trace:$").unwrap();
-        let verification_diag_trace_entry =
-            Regex::new(r"(?m)^    .*\((?P<line>\d+),(?P<col>\d+)\): (?P<msg>.*)$").unwrap();
+        static VERIFICATION_DIAG_STARTS: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?m)^.*\((?P<line>\d+),(?P<col>\d+)\): Error BP\d+:(?P<msg>.*)$").unwrap()
+        });
+        static VERIFICATION_DIAG_RELATED: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"^\n.+\((?P<line>\d+),(?P<col>\d+)\): Related.*\n").unwrap());
         let mut errors = vec![];
-        let mut at: usize = 0;
-        loop {
-            let model = model_region.captures(&out[at..]).and_then(|cap| {
-                at += cap.get(0).unwrap().end();
-                match Model::parse(self, cap.name("mod").unwrap().as_str()) {
-                    Ok(model) => Some(model),
+        let mut at = 0;
+        while let Some(cap) = VERIFICATION_DIAG_STARTS.captures(&out[at..]) {
+            let msg = cap.name("msg").unwrap().as_str();
+            at += cap.get(0).unwrap().end();
+            // Check whether there is a `Related` message which points to the pre/post condition.
+            // If so, this has the real position.
+            let (pos, context_pos) =
+                if let Some(cap1) = VERIFICATION_DIAG_RELATED.captures(&out[at..]) {
+                    let call_line = cap.name("line").unwrap().as_str();
+                    let call_col = cap.name("col").unwrap().as_str();
+                    at += cap1.get(0).unwrap().end();
+                    let line = cap1.name("line").unwrap().as_str();
+                    let col = cap1.name("col").unwrap().as_str();
+                    (
+                        make_position(line, col),
+                        Some(make_position(call_line, call_col)),
+                    )
+                } else {
+                    let line = cap.name("line").unwrap().as_str();
+                    let col = cap.name("col").unwrap().as_str();
+                    (make_position(line, col), None)
+                };
+            // Extract trace, augmented trace, and model.
+            let mut model = Model::new(self);
+            let trace = self.extract_execution_trace(out, &mut at);
+            self.extract_augmented_trace(&mut model, out, &mut at);
+            self.extract_model(&mut model, out, &mut at);
+            errors.push(BoogieError {
+                kind: if msg.contains("assertion might not hold") {
+                    BoogieErrorKind::Assertion
+                } else if msg.contains("precondition") {
+                    BoogieErrorKind::Precondition
+                } else {
+                    BoogieErrorKind::Postcondition
+                },
+                position: pos,
+                context_position: context_pos,
+                message: msg.to_string(),
+                execution_trace: trace,
+                model: if model.is_empty() { None } else { Some(model) },
+            });
+        }
+        errors
+    }
+
+    /// Extracts a model.
+    fn extract_model(&self, model: &mut Model, out: &str, at: &mut usize) {
+        static MODEL_REGION: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?m)^\*\*\* MODEL$(?P<mod>(?s:.)*?^\*\*\* END_MODEL$)").unwrap()
+        });
+
+        if let Some(cap) = MODEL_REGION.captures(&out[*at..]) {
+            *at += cap.get(0).unwrap().end();
+            match model
+                .parse(self, cap.name("mod").unwrap().as_str())
+                .and_then(|_| model.derive(self))
+            {
+                Ok(_) => {}
+                Err(parse_error) => {
+                    let context_module = self
+                        .env
+                        .symbol_pool()
+                        .string(self.env.get_modules().last().unwrap().get_name().name());
+                    warn!(
+                        "failed to parse boogie model (module context `{}`): {}",
+                        context_module, parse_error.0
+                    );
+                }
+            }
+        }
+    }
+
+    /// Extracts an execution trace.
+    fn extract_execution_trace(
+        &self,
+        out: &str,
+        at: &mut usize,
+    ) -> Vec<(Location, TraceKind, String)> {
+        static TRACE_START: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?m)^Execution trace:$").unwrap());
+        static TRACE_ENTRY: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?m)^    .*\((?P<line>\d+),(?P<col>\d+)\): (?P<msg>.*)$").unwrap()
+        });
+        let mut trace = vec![];
+        if let Some(m) = TRACE_START.find(&out[*at..]) {
+            *at += m.end();
+            while let Some(cap) = TRACE_ENTRY.captures(&out[*at..]) {
+                let line = cap.name("line").unwrap().as_str();
+                let col = cap.name("col").unwrap().as_str();
+                let msg = cap.name("msg").unwrap().as_str();
+                let trace_kind = if msg.ends_with("$Entry") {
+                    TraceKind::EnterFunction
+                } else if msg.ends_with("$Return") {
+                    TraceKind::ExitFunction
+                } else if msg.contains("_update_inv$") {
+                    TraceKind::UpdateInvariant
+                } else if msg.contains("$Pack_") {
+                    TraceKind::Pack
+                } else {
+                    TraceKind::Regular
+                };
+                trace.push((make_position(line, col), trace_kind, msg.to_string()));
+                *at += cap.get(0).unwrap().end();
+                if !out[*at..].starts_with("\n  ") && !out[*at..].starts_with("\r\n  ") {
+                    // Don't read further if this line does not start with an indent,
+                    // as all trace entries do. Otherwise we would match the trace entry
+                    // for the next error.
+                    break;
+                }
+            }
+        }
+        trace
+    }
+
+    /// Extracts augmented execution trace and merges it into the model.
+    fn extract_augmented_trace(&self, model: &mut Model, out: &str, at: &mut usize) {
+        static TRACE_START: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"^(\s|\n)*Augmented execution trace:\s*\n").unwrap());
+        static TRACE_ENTRY: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"^\$(?P<name>[a-zA-Z_]+)\((?P<file>\d+),(?P<pos>\d+)(,(?P<var>\d+))?\):(?P<value>.*)\n").unwrap()
+        });
+        if let Some(m) = TRACE_START.find(&out[*at..]) {
+            *at += m.end();
+            while let Some(cap) = TRACE_ENTRY.captures(&out[*at..]) {
+                *at += cap.get(0).unwrap().end();
+                match self.extract_augmented_entry(model, cap) {
+                    Ok(_) => {}
                     Err(parse_error) => {
                         let context_module = self
                             .env
                             .symbol_pool()
                             .string(self.env.get_modules().last().unwrap().get_name().name());
                         warn!(
-                            "failed to parse boogie model (module context `{}`): {}",
+                            "failed to parse augmented execution trace (module context `{}`): {}",
                             context_module, parse_error.0
                         );
-                        None
                     }
                 }
-            });
-
-            if let Some(cap) = verification_diag_start.captures(&out[at..]) {
-                let msg = cap.name("msg").unwrap().as_str();
-                at += cap.get(0).unwrap().end();
-                // Check whether there is a `Related` message which points to the pre/post condition.
-                // If so, this has the real position.
-                let (line, col) = if let Some(cap1) = verification_diag_related.captures(&out[at..])
-                {
-                    at += cap1.get(0).unwrap().end();
-                    let line = cap1.name("line").unwrap().as_str();
-                    let col = cap1.name("col").unwrap().as_str();
-                    (line, col)
-                } else {
-                    let line = cap.name("line").unwrap().as_str();
-                    let col = cap.name("col").unwrap().as_str();
-                    (line, col)
-                };
-                let mut trace = vec![];
-                if let Some(m) = verification_diag_trace.find(&out[at..]) {
-                    at += m.end();
-                    while let Some(cap) = verification_diag_trace_entry.captures(&out[at..]) {
-                        let line = cap.name("line").unwrap().as_str();
-                        let col = cap.name("col").unwrap().as_str();
-                        let msg = cap.name("msg").unwrap().as_str();
-                        let trace_kind = if msg.ends_with("$Entry") {
-                            TraceKind::EnterFunction
-                        } else if msg.ends_with("$Return") {
-                            TraceKind::ExitFunction
-                        } else if msg.contains("_update_inv$") {
-                            TraceKind::UpdateInvariant
-                        } else if msg.contains("$Pack_") {
-                            TraceKind::Pack
-                        } else {
-                            TraceKind::Regular
-                        };
-                        trace.push((make_position(line, col), trace_kind, msg.to_string()));
-                        at += cap.get(0).unwrap().end();
-                        if !out[at..].starts_with("\n  ") && !out[at..].starts_with("\r\n  ") {
-                            // Don't read further if this line does not start with an indent,
-                            // as all trace entries do. Otherwise we would match the trace entry
-                            // for the next error.
-                            break;
-                        }
-                    }
-                }
-                errors.push(BoogieError {
-                    kind: if msg.contains("assertion might not hold") {
-                        BoogieErrorKind::Assertion
-                    } else {
-                        BoogieErrorKind::Postcondition
-                    },
-                    position: make_position(line, col),
-                    message: msg.to_string(),
-                    execution_trace: trace,
-                    model,
-                });
-            } else {
-                break;
             }
         }
-        errors
+    }
+
+    fn extract_augmented_entry(
+        &self,
+        model: &mut Model,
+        cap: Captures,
+    ) -> Result<(), ModelParseError> {
+        let name = cap.name("name").unwrap().as_str();
+        let file_id = self
+            .env
+            .file_idx_to_id(cap.name("file").unwrap().as_str().parse::<u16>()?);
+        let pos = ByteIndex::from(cap.name("pos").unwrap().as_str().parse::<u32>()?);
+        let loc = Loc::new(file_id, Span::new(pos, pos + ByteOffset(1)));
+        if let Some(func) = self.env.get_enclosing_function(loc.clone()) {
+            match name {
+                "track_local" => {
+                    let var_idx = cap.name("var").unwrap().as_str().parse::<usize>()?;
+                    let val = cap.name("value").unwrap().as_str().trim();
+                    let model_val = if !val.is_empty() {
+                        let mut parser = ModelParser {
+                            input: cap.name("value").unwrap().as_str(),
+                            at: 0,
+                        };
+                        parser.parse_value()?
+                    } else {
+                        ModelValue::error()
+                    };
+                    let var = LocalDescriptor {
+                        module_id: func.module_env.get_id(),
+                        func_id: func.get_id(),
+                        var_idx,
+                    };
+                    model
+                        .tracked_locals
+                        .entry(loc)
+                        .or_insert_with(Vec::new)
+                        .push((var, model_val));
+                    return Ok(());
+                }
+                "track_abort" => {
+                    let val = cap.name("value").unwrap().as_str().trim();
+                    let code = if val.is_empty() {
+                        None
+                    } else if val.starts_with("(- ") && val.ends_with(')') {
+                        Some(-val[3..val.len() - 1].parse::<i128>()?)
+                    } else {
+                        Some(val.parse::<i128>()?)
+                    };
+                    if let Some((file, pos)) = self.env.get_position(loc) {
+                        let mark = AbortDescriptor {
+                            module_id: func.module_env.get_id(),
+                            func_id: func.get_id(),
+                            code,
+                        };
+                        model.tracked_aborts.insert((file, pos.line), mark);
+                        return Ok(());
+                    }
+                }
+                _ => {}
+            }
+        }
+        Err(ModelParseError::new(&format!(
+            "unrecognized augmented trace entry `{}`",
+            &cap[0]
+        )))
+    }
+
+    /// Extracts inconclusive (timeout) errors.
+    fn extract_inconclusive_errors(&self, out: &str) -> Vec<BoogieError> {
+        let diag_re =
+            Regex::new(r"(?m)^.*\((?P<line>\d+),(?P<col>\d+)\).*Verification.*(inconclusive|out of resource|timed out).*$")
+                .unwrap();
+        diag_re
+            .captures_iter(&out)
+            .map(|cap| {
+                let line = cap.name("line").unwrap().as_str();
+                let col = cap.name("col").unwrap().as_str();
+                let msg = cap.get(0).unwrap().as_str();
+                BoogieError {
+                    kind: BoogieErrorKind::Inconclusive,
+                    position: make_position(line, col),
+                    context_position: None,
+                    message: if msg.contains("out of resource") || msg.contains("timed out") {
+                        let timeout = self.options.adjust_timeout(self.options.backend.vc_timeout);
+                        format!(
+                            "verification out of resources/timeout (global timeout set to {}s)",
+                            timeout
+                        )
+                    } else {
+                        "verification inconclusive".to_string()
+                    },
+                    execution_trace: vec![],
+                    model: None,
+                }
+            })
+            .collect_vec()
     }
 
     /// Extracts compilation errors. This captures any kind of errors different than the
@@ -601,6 +822,7 @@ impl<'env> BoogieWrapper<'env> {
                 BoogieError {
                     kind: BoogieErrorKind::Compilation,
                     position: make_position(line, col),
+                    context_position: None,
                     message: msg.to_string(),
                     execution_trace: vec![],
                     model: None,
@@ -642,8 +864,27 @@ pub struct Model {
 }
 
 impl Model {
+    /// Create a new model.
+    fn new(wrapper: &BoogieWrapper<'_>) -> Self {
+        Model {
+            vars: Default::default(),
+            tracked_locals: Default::default(),
+            tracked_aborts: Default::default(),
+            tracked_exps: Default::default(),
+            value_array_rep: if wrapper.options.backend.vector_using_sequences {
+                ValueArrayRep::ValueArrayIsSeq
+            } else {
+                ValueArrayRep::ValueArrayIsMap
+            },
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.vars.is_empty()
+    }
+
     /// Parses the given string into a model. The string is expected to end with MODULE_END_MARKER.
-    fn parse(wrapper: &BoogieWrapper<'_>, input: &str) -> Result<Model, ModelParseError> {
+    fn parse(&mut self, _wrapper: &BoogieWrapper<'_>, input: &str) -> Result<(), ModelParseError> {
         let mut model_parser = ModelParser { input, at: 0 };
         model_parser
             .parse_map()
@@ -652,94 +893,90 @@ impl Model {
                 Ok(m)
             })
             .and_then(|m| match m {
-                ModelValue::Map(vars) => Ok(vars),
+                ModelValue::Map(vars) => {
+                    self.vars.extend(vars);
+                    Ok(())
+                }
                 _ => Err(ModelParseError("expected ModelValue::Map".to_string())),
             })
-            .and_then(|vars| {
-                // Extract the tracked locals.
-                let mut tracked_locals: BTreeMap<Loc, Vec<(LocalDescriptor, ModelValue)>> =
-                    BTreeMap::new();
-                let track_local_map = vars
-                    .get(&ModelValue::literal("$DebugTrackLocal"))
-                    .and_then(|x| x.extract_map())
-                    .ok_or_else(Self::invalid_track_info)?;
-                for k in track_local_map.keys() {
-                    if k == &ModelValue::literal("else") {
-                        continue;
-                    }
-                    let (var, loc, value) = Self::extract_debug_var(wrapper, k)?;
-                    tracked_locals
-                        .entry(loc)
-                        .or_insert_with(Vec::new)
-                        .push((var, value));
-                }
+    }
 
-                // Extract the tracked aborts.
-                let mut tracked_aborts = BTreeMap::new();
-                let track_abort_map = vars
-                    .get(&ModelValue::literal("$DebugTrackAbort"))
-                    .and_then(|x| x.extract_map())
-                    .ok_or_else(Self::invalid_track_info)?;
-                for k in track_abort_map.keys() {
-                    if k == &ModelValue::literal("else") {
-                        continue;
-                    }
-                    let (mark, loc) = Self::extract_abort_marker(wrapper, k)?;
-                    let pos = wrapper
-                        .env
-                        .get_position(loc)
-                        .ok_or_else(Self::invalid_track_info)?;
-                    tracked_aborts.insert((pos.0, pos.1.line), mark);
+    /// Derive information from the model.
+    fn derive(&mut self, wrapper: &BoogieWrapper<'_>) -> Result<(), ModelParseError> {
+        // Extract the tracked locals, unless we track them via Boogie attributes.
+        if !wrapper.options.backend.use_boogie_debug_attrib {
+            let track_local_map = self
+                .vars
+                .get(&ModelValue::literal("$DebugTrackLocal"))
+                .and_then(|x| x.extract_map())
+                .ok_or_else(Self::invalid_track_info)?;
+            for k in track_local_map.keys() {
+                if k == &ModelValue::literal("else") {
+                    continue;
                 }
+                let (var, loc, value) = Self::extract_debug_var(wrapper, k)?;
+                self.tracked_locals
+                    .entry(loc)
+                    .or_insert_with(Vec::new)
+                    .push((var, value));
+            }
+        }
 
-                // Extract the tracked expressions.
-                let mut tracked_exps = BTreeMap::new();
-                let track_exp_map = vars
-                    .get(&ModelValue::literal("$DebugTrackExp"))
-                    .and_then(|x| x.extract_map())
-                    .ok_or_else(Self::invalid_track_info)?;
-                for k in track_exp_map.keys() {
-                    if k == &ModelValue::literal("else") {
-                        continue;
-                    }
-                    let (desc, value) = Self::extract_debug_exp(wrapper, k)?;
-                    tracked_exps
-                        .entry(desc)
-                        .or_insert_with(Vec::new)
-                        .push(value);
+        // Extract the tracked aborts, unless we track them via Boogie attributes.
+        if !wrapper.options.backend.use_boogie_debug_attrib {
+            let track_abort_map = self
+                .vars
+                .get(&ModelValue::literal("$DebugTrackAbort"))
+                .and_then(|x| x.extract_map())
+                .ok_or_else(Self::invalid_track_info)?;
+            for k in track_abort_map.keys() {
+                if k == &ModelValue::literal("else") {
+                    continue;
                 }
+                let (mark, loc) = Self::extract_abort_marker(wrapper, k)?;
+                let pos = wrapper
+                    .env
+                    .get_position(loc)
+                    .ok_or_else(Self::invalid_track_info)?;
+                self.tracked_aborts.insert((pos.0, pos.1.line), mark);
+            }
+        }
 
-                // DEBUG
-                // for (loc, values) in &tracked_locals {
-                //     info!("{} -> ", loc.span());
-                //     for (var, val) in values {
-                //         info!("  {} -> {:?}", var.var_idx, val);
-                //     }
-                // }
-                // END DEBUG
-                // DEBUG
-                // for (pos, mark) in &tracked_aborts {
-                //    warn!(
-                //        "{} -> {}",
-                //       pos.1,
-                //        mark.func_id.symbol().display(wrapper.env.symbol_pool())
-                //    );
-                // }
-                // END DEBUG
-                let value_array_rep = if wrapper.options.backend.vector_using_sequences {
-                    ValueArrayRep::ValueArrayIsSeq
-                } else {
-                    ValueArrayRep::ValueArrayIsMap
-                };
-                let model = Model {
-                    vars,
-                    tracked_locals,
-                    tracked_aborts,
-                    tracked_exps,
-                    value_array_rep,
-                };
-                Ok(model)
-            })
+        // Extract the tracked expressions. (No boogie attribute/other support for this.)
+        let track_exp_map = self
+            .vars
+            .get(&ModelValue::literal("$DebugTrackExp"))
+            .and_then(|x| x.extract_map())
+            .ok_or_else(Self::invalid_track_info)?;
+        for k in track_exp_map.keys() {
+            if k == &ModelValue::literal("else") {
+                continue;
+            }
+            let (desc, value) = Self::extract_debug_exp(wrapper, k)?;
+            self.tracked_exps
+                .entry(desc)
+                .or_insert_with(Vec::new)
+                .push(value);
+        }
+
+        // DEBUG
+        // for (loc, values) in &tracked_locals {
+        //     info!("{} -> ", loc.span());
+        //     for (var, val) in values {
+        //         info!("  {} -> {:?}", var.var_idx, val);
+        //     }
+        // }
+        // END DEBUG
+        // DEBUG
+        // for (pos, mark) in &tracked_aborts {
+        //    warn!(
+        //        "{} -> {}",
+        //       pos.1,
+        //        mark.func_id.symbol().display(wrapper.env.symbol_pool())
+        //    );
+        // }
+        // END DEBUG
+        Ok(())
     }
 
     /// Extract and validate a tracked local from $DebugTrackLocal map.
@@ -783,7 +1020,7 @@ impl Model {
         map_entry: &ModelValue,
     ) -> Result<(AbortDescriptor, Loc), ModelParseError> {
         if let ModelValue::List(args) = map_entry {
-            if args.len() != 2 {
+            if args.len() != 3 {
                 return Err(Self::invalid_track_info());
             }
             let loc = Self::extract_loc(wrapper, args)?;
@@ -792,10 +1029,14 @@ impl Model {
                 .get_enclosing_function(loc.clone())
                 .ok_or_else(Self::invalid_track_info)?;
             let func_target = wrapper.targets.get_target(&func_env);
+            let code = args[2]
+                .extract_i128()
+                .ok_or_else(Self::invalid_track_info)?;
             Ok((
                 AbortDescriptor {
                     module_id: func_target.func_env.module_env.get_id(),
                     func_id: func_target.get_id(),
+                    code: Some(code),
                 },
                 loc,
             ))
@@ -904,7 +1145,7 @@ impl Model {
                 for (var, val) in vars {
                     let var_name = func_target.get_local_name(var.var_idx);
                     if func_target.symbol_pool().string(var_name).contains("$$") {
-                        // Do not show temporaries generated by the move compiler.
+                        // Do not show temporaries generated by the Move compiler.
                         continue;
                     }
                     if locals_shown.insert((loc.clone(), var.clone())) {
@@ -1067,6 +1308,23 @@ impl ModelValue {
         }
     }
 
+    /// Extract a i128 from a literal.
+    fn extract_i128(&self) -> Option<i128> {
+        if let Some(value) = self.extract_list("-").and_then(|values| {
+            if values.len() == 1 {
+                values[0].extract_i128().map(|value| -value)
+            } else {
+                None
+            }
+        }) {
+            Some(value)
+        } else if let Ok(n) = self.extract_literal()?.parse::<i128>() {
+            Some(n)
+        } else {
+            None
+        }
+    }
+
     /// Extract the value of a primitive.
     fn extract_primitive(&self, ctor: &str) -> Option<&String> {
         let args = self.extract_list(ctor)?;
@@ -1122,7 +1380,7 @@ impl ModelValue {
             Type::Primitive(PrimitiveType::Bool) => Some(PrettyDoc::text(
                 self.extract_primitive("$Boolean")?.to_string(),
             )),
-            Type::Primitive(PrimitiveType::Address) => {
+            Type::Primitive(PrimitiveType::Address) | Type::Primitive(PrimitiveType::Signer) => {
                 let addr = BigInt::parse_bytes(
                     &self.extract_primitive("$Address")?.clone().into_bytes(),
                     10,
@@ -1289,6 +1547,7 @@ impl LocalDescriptor {
 struct AbortDescriptor {
     module_id: ModuleId,
     func_id: FunId,
+    code: Option<i128>,
 }
 
 /// Represents an expression descriptor.
@@ -1313,6 +1572,12 @@ impl ModelParseError {
     }
 }
 
+impl From<ParseIntError> for ModelParseError {
+    fn from(_: ParseIntError) -> Self {
+        Self::new("invalid integer")
+    }
+}
+
 const MODEL_END_MARKER: &str = "*** END_MODEL";
 
 impl<'s> ModelParser<'s> {
@@ -1325,6 +1590,13 @@ impl<'s> ModelParser<'s> {
     fn looking_at(&mut self, s: &str) -> bool {
         self.skip_space();
         self.input[self.at..].starts_with(s)
+    }
+
+    fn looking_at_eol(&mut self) -> bool {
+        while self.input[self.at..].starts_with(|ch| [' ', '\r', '\t'].contains(&ch)) {
+            self.at += 1;
+        }
+        self.input[self.at..].starts_with('\n')
     }
 
     fn looking_at_then_consume(&mut self, s: &str) -> bool {
@@ -1356,6 +1628,10 @@ impl<'s> ModelParser<'s> {
         while !self.looking_at("}") && !self.looking_at(MODEL_END_MARKER) {
             let key = self.parse_key()?;
             self.expect("->")?;
+            if self.looking_at_eol() {
+                // Entry without a value, skip
+                continue;
+            }
             let value = if self.looking_at_then_consume("{") {
                 let value = self.parse_map()?;
                 self.expect("}")?;

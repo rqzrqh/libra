@@ -1,10 +1,10 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
 
-use anyhow::{bail, format_err, Result};
-use libra_logger::info;
+use anyhow::{anyhow, bail, format_err, Result};
+use diem_logger::{info, warn};
 use rusoto_autoscaling::{
     AutoScalingGroupNamesType, Autoscaling, AutoscalingClient, SetDesiredCapacityType,
 };
@@ -14,7 +14,7 @@ use rusoto_sts::WebIdentityProvider;
 /// set_asg_size sets the size of the given autoscaling group
 #[allow(clippy::collapsible_if)]
 pub async fn set_asg_size(
-    min_desired_capacity: i64,
+    desired_capacity: i64,
     buffer_percent: f64,
     asg_name: &str,
     wait_for_completion: bool,
@@ -23,28 +23,39 @@ pub async fn set_asg_size(
     let buffer = if scaling_down {
         0
     } else {
-        ((min_desired_capacity as f64 * buffer_percent) / 100_f64).ceil() as i64
+        ((desired_capacity as f64 * buffer_percent) / 100_f64).ceil() as i64
     };
     info!(
-        "Scaling to min_desired_capacity : {}, buffer: {}, asg_name: {}",
-        min_desired_capacity, buffer, asg_name
+        "Scaling to desired_capacity : {}, buffer: {}, asg_name: {}",
+        desired_capacity, buffer, asg_name
     );
     let set_desired_capacity_type = SetDesiredCapacityType {
         auto_scaling_group_name: asg_name.to_string(),
-        desired_capacity: min_desired_capacity + buffer,
+        desired_capacity: desired_capacity + buffer,
         honor_cooldown: Some(false),
     };
     let credentials_provider = WebIdentityProvider::from_k8s_env();
 
-    let dispatcher = rusoto_core::HttpClient::new().expect("failed to create request dispatcher");
+    let dispatcher = rusoto_core::HttpClient::new()
+        .map_err(|e| anyhow!("Failed to create request dispatcher, met Error:{}", e))?;
     let asc = AutoscalingClient::new_with(dispatcher, credentials_provider, Region::UsWest2);
-    asc.set_desired_capacity(set_desired_capacity_type)
-        .await
-        .map_err(|e| format_err!("set_desired_capacity failed: {:?}", e))?;
+    diem_retrier::retry_async(diem_retrier::fixed_retry_strategy(10_000, 60), || {
+        let asc = asc.clone();
+        let set_desired_capacity_type = set_desired_capacity_type.clone();
+        Box::pin(async move {
+            asc.set_desired_capacity(set_desired_capacity_type)
+                .await
+                .map_err(|e| {
+                    warn!("set_desired_capacity failed: {}, retrying", e);
+                    format_err!("set_desired_capacity failed: {}", e)
+                })
+        })
+    })
+    .await?;
     if !wait_for_completion {
         return Ok(());
     }
-    libra_retrier::retry_async(libra_retrier::fixed_retry_strategy(10_000, 60), || {
+    diem_retrier::retry_async(diem_retrier::fixed_retry_strategy(10_000, 60), || {
         let asc_clone = asc.clone();
         Box::pin(async move {
             let mut total = 0;
@@ -87,25 +98,25 @@ pub async fn set_asg_size(
             }
             info!(
                 "Waiting for scaling to complete. Current size: {}, Min Desired Size: {}",
-                total, min_desired_capacity
+                total, desired_capacity
             );
             if scaling_down {
-                if total > min_desired_capacity {
+                if total > desired_capacity {
                     bail!(
                     "Waiting for scale-down to complete. Current size: {}, Min Desired Size: {}",
                     total,
-                    min_desired_capacity
+                    desired_capacity
                 );
                 } else {
                     info!("Scale down completed");
                     Ok(())
                 }
             } else {
-                if total < min_desired_capacity {
+                if total < desired_capacity {
                     bail!(
                         "Waiting for scale-up to complete. Current size: {}, Min Desired Size: {}",
                         total,
-                        min_desired_capacity
+                        desired_capacity
                     );
                 } else {
                     info!("Scale up completed");

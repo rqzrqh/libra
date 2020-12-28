@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use generate_format::Corpus;
@@ -20,8 +20,16 @@ fn analyze_serde_formats() {
             assert_registry_has_not_changed(&corpus.to_string(), path, registry.clone(), expected);
         }
 
-        // Test that the definitions in all corpus are unique.
+        // Test that the definitions in all corpus are unique and pass the linter.
         for (key, value) in registry {
+            assert_eq!(
+                generate_format::lint_bcs_format(&value),
+                Ok(()),
+                "In corpus {}: lint error while analyzing {}",
+                corpus.to_string(),
+                key
+            );
+
             match all_corpuses.entry(key.clone()) {
                 Entry::Vacant(e) => {
                     e.insert(value);

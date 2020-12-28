@@ -1,11 +1,14 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::account_address::AccountAddress;
+use diem_crypto::{hash::CryptoHash, HashValue};
 use hex::FromHex;
-use libra_crypto::{hash::CryptoHash, HashValue};
 use proptest::prelude::*;
-use std::convert::{AsRef, TryFrom};
+use std::{
+    convert::{AsRef, TryFrom},
+    str::FromStr,
+};
 
 #[test]
 fn test_address_bytes() {
@@ -52,7 +55,7 @@ fn test_address() {
     });
 
     let hash_vec =
-        &Vec::from_hex("c44c0a209ec51c8077b0007334988e11867842e152e05316f062a589ed6b606d")
+        &Vec::from_hex("6403c4906e79cf4536edada922040805c6a8d0e735fa4516a9cc40038bd125c8")
             .expect("You must provide a valid Hex format");
 
     let mut hash = [0u8; 32];
@@ -82,6 +85,12 @@ fn test_deserialize_from_json_value() {
     let address2: AccountAddress =
         serde_json::from_value(json_value).expect("serde_json::from_value fail.");
     assert_eq!(address, address2)
+}
+
+#[test]
+fn test_address_from_empty_string() {
+    assert!(AccountAddress::try_from("".to_string()).is_err());
+    assert!(AccountAddress::from_str("").is_err());
 }
 
 proptest! {

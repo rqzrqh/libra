@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! The purpose of KeyManager is to rotate consensus key (and eventually the network key). It is not
@@ -14,31 +14,36 @@
 //! evaluates the current time from the last reconfiguration and logs that delta with greater
 //! levels of severity depending on the delta.
 //!
-//! KeyManager talks to Libra via the LibraInterface that may either be a direct link into
-//! `LibraDB`/`Executor`, JSON-RPC, or some other concoction.
-//! KeyManager talks to its own storage through the `LibraSecureStorage::Storage trait.
+//! KeyManager talks to Diem via the DiemInterface that may either be a direct link into
+//! `DiemDB`/`Executor`, JSON-RPC, or some other concoction.
+//! KeyManager talks to its own storage through the `DiemSecureStorage::Storage trait.
 #![forbid(unsafe_code)]
 
-use crate::{counters::COUNTERS, libra_interface::LibraInterface};
-use libra_crypto::{
-    ed25519::{Ed25519PrivateKey, Ed25519PublicKey},
-    x25519, PrivateKey,
+use crate::{
+    counters::{
+        KEYS_STILL_FRESH, LIVENESS_ERROR_ENCOUNTERED, ROTATED_IN_STORAGE,
+        SUBMITTED_ROTATION_TRANSACTION, UNEXPECTED_ERROR_ENCOUNTERED, WAITING_ON_RECONFIGURATION,
+        WAITING_ON_TRANSACTION_EXECUTION,
+    },
+    diem_interface::DiemInterface,
+    logging::{LogEntry, LogEvent, LogSchema},
 };
-use libra_global_constants::{ASSOCIATION_KEY, CONSENSUS_KEY, OPERATOR_ACCOUNT, OPERATOR_KEY};
-use libra_logger::{error, info};
-use libra_network_address::RawNetworkAddress;
-use libra_secure_storage::{CryptoStorage, KVStorage};
-use libra_secure_time::TimeService;
-use libra_types::{
+use diem_crypto::ed25519::Ed25519PublicKey;
+use diem_global_constants::{CONSENSUS_KEY, OPERATOR_ACCOUNT, OPERATOR_KEY, OWNER_ACCOUNT};
+use diem_logger::prelude::*;
+use diem_secure_storage::{CryptoStorage, KVStorage};
+use diem_secure_time::TimeService;
+use diem_types::{
     account_address::AccountAddress,
-    account_config::{association_address, LBR_NAME},
-    transaction::{RawTransaction, Script, Transaction, TransactionArgument},
+    account_config::XUS_NAME,
+    chain_id::ChainId,
+    transaction::{RawTransaction, SignedTransaction, Transaction},
 };
-use std::{str::FromStr, time::Duration};
 use thiserror::Error;
 
 pub mod counters;
-pub mod libra_interface;
+pub mod diem_interface;
+pub mod logging;
 
 #[cfg(test)]
 mod tests;
@@ -49,29 +54,35 @@ const MAX_GAS_AMOUNT: u64 = 400_000;
 /// Defines actions that KeyManager should perform after a check of all associated state.
 #[derive(Debug, PartialEq)]
 pub enum Action {
-    /// The system is in a healthy state and there is no need to perform a rotation
+    /// There is no need to perform a rotation (keys are still fresh).
     NoAction,
-    /// The system is in a healthy state but sufficient time has passed for another key rotation
+    /// Sufficient time has passed for another key rotation (keys are stale).
     FullKeyRotation,
-    /// Storage and the blockchain are inconsistent, submit a new rotation
+    /// Storage and the blockchain are inconsistent, submit a new rotation transaction.
     SubmitKeyRotationTransaction,
+    /// The validator config and the validator set are inconsistent, wait for reconfiguration.
+    WaitForReconfiguration,
+    /// Storage and the blockchain are inconsistent, wait for rotation transaction execution.
+    WaitForTransactionExecution,
 }
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Error, PartialEq)]
 pub enum Error {
-    #[error("Key mismatch, config: {0}, info: {0}")]
+    #[error("Key mismatch, config: {0}, info: {1}")]
     ConfigInfoKeyMismatch(Ed25519PublicKey, Ed25519PublicKey),
-    #[error("Key mismatch, config: {0}, storage: {0}")]
+    #[error("Key mismatch, config: {0}, storage: {1}")]
     ConfigStorageKeyMismatch(Ed25519PublicKey, Ed25519PublicKey),
     #[error("Data does not exist: {0}")]
     DataDoesNotExist(String),
     #[error(
-        "The libra_timestamp value on-chain isn't increasing. Last value: {0}, Current value: {0}"
+        "The diem_timestamp value on-chain isn't increasing. Last value: {0}, Current value: {1}"
     )]
     LivenessError(u64, u64),
-    #[error("Unable to retrieve the operator account address. Storage error: {0}")]
-    MissingAccountAddress(#[from] libra_secure_storage::Error),
+    #[error("Unable to retrieve the account address: {0}, storage error: {1}")]
+    MissingAccountAddress(String, String),
+    #[error("Storage error: {0}")]
+    StorageError(String),
     #[error("ValidatorInfo not found in ValidatorConfig: {0}")]
     ValidatorInfoNotFound(AccountAddress),
     #[error("Unknown error: {0}")]
@@ -85,38 +96,47 @@ impl From<anyhow::Error> for Error {
     }
 }
 
+impl From<diem_secure_storage::Error> for Error {
+    fn from(error: diem_secure_storage::Error) -> Self {
+        Error::StorageError(error.to_string())
+    }
+}
+
 pub struct KeyManager<LI, S, T> {
-    libra: LI,
+    diem: LI,
     storage: S,
     time_service: T,
-    last_checked_libra_timestamp: u64,
+    last_checked_diem_timestamp: u64,
     rotation_period_secs: u64, // The frequency by which to rotate all keys
     sleep_period_secs: u64,    // The amount of time to sleep between key management checks
     txn_expiration_secs: u64,  // The time after which a rotation transaction expires
+    chain_id: ChainId,
 }
 
 impl<LI, S, T> KeyManager<LI, S, T>
 where
-    LI: LibraInterface,
+    LI: DiemInterface,
     S: KVStorage + CryptoStorage,
     T: TimeService,
 {
     pub fn new(
-        libra: LI,
+        diem: LI,
         storage: S,
         time_service: T,
         rotation_period_secs: u64,
         sleep_period_secs: u64,
         txn_expiration_secs: u64,
+        chain_id: ChainId,
     ) -> Self {
         Self {
-            libra,
+            diem,
             storage,
             time_service,
-            last_checked_libra_timestamp: 0,
+            last_checked_diem_timestamp: 0,
             rotation_period_secs,
             sleep_period_secs,
             txn_expiration_secs,
+            chain_id,
         }
     }
 
@@ -126,32 +146,40 @@ where
     /// error will be returned by this method, upon which the key manager will flag the error and
     /// stop execution.
     pub fn execute(&mut self) -> Result<(), Error> {
-        info!("The key manager has been created and is starting execution.");
         loop {
-            info!("Checking the status of the keys.");
+            info!(LogSchema::new(LogEntry::CheckKeyStatus).event(LogEvent::Pending));
+
             match self.execute_once() {
-                Ok(_) => {} // Expected case
+                Ok(_) => {
+                    info!(LogSchema::new(LogEntry::CheckKeyStatus).event(LogEvent::Success));
+                }
                 Err(Error::LivenessError(last_value, current_value)) => {
-                    // Log the liveness error, but don't throw the error up the call stack.
-                    error!(
-                        "Encountered error, but still continuing to execute: {}",
-                        Error::LivenessError(last_value, current_value).to_string()
-                    );
+                    // Log the liveness error and continue to execute.
+                    let error = Error::LivenessError(last_value, current_value);
+                    error!(LogSchema::new(LogEntry::CheckKeyStatus)
+                        .event(LogEvent::Error)
+                        .liveness_error(&error));
+                    counters::increment_metric_counter(LIVENESS_ERROR_ENCOUNTERED);
                 }
                 Err(e) => {
-                    // Unexpected error that we can't handle -- throw!
-                    error!(
-                        "Encountered error, cannot continue to operate: {}",
-                        e.to_string()
-                    );
-                    return Err(e);
+                    // Log the unexpected error and continue to execute.
+                    error!(LogSchema::new(LogEntry::CheckKeyStatus)
+                        .event(LogEvent::Error)
+                        .unexpected_error(&e));
+                    counters::increment_metric_counter(UNEXPECTED_ERROR_ENCOUNTERED);
                 }
             };
 
-            info!("Going to sleep for {} seconds.", self.sleep_period_secs);
-            COUNTERS.sleeps.inc();
-            self.time_service.sleep(self.sleep_period_secs);
+            self.sleep();
         }
+    }
+
+    fn sleep(&self) {
+        info!(LogSchema::new(LogEntry::Sleep)
+            .event(LogEvent::Pending)
+            .sleep_duration(self.sleep_period_secs));
+        self.time_service.sleep(self.sleep_period_secs);
+        info!(LogSchema::new(LogEntry::Sleep).event(LogEvent::Success));
     }
 
     /// Checks the current state of the validator keys and performs any actions that might be
@@ -162,151 +190,147 @@ where
     }
 
     pub fn compare_storage_to_config(&self) -> Result<(), Error> {
-        let storage_key = self.storage.get_public_key(CONSENSUS_KEY)?.public_key;
-        let operator_account = self.get_operator_account()?;
-        let validator_config = self.libra.retrieve_validator_config(operator_account)?;
-        let config_key = validator_config.consensus_public_key;
+        let owner_account = self.get_account_from_storage(OWNER_ACCOUNT)?;
+        let validator_config = self.diem.retrieve_validator_config(owner_account)?;
 
-        if storage_key == config_key {
-            return Ok(());
+        let storage_key = self.storage.get_public_key(CONSENSUS_KEY)?.public_key;
+        let config_key = validator_config.consensus_public_key;
+        if storage_key != config_key {
+            return Err(Error::ConfigStorageKeyMismatch(config_key, storage_key));
         }
-        Err(Error::ConfigStorageKeyMismatch(config_key, storage_key))
+
+        Ok(())
     }
 
     pub fn compare_info_to_config(&self) -> Result<(), Error> {
-        let operator_account = self.get_operator_account()?;
-        let validator_info = self.libra.retrieve_validator_info(operator_account)?;
-        let info_key = validator_info.consensus_public_key();
-        let validator_config = self.libra.retrieve_validator_config(operator_account)?;
-        let config_key = validator_config.consensus_public_key;
+        let owner_account = self.get_account_from_storage(OWNER_ACCOUNT)?;
+        let validator_config = self.diem.retrieve_validator_config(owner_account)?;
+        let validator_info = self.diem.retrieve_validator_info(owner_account)?;
 
-        if &config_key == info_key {
-            return Ok(());
+        let info_key = validator_info.consensus_public_key();
+        let config_key = validator_config.consensus_public_key;
+        if &config_key != info_key {
+            return Err(Error::ConfigInfoKeyMismatch(config_key, info_key.clone()));
         }
-        Err(Error::ConfigInfoKeyMismatch(config_key, info_key.clone()))
+
+        Ok(())
     }
 
     pub fn last_reconfiguration(&self) -> Result<u64, Error> {
         // Convert the time to seconds
-        Ok(self.libra.last_reconfiguration()? / 1_000_000)
+        Ok(self.diem.last_reconfiguration()? / 1_000_000)
     }
 
     pub fn last_rotation(&self) -> Result<u64, Error> {
         Ok(self.storage.get_public_key(CONSENSUS_KEY)?.last_update)
     }
 
-    pub fn libra_timestamp(&self) -> Result<u64, Error> {
+    pub fn diem_timestamp(&self) -> Result<u64, Error> {
         // Convert the time to seconds
-        Ok(self.libra.libra_timestamp()? / 1_000_000)
+        Ok(self.diem.diem_timestamp()? / 1_000_000)
     }
 
-    pub fn resubmit_consensus_key_transaction(&self) -> Result<(), Error> {
-        let storage_key = self.storage.get_public_key(CONSENSUS_KEY)?.public_key;
-        COUNTERS.consensus_rotation_tx_resubmissions.inc();
-        self.submit_key_rotation_transaction(storage_key)
-            .map(|_| ())?;
-        self.submit_reconfiguration_transaction().map(|_| ())
+    pub fn resubmit_consensus_key_transaction(&mut self) -> Result<(), Error> {
+        let consensus_key = self.storage.get_public_key(CONSENSUS_KEY)?.public_key;
+        self.submit_key_rotation_transaction(consensus_key)
+            .map(|_| ())
     }
 
     pub fn rotate_consensus_key(&mut self) -> Result<Ed25519PublicKey, Error> {
-        let new_key = self.storage.rotate_key(CONSENSUS_KEY)?;
-        info!("Successfully rotated the consensus key in secure storage.");
-        COUNTERS.completed_consensus_key_rotations.inc();
-        let result = self.submit_key_rotation_transaction(new_key);
-        self.submit_reconfiguration_transaction()?;
-        result
-    }
+        info!(LogSchema::new(LogEntry::KeyRotatedInStorage).event(LogEvent::Pending));
+        let consensus_key = self.storage.rotate_key(CONSENSUS_KEY)?;
+        info!(LogSchema::new(LogEntry::KeyRotatedInStorage)
+            .event(LogEvent::Success)
+            .consensus_key(&consensus_key));
+        counters::increment_metric_counter(ROTATED_IN_STORAGE);
 
-    pub fn submit_reconfiguration_transaction(&self) -> Result<(), Error> {
-        let account_prikey = self.storage.export_private_key(ASSOCIATION_KEY)?;
-        let association_account = association_address();
-        let seq_id = self.libra.retrieve_sequence_number(association_account)?;
-        let expiration = Duration::from_secs(self.time_service.now() + self.txn_expiration_secs);
-        let txn = build_reconfiguration_transaction(
-            association_account,
-            seq_id,
-            &account_prikey,
-            expiration,
-        );
-        self.libra.submit_transaction(txn)?;
-
-        info!("Submitted the reconfiguration transaction to the blockchain.");
-        Ok(())
+        self.submit_key_rotation_transaction(consensus_key)
     }
 
     pub fn submit_key_rotation_transaction(
-        &self,
-        new_key: Ed25519PublicKey,
+        &mut self,
+        consensus_key: Ed25519PublicKey,
     ) -> Result<Ed25519PublicKey, Error> {
-        let operator_account = self.get_operator_account()?;
-        let account_prikey = self.storage.export_private_key(OPERATOR_KEY)?;
-        let seq_id = self.libra.retrieve_sequence_number(operator_account)?;
-        let expiration = Duration::from_secs(self.time_service.now() + self.txn_expiration_secs);
-        // retrieve existing network information from storage
-        let validator_config = self.libra.retrieve_validator_config(operator_account)?;
-        let network_key = validator_config.validator_network_identity_public_key;
-        let network_address = validator_config.validator_network_address;
-        let fullnode_network_key = validator_config.full_node_network_identity_public_key;
-        let fullnode_network_address = validator_config.full_node_network_address;
+        info!(LogSchema::new(LogEntry::TransactionSubmitted).event(LogEvent::Pending));
+
+        let operator_account = self.get_account_from_storage(OPERATOR_ACCOUNT)?;
+        let seq_id = self.diem.retrieve_sequence_number(operator_account)?;
+        let expiration = self.time_service.now() + self.txn_expiration_secs;
+
+        // Retrieve existing network information as registered on-chain
+        let owner_account = self.get_account_from_storage(OWNER_ACCOUNT)?;
+        let validator_config = self.diem.retrieve_validator_config(owner_account)?;
 
         let txn = build_rotation_transaction(
+            owner_account,
             operator_account,
             seq_id,
-            &account_prikey,
-            &new_key,
-            &network_key,
-            &network_address,
-            &fullnode_network_key,
-            &fullnode_network_address,
+            &consensus_key,
+            validator_config.validator_network_addresses,
+            validator_config.fullnode_network_addresses,
             expiration,
+            self.chain_id,
         );
-        self.libra.submit_transaction(txn)?;
 
-        info!("Submitted the rotation transaction to the blockchain.");
-        Ok(new_key)
+        let operator_pubkey = self.storage.get_public_key(OPERATOR_KEY)?.public_key;
+        let txn_signature = self.storage.sign(OPERATOR_KEY, &txn)?;
+        let signed_txn = SignedTransaction::new(txn, operator_pubkey, txn_signature);
+
+        self.diem
+            .submit_transaction(Transaction::UserTransaction(signed_txn))?;
+
+        info!(LogSchema::new(LogEntry::TransactionSubmitted).event(LogEvent::Success));
+        counters::increment_metric_counter(SUBMITTED_ROTATION_TRANSACTION);
+
+        Ok(consensus_key)
     }
 
-    /// Ensures that the libra_timestamp() value registered on-chain is strictly monotonically
+    /// Ensures that the diem_timestamp() value registered on-chain is strictly monotonically
     /// increasing.
     fn ensure_timestamp_progress(&mut self) -> Result<(), Error> {
-        let current_libra_timestamp = self.libra.libra_timestamp()?;
-        if current_libra_timestamp <= self.last_checked_libra_timestamp {
+        let current_diem_timestamp = self.diem.diem_timestamp()?;
+        if current_diem_timestamp <= self.last_checked_diem_timestamp {
             return Err(Error::LivenessError(
-                self.last_checked_libra_timestamp,
-                current_libra_timestamp,
+                self.last_checked_diem_timestamp,
+                current_diem_timestamp,
             ));
         }
 
-        self.last_checked_libra_timestamp = current_libra_timestamp;
+        self.last_checked_diem_timestamp = current_diem_timestamp;
         Ok(())
     }
 
     /// Evaluates the current status of the key manager by performing various state checks between
     /// secure storage and the blockchain.
     ///
-    /// Note: every time this function is called, the libra_timestamp registered on-chain must be
+    /// Note: every time this function is called, the diem_timestamp registered on-chain must be
     /// strictly monotonically increasing. This helps to ensure that the blockchain is making
     /// progress. Otherwise, if no progress is being made on-chain, a reconfiguration event is
     /// unlikely, and the key manager will be unable to rotate keys.
     pub fn evaluate_status(&mut self) -> Result<Action, Error> {
         self.ensure_timestamp_progress()?;
 
-        // If this is inconsistent, then we are waiting on a reconfiguration...
-        if let Err(Error::ConfigInfoKeyMismatch(..)) = self.compare_info_to_config() {
-            COUNTERS.waiting_on_consensus_reconfiguration.inc();
-            return Ok(Action::NoAction);
+        // Compare the validator config to the validator set
+        match self.compare_info_to_config() {
+            Ok(()) => { /* Expected */ }
+            Err(Error::ConfigInfoKeyMismatch(..)) => return Ok(Action::WaitForReconfiguration),
+            Err(e) => return Err(e),
         }
 
         let last_rotation = self.last_rotation()?;
 
-        // If this is inconsistent, then the transaction either failed or was never submitted.
-        if let Err(Error::ConfigStorageKeyMismatch(..)) = self.compare_storage_to_config() {
-            return if last_rotation + self.txn_expiration_secs <= self.time_service.now() {
-                Ok(Action::SubmitKeyRotationTransaction)
-            } else {
-                Ok(Action::NoAction)
-            };
-        }
+        // Compare the validator config to secure storage
+        match self.compare_storage_to_config() {
+            Ok(()) => { /* Expected */ }
+            Err(Error::ConfigStorageKeyMismatch(..)) => {
+                return if last_rotation + self.txn_expiration_secs <= self.time_service.now() {
+                    Ok(Action::SubmitKeyRotationTransaction)
+                } else {
+                    Ok(Action::WaitForTransactionExecution)
+                };
+            }
+            Err(e) => return Err(e),
+        };
 
         if last_rotation + self.rotation_period_secs <= self.time_service.now() {
             Ok(Action::FullKeyRotation)
@@ -318,90 +342,65 @@ where
     pub fn perform_action(&mut self, action: Action) -> Result<(), Error> {
         match action {
             Action::FullKeyRotation => {
-                info!("A full consensus key rotation needs to be performed.");
-                self.rotate_consensus_key().map(|_| ())
+                info!(LogSchema::new(LogEntry::FullKeyRotation).event(LogEvent::Pending));
+                self.rotate_consensus_key().map(|_| ())?;
+                info!(LogSchema::new(LogEntry::FullKeyRotation).event(LogEvent::Success));
             }
             Action::SubmitKeyRotationTransaction => {
-                info!("The consensus key rotation transaction needs to be resubmitted");
-                self.resubmit_consensus_key_transaction()
+                info!(LogSchema::new(LogEntry::TransactionResubmission).event(LogEvent::Pending));
+                self.resubmit_consensus_key_transaction()?;
+                info!(LogSchema::new(LogEntry::TransactionResubmission).event(LogEvent::Success));
             }
             Action::NoAction => {
-                info!("No actions need to be performed.");
-                COUNTERS.no_actions_required.inc();
-                Ok(())
+                info!(LogSchema::new(LogEntry::KeyStillFresh));
+                counters::increment_metric_counter(KEYS_STILL_FRESH);
             }
-        }
+            Action::WaitForReconfiguration => {
+                warn!(LogSchema::new(LogEntry::WaitForReconfiguration));
+                counters::increment_metric_counter(WAITING_ON_RECONFIGURATION);
+            }
+            Action::WaitForTransactionExecution => {
+                warn!(LogSchema::new(LogEntry::WaitForTransactionExecution));
+                counters::increment_metric_counter(WAITING_ON_TRANSACTION_EXECUTION);
+            }
+        };
+
+        Ok(())
     }
 
-    fn get_operator_account(&self) -> Result<AccountAddress, Error> {
-        match self
-            .storage
-            .get(OPERATOR_ACCOUNT)
-            .and_then(|response| response.value.string())
-        {
-            Ok(account_address) => AccountAddress::from_str(&account_address)
-                .map_err(|e| Error::UnknownError(e.to_string())),
-            Err(e) => Err(Error::MissingAccountAddress(e)),
-        }
+    fn get_account_from_storage(&self, account_name: &str) -> Result<AccountAddress, Error> {
+        self.storage
+            .get::<AccountAddress>(account_name)
+            .map(|v| v.value)
+            .map_err(|e| Error::MissingAccountAddress(account_name.into(), e.to_string()))
     }
-}
-
-pub fn build_reconfiguration_transaction(
-    sender: AccountAddress,
-    seq_id: u64,
-    signing_key: &Ed25519PrivateKey,
-    expiration: Duration,
-) -> Transaction {
-    let script = Script::new(
-        libra_transaction_scripts::RECONFIGURE_TXN.clone(),
-        vec![],
-        vec![],
-    );
-    let raw_txn = RawTransaction::new_script(
-        sender,
-        seq_id,
-        script,
-        MAX_GAS_AMOUNT,
-        GAS_UNIT_PRICE,
-        LBR_NAME.to_owned(),
-        expiration,
-    );
-    let signed_txn = raw_txn.sign(signing_key, signing_key.public_key()).unwrap();
-    Transaction::UserTransaction(signed_txn.into_inner())
 }
 
 pub fn build_rotation_transaction(
-    sender: AccountAddress,
+    owner_address: AccountAddress,
+    operator_address: AccountAddress,
     seq_id: u64,
-    signing_key: &Ed25519PrivateKey,
-    new_key: &Ed25519PublicKey,
-    network_key: &x25519::PublicKey,
-    network_address: &RawNetworkAddress,
-    fullnode_network_key: &x25519::PublicKey,
-    fullnode_network_address: &RawNetworkAddress,
-    expiration: Duration,
-) -> Transaction {
-    let script = Script::new(
-        libra_transaction_scripts::SET_VALIDATOR_CONFIG_TXN.clone(),
-        vec![],
-        vec![
-            TransactionArgument::Address(sender),
-            TransactionArgument::U8Vector(new_key.to_bytes().to_vec()),
-            TransactionArgument::U8Vector(network_key.as_slice().to_vec()),
-            TransactionArgument::U8Vector(network_address.as_ref().to_vec()),
-            TransactionArgument::U8Vector(fullnode_network_key.as_slice().to_vec()),
-            TransactionArgument::U8Vector(fullnode_network_address.as_ref().to_vec()),
-        ],
-    );
-    let raw_txn = RawTransaction::new_script(
-        sender,
+    consensus_key: &Ed25519PublicKey,
+    network_addresses: Vec<u8>,
+    fullnode_network_addresses: Vec<u8>,
+    expiration_timestamp_secs: u64,
+    chain_id: ChainId,
+) -> RawTransaction {
+    let script =
+        transaction_builder_generated::stdlib::encode_set_validator_config_and_reconfigure_script(
+            owner_address,
+            consensus_key.to_bytes().to_vec(),
+            network_addresses,
+            fullnode_network_addresses,
+        );
+    RawTransaction::new_script(
+        operator_address,
         seq_id,
         script,
         MAX_GAS_AMOUNT,
         GAS_UNIT_PRICE,
-        LBR_NAME.to_owned(),
-        expiration,
-    );
-    let signed_txn = raw_txn.sign(signing_key, signing_key.public_key()).unwrap();
-    Transaction::UserTransaction(signed_txn.into_inner())
+        XUS_NAME.to_owned(),
+        expiration_timestamp_secs,
+        chain_id,
+    )
 }

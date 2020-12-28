@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeMap, Bound};
@@ -95,6 +95,17 @@ impl CodeWriter {
         f(&output[0..j])
     }
 
+    /// Extracts the output as a string. Leaves the writers data empty.
+    pub fn extract_result(&self) -> String {
+        let mut s = std::mem::take(&mut self.0.borrow_mut().output);
+        // Eliminate any empty lines at end, but keep the lest EOL
+        s.truncate(s.trim_end().len());
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+        s
+    }
+
     /// Sets the current location. This location will be associated with all subsequently written
     /// code so we can map back from the generated code to this location. If current loc
     /// is already the passed one, nothing will be updated, so it is ok to call this method
@@ -159,13 +170,13 @@ impl CodeWriter {
                 first = false
             } else {
                 Self::trim_trailing_whitespace(&mut self.0.borrow_mut().output);
-                self.0.borrow_mut().output.push_str("\n");
+                self.0.borrow_mut().output.push('\n');
             }
             self.emit_str(l)
         }
         if end_newl {
             Self::trim_trailing_whitespace(&mut self.0.borrow_mut().output);
-            self.0.borrow_mut().output.push_str("\n");
+            self.0.borrow_mut().output.push('\n');
         }
     }
 

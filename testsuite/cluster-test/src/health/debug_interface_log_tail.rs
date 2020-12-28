@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
@@ -7,16 +7,16 @@ use crate::{
     cluster::Cluster,
     health::{log_tail::TraceTail, Commit, Event, LogTail, ValidatorEvent},
     instance::Instance,
-    util::unix_timestamp_now,
 };
-use debug_interface::{json_log::JsonLogEntry as DebugInterfaceEvent, AsyncNodeDebugClient};
-use libra_logger::*;
+use debug_interface::AsyncNodeDebugClient;
+use diem_infallible::{duration_since_epoch, Mutex};
+use diem_logger::{json_log::JsonLogEntry as DebugInterfaceEvent, *};
 use serde_json::{self, value as json};
 use std::{
     env,
     sync::{
         atomic::{AtomicBool, AtomicI64, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc,
     },
     time::Duration,
 };
@@ -40,7 +40,7 @@ impl DebugPortLogWorker {
         let pending_messages = Arc::new(AtomicI64::new(0));
         let (trace_sender, trace_receiver) = mpsc::channel();
         let trace_enabled = Arc::new(AtomicBool::new(false));
-        for instance in cluster.all_instances() {
+        for instance in cluster.validator_and_fullnode_instances() {
             let (started_sender, started_receiver) = mpsc::channel();
             started_receivers.push(started_receiver);
             let client = instance.debug_interface_client();
@@ -118,7 +118,7 @@ impl DebugPortLogWorker {
         Some(ValidatorEvent {
             validator: self.instance.peer_name().clone(),
             timestamp: Duration::from_millis(event.timestamp as u64),
-            received_timestamp: unix_timestamp_now(),
+            received_timestamp: duration_since_epoch(),
             event: e,
         })
     }
@@ -131,6 +131,11 @@ impl DebugPortLogWorker {
                 .as_str()
                 .expect("block_id is not string")
                 .to_string(),
+            epoch: json
+                .get("epoch")
+                .expect("No epoch in commit event")
+                .as_u64()
+                .expect("epoch is not u64"),
             round: json
                 .get("round")
                 .expect("No round in commit event")

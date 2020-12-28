@@ -1,121 +1,172 @@
 address 0x1 {
 
+/// Functions to initialize, accumulated, and burn transaction fees.
+
 module TransactionFee {
     use 0x1::CoreAddresses;
-    use 0x1::Coin1::Coin1;
-    use 0x1::Coin2::Coin2;
-    use 0x1::LBR::{Self, LBR};
-    use 0x1::Libra::{Self, Libra, Preburn, BurnCapability};
-    use 0x1::LibraAccount;
+    use 0x1::Errors;
+    use 0x1::XUS::XUS;
+    use 0x1::XDX;
+    use 0x1::Diem::{Self, Diem, Preburn};
+    use 0x1::Roles;
+    use 0x1::DiemTimestamp;
     use 0x1::Signer;
-    use 0x1::Roles::{Capability, AssociationRootRole, TreasuryComplianceRole};
 
-    /// The `TransactionFeeCollection` resource holds the
-    /// `LibraAccount::WithdrawCapability` for the `CoreAddresses::TRANSACTION_FEE_ADDRESS()` account.
-    /// This is used for the collection of the transaction fees since it
-    /// must be sent from the account at the `CoreAddresses::TREASURY_COMPLIANCE_ADDRESS()` address.
-    resource struct TransactionFeeCollection {
-        cap: LibraAccount::WithdrawCapability,
-    }
-
-    /// The `TransactionFeePreburn` holds a preburn resource for each
+    /// The `TransactionFee` resource holds a preburn resource for each
     /// fiat `CoinType` that can be collected as a transaction fee.
-    resource struct TransactionFeePreburn<CoinType> {
-        preburn: Preburn<CoinType>
+    resource struct TransactionFee<CoinType> {
+        balance: Diem<CoinType>,
+        preburn: Preburn<CoinType>,
     }
 
-    /// Called in genesis. Sets up the needed resources to collect
-    /// transaction fees from the `0xFEE` account with the `0xB1E55ED` account.
+    /// A `TransactionFee` resource is not in the required state
+    const ETRANSACTION_FEE: u64 = 0;
+
+    /// Called in genesis. Sets up the needed resources to collect transaction fees from the
+    /// `TransactionFee` resource with the TreasuryCompliance account.
     public fun initialize(
-        creating_account: &signer,
-        fee_account: &signer,
-        assoc_root_capability: &Capability<AssociationRootRole>,
-        tc_capability: &Capability<TreasuryComplianceRole>,
-        auth_key_prefix: vector<u8>
+        tc_account: &signer,
     ) {
-        assert(
-            Signer::address_of(fee_account) == CoreAddresses::TRANSACTION_FEE_ADDRESS(),
-            0
-        );
+        DiemTimestamp::assert_genesis();
+        Roles::assert_treasury_compliance(tc_account);
+        // accept fees in all the currencies
+        add_txn_fee_currency<XUS>(tc_account);
+    }
+    spec fun initialize {
+        include DiemTimestamp::AbortsIfNotGenesis;
+        include Roles::AbortsIfNotTreasuryCompliance{account: tc_account};
+        include AddTxnFeeCurrencyAbortsIf<XUS>;
+        ensures is_initialized();
+        ensures spec_transaction_fee<XUS>().balance.value == 0;
+    }
+    spec schema AddTxnFeeCurrencyAbortsIf<CoinType> {
+        include Diem::AbortsIfNoCurrency<CoinType>;
+        aborts_if exists<TransactionFee<CoinType>>(CoreAddresses::TREASURY_COMPLIANCE_ADDRESS())
+            with Errors::ALREADY_PUBLISHED;
+    }
 
-        LibraAccount::create_testnet_account<LBR>(
-            creating_account,
-            assoc_root_capability,
-            Signer::address_of(fee_account),
-            auth_key_prefix
-        );
-        // accept fees in all the currencies. No need to do this for LBR
-        add_txn_fee_currency<Coin1>(fee_account, tc_capability);
-        add_txn_fee_currency<Coin2>(fee_account, tc_capability);
+    public fun is_coin_initialized<CoinType>(): bool {
+        exists<TransactionFee<CoinType>>(CoreAddresses::TREASURY_COMPLIANCE_ADDRESS())
+    }
 
-        let cap = LibraAccount::extract_withdraw_capability(fee_account);
-        move_to(fee_account, TransactionFeeCollection { cap });
+    fun is_initialized(): bool {
+        is_coin_initialized<XUS>()
     }
 
     /// Sets ups the needed transaction fee state for a given `CoinType` currency by
-    /// (1) configuring `fee_account` to accept `CoinType`
-    /// (2) publishing a wrapper of the `Preburn<CoinType>` resource under `fee_account`
-    fun add_txn_fee_currency<CoinType>(
-        fee_account: &signer,
-        tc_capability: &Capability<TreasuryComplianceRole>,
-    ) {
-        LibraAccount::add_currency<CoinType>(fee_account);
-        move_to(fee_account, TransactionFeePreburn<CoinType> {
-            preburn: Libra::create_preburn(tc_capability)
-        })
-    }
-
-    /// Preburns the transaction fees collected in the `CoinType` currency.
-    /// If the `CoinType` is LBR, it unpacks the coin and preburns the
-    /// underlying fiat.
-    public fun preburn_fees<CoinType>(blessed_sender: &signer)
-    acquires TransactionFeeCollection, TransactionFeePreburn {
+    /// (1) configuring `tc_account` to accept `CoinType`
+    /// (2) publishing a wrapper of the `Preburn<CoinType>` resource under `tc_account`
+    public fun add_txn_fee_currency<CoinType>(tc_account: &signer) {
+        Diem::assert_is_currency<CoinType>();
         assert(
-            Signer::address_of(blessed_sender) == CoreAddresses::TREASURY_COMPLIANCE_ADDRESS(),
-            0
+            !is_coin_initialized<CoinType>(),
+            Errors::already_published(ETRANSACTION_FEE)
         );
-        if (LBR::is_lbr<CoinType>()) {
-            let amount = LibraAccount::balance<LBR>(CoreAddresses::TRANSACTION_FEE_ADDRESS());
-            let coins = LibraAccount::withdraw_from<LBR>(
-                &borrow_global<TransactionFeeCollection>(0xFEE).cap,
-                amount
-            );
-            let (coin1, coin2) = LBR::unpack(blessed_sender, coins);
-            preburn_coin<Coin1>(coin1);
-            preburn_coin<Coin2>(coin2)
-        } else {
-            let amount = LibraAccount::balance<CoinType>(CoreAddresses::TRANSACTION_FEE_ADDRESS());
-            let coins = LibraAccount::withdraw_from<CoinType>(
-                &borrow_global<TransactionFeeCollection>(0xFEE).cap,
-                amount
-            );
-            preburn_coin(coins)
-        }
-    }
-
-    /// Burns the already preburned fees from a previous call to `preburn_fees`.
-    public fun burn_fees<CoinType>(burn_cap: &BurnCapability<CoinType>)
-    acquires TransactionFeePreburn {
-        let preburn = &mut borrow_global_mut<TransactionFeePreburn<CoinType>>(
-            CoreAddresses::TRANSACTION_FEE_ADDRESS()
-        ).preburn;
-        Libra::burn_with_resource_cap(
-            preburn,
-            CoreAddresses::TRANSACTION_FEE_ADDRESS(),
-            burn_cap
+        move_to(
+            tc_account,
+            TransactionFee<CoinType> {
+                balance: Diem::zero(),
+                preburn: Diem::create_preburn(tc_account)
+            }
         )
     }
 
-    fun preburn_coin<CoinType>(coin: Libra<CoinType>)
-    acquires TransactionFeePreburn {
-        let preburn = &mut borrow_global_mut<TransactionFeePreburn<CoinType>>(
-            CoreAddresses::TRANSACTION_FEE_ADDRESS()
-        ).preburn;
-        Libra::preburn_with_resource(
-            coin,
-            preburn,
-            CoreAddresses::TRANSACTION_FEE_ADDRESS()
+    /// Deposit `coin` into the transaction fees bucket
+    public fun pay_fee<CoinType>(coin: Diem<CoinType>) acquires TransactionFee {
+        DiemTimestamp::assert_operating();
+        assert(is_coin_initialized<CoinType>(), Errors::not_published(ETRANSACTION_FEE));
+        let fees = borrow_global_mut<TransactionFee<CoinType>>(
+            CoreAddresses::TREASURY_COMPLIANCE_ADDRESS(),
         );
+        Diem::deposit(&mut fees.balance, coin)
+    }
+
+    spec fun pay_fee {
+        include DiemTimestamp::AbortsIfNotOperating;
+        aborts_if !is_coin_initialized<CoinType>() with Errors::NOT_PUBLISHED;
+        let fees = spec_transaction_fee<CoinType>().balance;
+        include Diem::DepositAbortsIf<CoinType>{coin: fees, check: coin};
+        ensures fees.value == old(fees.value) + coin.value;
+    }
+
+    /// Preburns the transaction fees collected in the `CoinType` currency.
+    /// If the `CoinType` is XDX, it unpacks the coin and preburns the
+    /// underlying fiat.
+    public fun burn_fees<CoinType>(
+        tc_account: &signer,
+    ) acquires TransactionFee {
+        DiemTimestamp::assert_operating();
+        Roles::assert_treasury_compliance(tc_account);
+        assert(is_coin_initialized<CoinType>(), Errors::not_published(ETRANSACTION_FEE));
+        let tc_address = CoreAddresses::TREASURY_COMPLIANCE_ADDRESS();
+        if (XDX::is_xdx<CoinType>()) {
+            // TODO: Once the composition of XDX is determined fill this in to
+            // unpack and burn the backing coins of the XDX coin.
+            abort Errors::invalid_state(ETRANSACTION_FEE)
+        } else {
+            // extract fees
+            let fees = borrow_global_mut<TransactionFee<CoinType>>(tc_address);
+            let coin = Diem::withdraw_all(&mut fees.balance);
+            let burn_cap = Diem::remove_burn_capability<CoinType>(tc_account);
+            // burn
+            Diem::burn_now(
+                coin,
+                &mut fees.preburn,
+                tc_address,
+                &burn_cap
+            );
+            Diem::publish_burn_capability(tc_account, burn_cap);
+        }
+    }
+
+    spec fun burn_fees {
+        /// Must abort if the account does not have the TreasuryCompliance role [[H3]][PERMISSION].
+        include Roles::AbortsIfNotTreasuryCompliance{account: tc_account};
+
+        include DiemTimestamp::AbortsIfNotOperating;
+        aborts_if !is_coin_initialized<CoinType>() with Errors::NOT_PUBLISHED;
+        include if (XDX::spec_is_xdx<CoinType>()) BurnFeesXDX else BurnFeesNotXDX<CoinType>;
+
+        /// The correct amount of fees is burnt and subtracted from market cap.
+        ensures Diem::spec_market_cap<CoinType>()
+            == old(Diem::spec_market_cap<CoinType>()) - old(spec_transaction_fee<CoinType>().balance.value);
+        /// All the fees is burnt so the balance becomes 0.
+        ensures spec_transaction_fee<CoinType>().balance.value == 0;
+    }
+    /// STUB: To be filled in at a later date once the makeup of the XDX has been determined.
+    ///
+    /// # Specification of the case where burn type is XDX.
+    spec schema BurnFeesXDX {
+        tc_account: signer;
+        aborts_if true with Errors::INVALID_STATE;
+    }
+    /// # Specification of the case where burn type is not XDX.
+    spec schema BurnFeesNotXDX<CoinType> {
+        tc_account: signer;
+        /// Must abort if the account does not have BurnCapability [[H3]][PERMISSION].
+        include Diem::AbortsIfNoBurnCapability<CoinType>{account: tc_account};
+
+        let fees = spec_transaction_fee<CoinType>();
+        include Diem::BurnNowAbortsIf<CoinType>{coin: fees.balance, preburn: fees.preburn};
+
+        /// tc_account retrieves BurnCapability [[H3]][PERMISSION].
+        /// BurnCapability is not transferrable [[J3]][PERMISSION].
+        ensures exists<Diem::BurnCapability<CoinType>>(Signer::spec_address_of(tc_account));
+    }
+
+    spec module {} // Switch documentation context to module level.
+
+    /// # Initialization
+
+    spec module {
+        /// If time has started ticking, then `TransactionFee` resources have been initialized.
+        invariant [global] DiemTimestamp::is_operating() ==> is_initialized();
+    }
+
+    /// # Helper Function
+
+    spec define spec_transaction_fee<CoinType>(): TransactionFee<CoinType> {
+        borrow_global<TransactionFee<CoinType>>(CoreAddresses::TREASURY_COMPLIANCE_ADDRESS())
     }
 }
 }

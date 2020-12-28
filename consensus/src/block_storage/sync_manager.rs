@@ -1,9 +1,11 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
     block_storage::{BlockReader, BlockStore},
+    logging::{LogEvent, LogSchema},
     network::NetworkSender,
+    network_interface::ConsensusMsg,
     persistent_liveness_storage::{PersistentLivenessStorage, RecoveryData},
     state_replication::StateComputer,
 };
@@ -15,12 +17,11 @@ use consensus_types::{
     quorum_cert::QuorumCert,
     sync_info::SyncInfo,
 };
-use libra_logger::prelude::*;
-use libra_types::{account_address::AccountAddress, epoch_change::EpochChangeProof};
+use diem_logger::prelude::*;
+use diem_types::{account_address::AccountAddress, epoch_change::EpochChangeProof};
 use mirai_annotations::checked_precondition;
 use rand::{prelude::*, Rng};
 use std::{clone::Clone, sync::Arc, time::Duration};
-use termion::color::*;
 
 #[derive(Debug, PartialEq)]
 /// Whether we need to do block retrieval if we want to insert a Quorum Cert.
@@ -104,10 +105,12 @@ impl BlockStore {
             if qc.ends_epoch() {
                 retriever
                     .network
-                    .broadcast_epoch_change(EpochChangeProof::new(
-                        vec![finality_proof.clone()],
-                        /* more = */ false,
-                    ))
+                    .broadcast(ConsensusMsg::EpochChangeProof(Box::new(
+                        EpochChangeProof::new(
+                            vec![finality_proof.clone()],
+                            /* more = */ false,
+                        ),
+                    )))
                     .await;
             }
         }
@@ -168,7 +171,11 @@ impl BlockStore {
         )
         .await?
         .take();
-        debug!("{}Sync to{} {}", Fg(Blue), Fg(Reset), root.0);
+        debug!(
+            LogSchema::new(LogEvent::CommitViaSync).round(self.root().round()),
+            committed_round = root.0.round(),
+            block_id = root.0.id(),
+        );
         self.rebuild(root, root_metadata, blocks, quorum_certs)
             .await;
 
@@ -191,8 +198,8 @@ impl BlockStore {
         state_computer: Arc<dyn StateComputer>,
     ) -> anyhow::Result<RecoveryData> {
         debug!(
-            "Start state sync with peer: {}, to block: {}",
-            retriever.preferred_peer.short_str(),
+            LogSchema::new(LogEvent::StateSync).remote_peer(retriever.preferred_peer),
+            "Start state sync with peer to block: {}",
             highest_commit_cert.commit_info(),
         );
 
@@ -273,9 +280,9 @@ impl BlockRetriever {
             attempt += 1;
 
             debug!(
-                "Fetching {} from {}, attempt {}",
-                block_id,
-                peer.short_str(),
+                LogSchema::new(LogEvent::RetrieveBlock).remote_peer(peer),
+                block_id = block_id,
+                "Fetching block, attempt {}",
                 attempt
             );
             let response = self
@@ -295,10 +302,9 @@ impl BlockRetriever {
             }) {
                 result @ Ok(_) => return result,
                 Err(e) => warn!(
-                    "Failed to fetch block {} from {}: {:?}, trying another peer",
-                    block_id,
-                    peer.short_str(),
-                    e,
+                    remote_peer = peer,
+                    block_id = block_id,
+                    error = ?e, "Failed to fetch block, trying another peer",
                 ),
             }
         }

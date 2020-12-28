@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 mod state;
@@ -242,7 +242,9 @@ fn exp(context: &mut Context, parent_e: &Exp) -> Values {
             values
         }
 
-        E::Unit { .. } | E::Value(_) | E::Spec(_, _) | E::UnresolvedError => svalue(),
+        E::Unit { .. } | E::Value(_) | E::Constant(_) | E::Spec(_, _) | E::UnresolvedError => {
+            svalue()
+        }
         E::Cast(e, _) | E::UnaryExp(_, e) => {
             let v = exp(context, e);
             assert!(!assert_single_value(v).is_ref());

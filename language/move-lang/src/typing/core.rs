@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -8,8 +8,8 @@ use crate::{
         Type, TypeName, TypeName_, Type_,
     },
     parser::ast::{
-        Field, FunctionName, FunctionVisibility, Kind, Kind_, ModuleIdent, ResourceLoc, StructName,
-        Var,
+        ConstantName, Field, FunctionName, FunctionVisibility, Kind, Kind_, ModuleIdent,
+        ResourceLoc, StructName, Var,
     },
     shared::{unique_map::UniqueMap, *},
 };
@@ -45,9 +45,15 @@ pub struct FunctionInfo {
     pub acquires: BTreeMap<StructName, Loc>,
 }
 
+pub struct ConstantInfo {
+    pub defined_loc: Loc,
+    pub signature: Type,
+}
+
 pub struct ModuleInfo {
     pub structs: UniqueMap<StructName, StructDefinition>,
     pub functions: UniqueMap<FunctionName, FunctionInfo>,
+    pub constants: UniqueMap<ConstantName, ConstantInfo>,
 }
 
 pub struct Context {
@@ -55,6 +61,7 @@ pub struct Context {
 
     pub current_module: Option<ModuleIdent>,
     pub current_function: Option<FunctionName>,
+    pub current_script_constants: Option<UniqueMap<ConstantName, ConstantInfo>>,
     pub return_type: Option<Type>,
     locals: UniqueMap<Var, Type>,
 
@@ -77,12 +84,21 @@ impl Context {
                 signature: fdef.signature.clone(),
                 acquires: fdef.acquires.clone(),
             });
-            ModuleInfo { structs, functions }
+            let constants = mdef.constants.ref_map(|cname, cdef| ConstantInfo {
+                defined_loc: cname.loc(),
+                signature: cdef.signature.clone(),
+            });
+            ModuleInfo {
+                structs,
+                functions,
+                constants,
+            }
         });
         Context {
             subst: Subst::empty(),
             current_module: None,
             current_function: None,
+            current_script_constants: None,
             return_type: None,
             constraints: vec![],
             errors,
@@ -95,10 +111,23 @@ impl Context {
 
     pub fn reset_for_module_item(&mut self) {
         assert!(!self.in_loop, "ICE in_loop should be reset after the loop");
+        assert!(
+            self.break_type.is_none(),
+            "ICE in_loop should be reset after the loop"
+        );
         self.return_type = None;
         self.locals = UniqueMap::new();
         self.subst = Subst::empty();
         self.constraints = Constraints::new();
+        self.current_function = None;
+    }
+
+    pub fn bind_script_constants(&mut self, constants: &UniqueMap<ConstantName, N::Constant>) {
+        assert!(self.current_script_constants.is_none());
+        self.current_script_constants = Some(constants.ref_map(|cname, cdef| ConstantInfo {
+            defined_loc: cname.loc(),
+            signature: cdef.signature.clone(),
+        }));
     }
 
     pub fn error(&mut self, e: Vec<(Loc, impl Into<String>)>) {
@@ -266,6 +295,14 @@ impl Context {
             .get(n)
             .expect("ICE should have failed in naming")
     }
+
+    fn constant_info(&mut self, m_opt: &Option<ModuleIdent>, n: &ConstantName) -> &ConstantInfo {
+        let constants = match m_opt {
+            None => self.current_script_constants.as_ref().unwrap(),
+            Some(m) => &self.module_info(m).constants,
+        };
+        constants.get(n).expect("ICE should have failed in naming")
+    }
 }
 
 //**************************************************************************************************
@@ -343,14 +380,22 @@ impl ast_debug::AstDebug for Subst {
 //**************************************************************************************************
 
 pub fn error_format(b: &Type, subst: &Subst) -> String {
-    error_format_(b, subst, false)
+    error_format_impl(b, subst, false)
+}
+
+pub fn error_format_(b_: &Type_, subst: &Subst) -> String {
+    error_format_impl_(b_, subst, false)
 }
 
 pub fn error_format_nested(b: &Type, subst: &Subst) -> String {
-    error_format_(b, subst, true)
+    error_format_impl(b, subst, true)
 }
 
-fn error_format_(sp!(_, b_): &Type, subst: &Subst, nested: bool) -> String {
+fn error_format_impl(sp!(_, b_): &Type, subst: &Subst, nested: bool) -> String {
+    error_format_impl_(b_, subst, nested)
+}
+
+fn error_format_impl_(b_: &Type_, subst: &Subst, nested: bool) -> String {
     use Type_::*;
     let res = match b_ {
         UnresolvedError | Anything => "_".to_string(),
@@ -592,6 +637,37 @@ pub fn make_field_type(
             subst_tparams(tparam_subst, field_ty)
         }
     }
+}
+
+//**************************************************************************************************
+// Constants
+//**************************************************************************************************
+
+pub fn make_constant_type(
+    context: &mut Context,
+    loc: Loc,
+    m: &Option<ModuleIdent>,
+    c: &ConstantName,
+) -> Type {
+    let in_current_module = m == &context.current_module;
+    let (defined_loc, signature) = {
+        let ConstantInfo {
+            defined_loc,
+            signature,
+        } = context.constant_info(m, c);
+        (*defined_loc, signature.clone())
+    };
+    if !in_current_module {
+        let msg = match m {
+            None => format!("Invalid access of '{}'", c),
+            Some(mident) => format!("Invalid access of '{}::{}'", mident, c),
+        };
+        let internal_msg = "Constants are internal to their module, and cannot can be accessed \
+                            outside of their module";
+        context.error(vec![(loc, msg), (defined_loc, internal_msg.into())]);
+    }
+
+    signature
 }
 
 //**************************************************************************************************
@@ -1027,7 +1103,7 @@ fn instantiate_apply(
     loc: Loc,
     kind_opt: Option<Kind>,
     n: TypeName,
-    mut ty_args: Vec<Type>,
+    ty_args: Vec<Type>,
 ) -> Type_ {
     let tparam_constraints: Vec<Kind> = match &n {
         sp!(nloc, N::TypeName_::Builtin(b)) => b.value.tparam_constraints(*nloc),
@@ -1039,13 +1115,6 @@ fn instantiate_apply(
             tps.iter().map(|tp| tp.kind.clone()).collect()
         }
     };
-    ty_args = check_type_argument_arity(
-        context,
-        loc,
-        || format!("{}", &n),
-        ty_args,
-        &tparam_constraints,
-    );
 
     let tys = instantiate_type_args(context, loc, Some(&n.value), ty_args, tparam_constraints);
     Type_::Apply(kind_opt, n, tys)
@@ -1109,7 +1178,7 @@ fn check_type_argument_arity<F: FnOnce() -> String>(
         context.error(vec![(
             loc,
             format!(
-                "Invalid instantiation of '{}'. Expected {} type arguments but got {}",
+                "Invalid instantiation of '{}'. Expected {} type argument(s) but got {}",
                 name_f(),
                 arity,
                 args_len

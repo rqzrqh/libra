@@ -1,127 +1,105 @@
 address 0x1 {
 
+/// Module for registering currencies in Diem. Basically, this means adding a
+/// string (vector<u8>) for the currency name to vector of names in DiemConfig.
 module RegisteredCurrencies {
-    use 0x1::CoreAddresses;
-    use 0x1::LibraConfig::{Self, CreateOnChainConfig};
-    use 0x1::Signer;
+    use 0x1::Errors;
+    use 0x1::DiemConfig;
+    use 0x1::DiemTimestamp;
+    use 0x1::Roles;
     use 0x1::Vector;
-    use 0x1::Roles::Capability;
 
-    // An on-chain config holding all of the currency codes for registered
-    // currencies. The inner vector<u8>'s are string representations of
-    // currency names.
+    /// A DiemConfig config holding all of the currency codes for registered
+    /// currencies. The inner vector<u8>'s are string representations of
+    /// currency names.
     struct RegisteredCurrencies {
         currency_codes: vector<vector<u8>>,
     }
 
-    // An operations capability to allow updating of the on-chain config
-    resource struct RegistrationCapability {
-        cap: LibraConfig::ModifyConfigCapability<Self::RegisteredCurrencies>,
-    }
+    /// Attempted to add a currency code that is already in use
+    const ECURRENCY_CODE_ALREADY_TAKEN: u64 = 0;
 
-    public fun initialize(
-        config_account: &signer,
-        create_config_capability: &Capability<CreateOnChainConfig>,
-    ): RegistrationCapability {
-        // enforce that this is only going to one specific address,
-        assert(
-            Signer::address_of(config_account) == CoreAddresses::DEFAULT_CONFIG_ADDRESS(),
-            0
+    /// Initializes this module. Can only be called from genesis, with
+    /// a Diem root signer.
+    public fun initialize(dr_account: &signer) {
+        DiemTimestamp::assert_genesis();
+        Roles::assert_diem_root(dr_account);
+        DiemConfig::publish_new_config(
+            dr_account,
+            RegisteredCurrencies { currency_codes: Vector::empty() }
         );
-        let cap = LibraConfig::publish_new_config_with_capability(
-            config_account,
-            create_config_capability,
-            empty()
-        );
-
-        RegistrationCapability { cap }
+    }
+    spec fun initialize {
+        include InitializeAbortsIf;
+        include InitializeEnsures;
     }
 
-    fun empty(): RegisteredCurrencies {
-        RegisteredCurrencies { currency_codes: Vector::empty() }
+    spec schema InitializeAbortsIf {
+        dr_account: signer;
+        include DiemTimestamp::AbortsIfNotGenesis;
+        include Roles::AbortsIfNotDiemRoot{account: dr_account};
+        include DiemConfig::PublishNewConfigAbortsIf<RegisteredCurrencies>;
+    }
+    spec schema InitializeEnsures {
+        include DiemConfig::PublishNewConfigEnsures<RegisteredCurrencies>{
+            payload: RegisteredCurrencies { currency_codes: Vector::empty() }
+        };
+        ensures len(get_currency_codes()) == 0;
     }
 
+    /// Adds a new currency code. The currency code must not yet exist.
     public fun add_currency_code(
+        dr_account: &signer,
         currency_code: vector<u8>,
-        cap: &RegistrationCapability,
     ) {
-        let config = LibraConfig::get<RegisteredCurrencies>();
+        let config = DiemConfig::get<RegisteredCurrencies>();
+        assert(
+            !Vector::contains(&config.currency_codes, &currency_code),
+            Errors::invalid_argument(ECURRENCY_CODE_ALREADY_TAKEN)
+        );
         Vector::push_back(&mut config.currency_codes, currency_code);
-        LibraConfig::set_with_capability(&cap.cap, config);
+        DiemConfig::set(dr_account, config);
+    }
+    spec fun add_currency_code {
+        include AddCurrencyCodeAbortsIf;
+        include AddCurrencyCodeEnsures;
+    }
+    spec schema AddCurrencyCodeAbortsIf {
+        dr_account: &signer;
+        currency_code: vector<u8>;
+        include DiemConfig::SetAbortsIf<RegisteredCurrencies>{ account: dr_account };
+        /// The same currency code can be only added once.
+        aborts_if Vector::spec_contains(
+            DiemConfig::get<RegisteredCurrencies>().currency_codes,
+            currency_code
+        ) with Errors::INVALID_ARGUMENT;
+    }
+    spec schema AddCurrencyCodeEnsures {
+        currency_code: vector<u8>;
+        // The resulting currency_codes is the one before this function is called, with the new one added to the end.
+        ensures Vector::eq_push_back(get_currency_codes(), old(get_currency_codes()), currency_code);
+        include DiemConfig::SetEnsures<RegisteredCurrencies> {payload: DiemConfig::get<RegisteredCurrencies>()};
     }
 
-    // **************** Specifications ****************
+    // =================================================================
+    // Module Specification
 
-    /// # Module specifications
+    spec module {} // switch documentation context back to module level
+
+    /// # Initialization
 
     spec module {
-        pragma verify = true;
+        /// Global invariant that currency config is always available after genesis.
+        invariant [global] DiemTimestamp::is_operating() ==> DiemConfig::spec_is_published<RegisteredCurrencies>();
+    }
 
-        define spec_singleton_address(): address { 0xF1A95 }
+    /// # Helper Functions
 
-        // spec_is_initialized() is true iff initialize has been called.
-        define spec_is_initialized():bool {
-            LibraConfig::spec_is_published<RegisteredCurrencies>(spec_singleton_address())
+    spec module {
+        /// Helper to get the currency code vector.
+        define get_currency_codes(): vector<vector<u8>> {
+            DiemConfig::get<RegisteredCurrencies>().currency_codes
         }
     }
-
-    /// ## Initialization
-
-    spec fun initialize {
-        /// After `initialize` is called, the module is initialized.
-        pragma aborts_if_is_partial = true;
-
-        // `initialize` aborts if already initialized
-        aborts_if spec_is_initialized();
-        ensures spec_is_initialized();
-    }
-
-    spec schema InitializationPersists {
-        /// *Informally:* Once initialize is run, the module continues to be
-        /// initialized, forever.
-        ensures old(spec_is_initialized()) ==> spec_is_initialized();
-    }
-    spec module {
-        apply InitializationPersists to *;
-    }
-
-    /// ## Uniqueness of the RegisteredCurrencies config.
-
-    spec schema OnlySingletonHasRegisteredCurrencies {
-        // *Informally:* There is no address with a RegisteredCurrencies value before initialization.
-        invariant !spec_is_initialized()
-            ==> (forall addr: address: !LibraConfig::spec_is_published<RegisteredCurrencies>(addr));
-        // *Informally:* After initialization, only singleton_address() has a RegisteredCurrencies value.
-        invariant spec_is_initialized()
-            ==> LibraConfig::spec_is_published<RegisteredCurrencies>(spec_singleton_address())
-                && (forall addr: address:
-                       LibraConfig::spec_is_published<RegisteredCurrencies>(addr)
-                                  ==> addr == spec_singleton_address());
-    }
-    spec module {
-        apply OnlySingletonHasRegisteredCurrencies to *;
-    }
-
-    /// ## Currency codes
-
-    /// Attempting to specify that only `add_currency` changes the currency_codes
-    /// vector.
-    /// **Confused:** I think `initialize` should violate this property unless it
-    /// checks whether the module is already initialized, because it can be
-    /// called a second time, overwriting existing currency_codes.
-    spec schema OnlyAddCurrencyChangesT {
-        ensures old(spec_is_initialized())
-                     ==> old(LibraConfig::spec_get<RegisteredCurrencies>().currency_codes)
-                          == LibraConfig::spec_get<RegisteredCurrencies>().currency_codes;
-    }
-    spec module {
-        /// `add_currency_code` and `initialize` change the currency_code vector.
-        apply OnlyAddCurrencyChangesT to * except add_currency_code;
-    }
-
-    // TODO: currency_code vector is a set (no dups).  (Not satisfied now.)
-    // TODO: add_currency just pushes one thing.
-
 }
-
 }

@@ -1,8 +1,8 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::views::{
-    AccountStateWithProofView, AccountView, BlockMetadata, CurrencyInfoView, EventView,
+    AccountStateWithProofView, AccountView, CurrencyInfoView, EventView, MetadataView,
     StateProofView, TransactionView,
 };
 use anyhow::{ensure, format_err, Error, Result};
@@ -19,7 +19,7 @@ pub enum JsonRpcResponse {
     AccountTransactionResponse(Option<TransactionView>),
     TransactionsResponse(Vec<TransactionView>),
     EventsResponse(Vec<EventView>),
-    BlockMetadataResponse(BlockMetadata),
+    MetadataViewResponse(MetadataView),
     CurrenciesResponse(Vec<CurrencyInfoView>),
     AccountStateWithProofResponse(AccountStateWithProofView),
     NetworkStatusResponse(Number),
@@ -39,7 +39,7 @@ impl TryFrom<(String, Value)> for JsonRpcResponse {
                 );
                 Ok(JsonRpcResponse::SubmissionResponse)
             }
-            "get_account_state" => {
+            "get_account" => {
                 let account = match value {
                     Value::Null => None,
                     _ => {
@@ -54,8 +54,8 @@ impl TryFrom<(String, Value)> for JsonRpcResponse {
                 Ok(JsonRpcResponse::EventsResponse(events))
             }
             "get_metadata" => {
-                let metadata: BlockMetadata = serde_json::from_value(value)?;
-                Ok(JsonRpcResponse::BlockMetadataResponse(metadata))
+                let metadata: MetadataView = serde_json::from_value(value)?;
+                Ok(JsonRpcResponse::MetadataViewResponse(metadata))
             }
             "get_currencies" => {
                 let info: Vec<CurrencyInfoView> = serde_json::from_value(value)?;
@@ -80,6 +80,10 @@ impl TryFrom<(String, Value)> for JsonRpcResponse {
                     }
                 };
                 Ok(JsonRpcResponse::AccountTransactionResponse(txn))
+            }
+            "get_account_transactions" => {
+                let txns: Vec<TransactionView> = serde_json::from_value(value)?;
+                Ok(JsonRpcResponse::TransactionsResponse(txns))
             }
             "get_transactions" => {
                 let txns: Vec<TransactionView> = serde_json::from_value(value)?;
@@ -136,9 +140,9 @@ impl ResponseAsView for EventView {
     }
 }
 
-impl ResponseAsView for BlockMetadata {
+impl ResponseAsView for MetadataView {
     fn from_response(response: JsonRpcResponse) -> Result<Self> {
-        if let JsonRpcResponse::BlockMetadataResponse(metadata) = response {
+        if let JsonRpcResponse::MetadataViewResponse(metadata) = response {
             Ok(metadata)
         } else {
             Self::unexpected_response_error::<Self>(response)
